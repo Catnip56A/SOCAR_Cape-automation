@@ -35,7 +35,7 @@ from openpyxl.utils import column_index_from_string
 # Shared helpers
 # ---------------------------------------------------------------------------
 
-_SKIP_SHEETS = {"__search__", "sheet2", "consdata", "search", "socar-cape"}
+_SKIP_SHEETS: set = set()  # no automatic exclusions — user picks sheets in the UI
 
 
 def _norm(v) -> str:
@@ -238,14 +238,19 @@ def _parse_named_ranges(wb, display_name: str) -> list:
     """
     Extract tables from named ranges equip_start/equip_end and cons_start/cons_end.
     Returns list of result dicts compatible with parse_workbook output.
+
+    All non-skipped sheets that carry named ranges are parsed; the caller
+    (Streamlit multiselect) decides which sheets to include in the comparison.
     """
     sheet_ranges = _collect_named_range_refs(wb)
     results = []
 
-    for sheet_name, ranges in sheet_ranges.items():
-        if sheet_name.strip().lower() in _SKIP_SHEETS:
+    # Iterate in workbook sheet order
+    for sheet_name in wb.sheetnames:
+        ranges = sheet_ranges.get(sheet_name)
+        if not ranges:
             continue
-        if sheet_name not in wb.sheetnames:
+        if sheet_name.strip().lower() in _SKIP_SHEETS:
             continue
 
         ws = wb[sheet_name]
@@ -487,6 +492,7 @@ def parse_workbook(path, sheet_names=None, filename=None) -> list:
             "table_name":   sn,
             "data":         df,
         })
+
 
     return results
 
