@@ -314,33 +314,39 @@ if st.button("Compare", type="primary"):
 
         mc = matched.copy()
         # Columns shared by both DFs get _MR/_CTR suffix; unique columns keep original name.
-        desc_mr  = _find_col(mc, "Description_MR", "Description")
-        desc_ctr = _find_col(mc, "Description_CTR")
-        qty_mr   = _find_col(mc, "Qty_MR",      "Qty")       # MR-only → no suffix
-        unit_mr  = _find_col(mc, "Unit_MR",      "Unit")
-        qty_ctr  = _find_col(mc, "Quantity_CTR", "Quantity")  # CTR-only → no suffix
-        unit_ctr = _find_col(mc, "Unit_CTR")
-        rate_col = _find_col(mc, "Rate_CTR",     "Rate")
+        desc_mr   = _find_col(mc, "Description_MR",  "Description")
+        desc_ctr  = _find_col(mc, "Description_CTR")
+        qty_mr    = _find_col(mc, "Qty_MR",           "Qty")        # MR-only → no suffix
+        unit_mr   = _find_col(mc, "Unit_MR",           "Unit")
+        rech_col  = _find_col(mc, "Rechargeable_MR",  "Rechargeable")  # MR-only
+        alloc_col = _find_col(mc, "Allocation_MR",    "Allocation")     # MR-only
+        qty_ctr   = _find_col(mc, "Quantity_CTR",     "Quantity")   # CTR-only → no suffix
+        unit_ctr  = _find_col(mc, "Unit_CTR")
+        rate_col  = _find_col(mc, "Rate_CTR",         "Rate")
 
         display = pd.DataFrame({"Stock Code": mc["_KEY_"]})
         if src_mr_col in mc.columns:
-            display["MR Document"]  = mc[src_mr_col]
+            display["MR Document"]      = mc[src_mr_col]
         if src_ctr_col and src_ctr_col in mc.columns:
-            display["CTR Document"] = mc[src_ctr_col]
+            display["CTR Document"]     = mc[src_ctr_col]
         if desc_mr:
-            display["Description (MR)"]  = mc[desc_mr]
+            display["Description (MR)"] = mc[desc_mr]
         if desc_ctr:
             display["Description (CTR)"] = mc[desc_ctr]
         if qty_mr:
-            display["Qty (MR)"]   = mc[qty_mr]
+            display["Qty (MR)"]          = mc[qty_mr]
         if unit_mr:
-            display["Unit (MR)"]  = mc[unit_mr]
+            display["Unit (MR)"]         = mc[unit_mr]
+        if rech_col:
+            display["Rechargeable"]      = mc[rech_col]
+        if alloc_col:
+            display["Allocation"]        = mc[alloc_col]
         if qty_ctr:
-            display["Qty (CTR)"]  = mc[qty_ctr]
+            display["Qty (CTR)"]         = mc[qty_ctr]
         if unit_ctr:
-            display["Unit (CTR)"] = mc[unit_ctr]
+            display["Unit (CTR)"]        = mc[unit_ctr]
         if rate_col:
-            display["Rate (CTR)"] = mc[rate_col]
+            display["Rate (CTR)"]        = mc[rate_col]
 
         display = display.sort_values("Stock Code").reset_index(drop=True)
         with st.expander(f"Matched keys ({len(display)})", expanded=True):
