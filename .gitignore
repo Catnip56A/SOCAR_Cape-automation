@@ -1,3 +1,6 @@
+#Test_files
+*TEST_Files/
+
 # Python
 __pycache__/
 *.py[cod]

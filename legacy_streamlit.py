@@ -1,9 +1,11 @@
 """
-mr_ctr_comparator.py  —  Streamlit app
+legacy_streamlit.py — LEGACY web UI (Streamlit)
 
-Compares Material Requisition (MR) and Cost Time Resource (CTR) Excel
-workbooks using fully deterministic, signal-based layout detection.
-No LLM, no hardcoded row numbers, no manual row-range selection.
+This file is kept for reference only.
+The active application is app.py (PySide6 desktop).
+
+Run only if you need the browser-based version:
+    streamlit run legacy_streamlit.py
 """
 
 import re
