@@ -392,6 +392,7 @@ if st.button("Compare", type="primary"):
             octr_dl.insert(1, "Document", only_ctr_df[_sctr].values)
 
         with pd.ExcelWriter(out, engine="openpyxl") as writer:
+            display.to_excel(writer, index=False, sheet_name="Matched")
             diff_df.to_excel(writer, index=False, sheet_name="Differences")
             omr_dl.to_excel(writer, index=False, sheet_name="Only in MR")
             octr_dl.to_excel(writer, index=False, sheet_name="Only in CTR")
