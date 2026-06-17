@@ -118,7 +118,8 @@ st.subheader("Detected tables")
 sel1, sel2 = st.columns(2)
 
 def table_label(t):
-    return f"{t['table_name']}  ({t['n_rows']} rows)"
+    fname = Path(t["source_file"]).stem
+    return f"{fname} › {t['table_name']}  ({t['n_rows']} rows)"
 
 with sel1:
     st.markdown("**MR tables**")
@@ -257,9 +258,15 @@ if st.button("Compare", type="primary"):
     merged = pd.merge(mr, ctr, on="_KEY_", how="outer",
                       suffixes=("_MR", "_CTR"), indicator=True)
 
-    only_mr  = merged[merged["_merge"] == "left_only"]["_KEY_"].tolist()
-    only_ctr = merged[merged["_merge"] == "right_only"]["_KEY_"].tolist()
+    only_mr_df  = merged[merged["_merge"] == "left_only"].copy()
+    only_ctr_df = merged[merged["_merge"] == "right_only"].copy()
+    only_mr  = only_mr_df["_KEY_"].tolist()
+    only_ctr = only_ctr_df["_KEY_"].tolist()
     matched  = merged[merged["_merge"] == "both"]
+
+    # Determine source-file columns after the outer-merge suffix expansion
+    src_mr_col  = "_SourceFile_MR"  if "_SourceFile_MR"  in matched.columns else "_SourceFile"
+    src_ctr_col = "_SourceFile_CTR" if "_SourceFile_CTR" in matched.columns else None
 
     diff_rows = []
     for mr_col, ctr_col in selected_pairs.items():
@@ -274,12 +281,15 @@ if st.button("Compare", type="primary"):
 
         label = mr_col if mr_col == ctr_col else f"{mr_col} / {ctr_col}"
         for idx in matched[mismatch].index:
-            diff_rows.append({
-                "Stock Code": matched.loc[idx, "_KEY_"],
-                "Field":      label,
-                "MR Value":   matched.loc[idx, col_mr],
-                "CTR Value":  matched.loc[idx, col_ctr],
-            })
+            row = {
+                "Stock Code":   matched.loc[idx, "_KEY_"],
+                "MR Document":  matched.loc[idx, src_mr_col] if src_mr_col in matched.columns else "",
+                "CTR Document": matched.loc[idx, src_ctr_col] if src_ctr_col and src_ctr_col in matched.columns else "",
+                "Field":        label,
+                "MR Value":     matched.loc[idx, col_mr],
+                "CTR Value":    matched.loc[idx, col_ctr],
+            }
+            diff_rows.append(row)
 
     diff_df = pd.DataFrame(diff_rows)
 
@@ -313,6 +323,10 @@ if st.button("Compare", type="primary"):
         rate_col = _find_col(mc, "Rate_CTR",     "Rate")
 
         display = pd.DataFrame({"Stock Code": mc["_KEY_"]})
+        if src_mr_col in mc.columns:
+            display["MR Document"]  = mc[src_mr_col]
+        if src_ctr_col and src_ctr_col in mc.columns:
+            display["CTR Document"] = mc[src_ctr_col]
         if desc_mr:
             display["Description (MR)"]  = mc[desc_mr]
         if desc_ctr:
@@ -341,22 +355,40 @@ if st.button("Compare", type="primary"):
 
     if only_mr:
         with st.expander(f"Keys only in MR ({len(only_mr)})"):
-            st.dataframe(pd.DataFrame({"Stock Code (MR only)": only_mr}),
-                         use_container_width=True)
+            omr = pd.DataFrame({"Stock Code": only_mr_df["_KEY_"].values})
+            _s = "_SourceFile_MR" if "_SourceFile_MR" in only_mr_df.columns else (
+                "_SourceFile" if "_SourceFile" in only_mr_df.columns else None)
+            if _s:
+                omr.insert(1, "Document", only_mr_df[_s].values)
+            st.dataframe(omr, use_container_width=True)
     if only_ctr:
         with st.expander(f"Keys only in CTR ({len(only_ctr)})"):
-            st.dataframe(pd.DataFrame({"Stock Code (CTR only)": only_ctr}),
-                         use_container_width=True)
+            octr = pd.DataFrame({"Stock Code": only_ctr_df["_KEY_"].values})
+            _s = "_SourceFile_CTR" if "_SourceFile_CTR" in only_ctr_df.columns else (
+                "_SourceFile" if "_SourceFile" in only_ctr_df.columns else None)
+            if _s:
+                octr.insert(1, "Document", only_ctr_df[_s].values)
+            st.dataframe(octr, use_container_width=True)
 
     # --- Download ---
     if not diff_df.empty or only_mr or only_ctr:
         out = BytesIO()
+        omr_dl  = pd.DataFrame({"Stock Code": only_mr_df["_KEY_"].values})
+        _smr = "_SourceFile_MR" if "_SourceFile_MR" in only_mr_df.columns else (
+            "_SourceFile" if "_SourceFile" in only_mr_df.columns else None)
+        if _smr:
+            omr_dl.insert(1, "Document", only_mr_df[_smr].values)
+
+        octr_dl = pd.DataFrame({"Stock Code": only_ctr_df["_KEY_"].values})
+        _sctr = "_SourceFile_CTR" if "_SourceFile_CTR" in only_ctr_df.columns else (
+            "_SourceFile" if "_SourceFile" in only_ctr_df.columns else None)
+        if _sctr:
+            octr_dl.insert(1, "Document", only_ctr_df[_sctr].values)
+
         with pd.ExcelWriter(out, engine="openpyxl") as writer:
             diff_df.to_excel(writer, index=False, sheet_name="Differences")
-            pd.DataFrame({"Key (MR only)":  only_mr}).to_excel(
-                writer, index=False, sheet_name="Only in MR")
-            pd.DataFrame({"Key (CTR only)": only_ctr}).to_excel(
-                writer, index=False, sheet_name="Only in CTR")
+            omr_dl.to_excel(writer, index=False, sheet_name="Only in MR")
+            octr_dl.to_excel(writer, index=False, sheet_name="Only in CTR")
         st.download_button(
             "Download report (Excel)",
             data=out.getvalue(),
