@@ -22,7 +22,7 @@ from PySide6.QtWidgets import (
     QFormLayout, QFrame, QGroupBox, QHBoxLayout, QHeaderView,
     QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow,
     QMessageBox, QProgressDialog, QPushButton, QScrollArea,
-    QSplitter, QStackedWidget, QTabWidget,
+    QSplitter, QStackedWidget, QStyle, QStyledItemDelegate, QTabWidget,
     QTableView, QVBoxLayout, QWidget,
 )
 
@@ -181,10 +181,23 @@ _CTR_EMPTY = QColor("#EFF9F6")   # very light teal — CTR cell, no data
 # DataFrame → QTableView adapter
 # ─────────────────────────────────────────────────────────────────────────────
 
+_MISMATCH_BG = QColor("#FFCDD2")   # light red — mismatched cell
+_MISMATCH_FG = QColor("#B71C1C")   # dark red  — mismatched cell text
+
+
 class PandasModel(QAbstractTableModel):
     def __init__(self, df: pd.DataFrame, parent=None):
         super().__init__(parent)
         self._df = df.reset_index(drop=True)
+        self._highlights: set[tuple[int, str]] = set()  # (src_row, col_name)
+
+    def set_highlights(self, cells: set[tuple[int, str]]):
+        self._highlights = cells
+        if self.rowCount() > 0 and self.columnCount() > 0:
+            self.dataChanged.emit(
+                self.index(0, 0),
+                self.index(self.rowCount() - 1, self.columnCount() - 1),
+            )
 
     def rowCount(self, parent=QModelIndex()):    return len(self._df)
     def columnCount(self, parent=QModelIndex()): return len(self._df.columns)
@@ -199,6 +212,16 @@ class PandasModel(QAbstractTableModel):
             if isinstance(val, float) and pd.isna(val):
                 return ""
             return str(val) if val is not None else ""
+
+        # Mismatch highlight overrides all other cell colours
+        is_mismatch = (index.row(), col_name) in self._highlights
+        if role == Qt.ItemDataRole.UserRole:
+            return is_mismatch
+        if is_mismatch:
+            if role == Qt.ItemDataRole.BackgroundRole:
+                return QBrush(_MISMATCH_BG)
+            if role == Qt.ItemDataRole.ForegroundRole:
+                return QBrush(_MISMATCH_FG)
 
         if role == Qt.ItemDataRole.BackgroundRole:
             side = _col_side(col_name)
@@ -229,6 +252,35 @@ class PandasModel(QAbstractTableModel):
         return None
 
 
+class ResultTableDelegate(QStyledItemDelegate):
+    """Keeps mismatch cells visibly red even when the row is selected.
+
+    Qt's selection layer is normally opaque and paints over BackgroundRole.
+    For mismatch cells we take over paint(), draw the red background first,
+    then lay a semi-transparent blue tint so the selection is still
+    perceptible, and finally draw the text in dark red.
+    """
+    _SEL_TINT = QColor(25, 118, 210, 45)   # PRIMARY at ~18 % opacity
+
+    def paint(self, painter, option, index):
+        is_mismatch = bool(index.data(Qt.ItemDataRole.UserRole))
+        is_selected = bool(option.state & QStyle.StateFlag.State_Selected)
+
+        if is_mismatch and is_selected:
+            painter.save()
+            painter.fillRect(option.rect, _MISMATCH_BG)
+            painter.fillRect(option.rect, self._SEL_TINT)
+            text = str(index.data(Qt.ItemDataRole.DisplayRole) or "")
+            painter.setPen(_MISMATCH_FG)
+            painter.drawText(
+                option.rect.adjusted(6, 0, -4, 0),
+                Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+                text)
+            painter.restore()
+        else:
+            super().paint(painter, option, index)
+
+
 def _make_view(compact: bool = False) -> QTableView:
     v = QTableView()
     v.setAlternatingRowColors(True)
@@ -257,6 +309,7 @@ def _result_stack(empty_msg: str) -> tuple[QStackedWidget, QTableView]:
     stack = QStackedWidget()
     stack.addWidget(EmptyState(empty_msg))
     view = _make_view()
+    view.setItemDelegate(ResultTableDelegate(view))
     stack.addWidget(view)
     return stack, view
 
@@ -359,6 +412,8 @@ class MainWindow(QMainWindow):
         self._omr_dl     = pd.DataFrame()
         self._octr_dl    = pd.DataFrame()
         self._workers:   list = []
+        self._mismatch_rows: list[int] = []   # source-model rows with any mismatch
+        self._mismatch_pos:  int       = -1   # current navigation position
 
         self._build_ui()
         self._set_status("Upload MR and CTR files to begin.")
@@ -496,6 +551,11 @@ class MainWindow(QMainWindow):
         b, self._m_matched  = _metric_box(
             "Matched keys", PRIMARY,
             "Items found in both MR and CTR, matched by the join key.")
+        self._mismatch_lbl = QLabel()
+        self._mismatch_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._mismatch_lbl.setTextFormat(Qt.TextFormat.RichText)
+        self._mismatch_lbl.setVisible(False)
+        b.layout().addWidget(self._mismatch_lbl)
         mrow.addWidget(b)
         b, self._m_only_mr  = _metric_box(
             "Only in MR", MR_COLOR,
@@ -530,6 +590,61 @@ class MainWindow(QMainWindow):
         self._tabs.addTab(self._stack_matched,  "Matched")
         self._tabs.addTab(self._stack_only_mr,  "Only in MR")
         self._tabs.addTab(self._stack_only_ctr, "Only in CTR")
+
+        # Corner toolbar: navigate between mismatches + toggle highlight
+        _corner = QWidget()
+        _cl = QHBoxLayout(_corner)
+        _cl.setContentsMargins(0, 2, 6, 0)
+        _cl.setSpacing(3)
+
+        nav_css = f"""
+            QPushButton {{
+                background: white; border: 1px solid {BORDER};
+                border-radius: 4px; font-size: 13px;
+                min-width: 26px; min-height: 24px; max-width: 26px; max-height: 24px;
+            }}
+            QPushButton:hover    {{ border-color: {PRIMARY}; color: {PRIMARY}; }}
+            QPushButton:disabled {{ color: {BORDER}; }}
+        """
+        self._prev_mm_btn = QPushButton("↑")
+        self._prev_mm_btn.setToolTip("Jump to previous mismatched row  (Qty or Unit differs)")
+        self._prev_mm_btn.setStyleSheet(nav_css)
+        self._prev_mm_btn.setEnabled(False)
+        self._prev_mm_btn.clicked.connect(lambda: self._nav_mismatch(-1))
+
+        self._next_mm_btn = QPushButton("↓")
+        self._next_mm_btn.setToolTip("Jump to next mismatched row  (Qty or Unit differs)")
+        self._next_mm_btn.setStyleSheet(nav_css)
+        self._next_mm_btn.setEnabled(False)
+        self._next_mm_btn.clicked.connect(lambda: self._nav_mismatch(+1))
+
+        self._compare_vals_btn = QPushButton("Compare Values")
+        self._compare_vals_btn.setCheckable(True)
+        self._compare_vals_btn.setEnabled(False)
+        self._compare_vals_btn.setToolTip(
+            "Highlight rows where Qty or Unit differs between MR and CTR.\n"
+            "Use ↑ ↓ to jump between mismatches. Click again to clear.")
+        self._compare_vals_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: white; color: {PRIMARY};
+                border: 1px solid {PRIMARY}; border-radius: 4px;
+                padding: 2px 10px; font-size: 11px;
+                min-height: 24px;
+            }}
+            QPushButton:checked {{
+                background: #FFEBEE; color: #C62828;
+                border: 1.5px solid #C62828; font-weight: bold;
+            }}
+            QPushButton:disabled {{ color: {BORDER}; border-color: {BORDER}; }}
+        """)
+        self._compare_vals_btn.toggled.connect(self._apply_value_highlights)
+
+        _cl.addWidget(self._prev_mm_btn)
+        _cl.addWidget(self._next_mm_btn)
+        _cl.addSpacing(4)
+        _cl.addWidget(self._compare_vals_btn)
+        self._tabs.setCornerWidget(_corner)
+
         res_l.addWidget(self._tabs)
 
         # Download button
@@ -846,9 +961,6 @@ class MainWindow(QMainWindow):
                           unit pair → MR-only fields → CTR-only fields.
             """
             out = pd.DataFrame({"Stock Code": df["_KEY_"].values})
-            # Source documents
-            out["MR Document"]  = df[src_mr].values  if src_mr  in df.columns else ""
-            out["CTR Document"] = df[src_ctr].values if (src_ctr and src_ctr in df.columns) else ""
             # Description pair (side by side)
             if desc_mr:  out["Description (MR)"]  = df[desc_mr].values
             if desc_ctr: out["Description (CTR)"] = df[desc_ctr].values
@@ -863,6 +975,9 @@ class MainWindow(QMainWindow):
             if alloc_col: out["Allocation"]   = df[alloc_col].values
             # CTR-only fields
             if rate_col:  out["Rate (CTR)"]   = df[rate_col].values
+            # Source documents — rightmost so they don't crowd the comparison columns
+            out["MR Document"]  = df[src_mr].values  if src_mr  in df.columns else ""
+            out["CTR Document"] = df[src_ctr].values if (src_ctr and src_ctr in df.columns) else ""
             return out.sort_values("Stock Code").reset_index(drop=True)
 
         self._display_df = _build_display(matched)
@@ -891,6 +1006,17 @@ class MainWindow(QMainWindow):
         self._download_btn.setEnabled(True)
         self._step_bar.set_step(2)
 
+        # Reset value-comparison state (new data loaded, old highlights gone)
+        self._compare_vals_btn.blockSignals(True)
+        self._compare_vals_btn.setChecked(False)
+        self._compare_vals_btn.blockSignals(False)
+        self._compare_vals_btn.setEnabled(not self._display_df.empty)
+        self._mismatch_rows = []
+        self._mismatch_pos  = -1
+        self._prev_mm_btn.setEnabled(False)
+        self._next_mm_btn.setEnabled(False)
+        self._mismatch_lbl.setVisible(False)
+
         # Expand results panel to take ~70 % of the window height
         if not self._results_w.isVisible():
             self._results_w.setVisible(True)
@@ -904,6 +1030,99 @@ class MainWindow(QMainWindow):
             f"{len(only_mr_df)} only in MR · "
             f"{len(only_ctr_df)} only in CTR."
         )
+
+    # ── Value comparison highlights ───────────────────────────────────────────
+
+    def _apply_value_highlights(self, active: bool):
+        proxy = self._tab_matched.model()
+        if proxy is None:
+            return
+        source: PandasModel = proxy.sourceModel()
+
+        if not active or self._display_df.empty:
+            source.set_highlights(set())
+            self._mismatch_rows = []
+            self._mismatch_pos  = -1
+            self._prev_mm_btn.setEnabled(False)
+            self._next_mm_btn.setEnabled(False)
+            self._mismatch_lbl.setVisible(False)
+            return
+
+        df = self._display_df
+
+        def _norm(v) -> str:
+            s = str(v).strip()
+            return "" if s.lower() in ("nan", "none", "") else s
+
+        def _differs(a, b) -> bool:
+            sa, sb = _norm(a), _norm(b)
+            if sa == sb:
+                return False
+            try:                          # treat "1" and "1.0" as equal
+                return float(sa) != float(sb)
+            except (ValueError, TypeError):
+                return True               # non-numeric: fall back to string compare
+
+        mismatch_cells: set[tuple[int, str]] = set()
+        mismatch_row_set: set[int] = set()
+
+        for col_mr, col_ctr in [("Qty (MR)", "Qty (CTR)"), ("Unit (MR)", "Unit (CTR)")]:
+            if col_mr not in df.columns or col_ctr not in df.columns:
+                continue
+            for row_idx in range(len(df)):
+                if _differs(df.iloc[row_idx][col_mr], df.iloc[row_idx][col_ctr]):
+                    mismatch_cells.add((row_idx, col_mr))
+                    mismatch_cells.add((row_idx, col_ctr))
+                    mismatch_row_set.add(row_idx)
+
+        source.set_highlights(mismatch_cells)
+        self._mismatch_rows = sorted(mismatch_row_set)
+        self._mismatch_pos  = 0 if self._mismatch_rows else -1
+
+        has = len(self._mismatch_rows) > 0
+        self._prev_mm_btn.setEnabled(has)
+        self._next_mm_btn.setEnabled(has)
+
+        if has:
+            n = len(self._mismatch_rows)
+            self._mismatch_lbl.setText(
+                f'<span style="color:#C62828; font-size:11px;">'
+                f'&#9888;&nbsp; {n} value mismatch{"es" if n != 1 else ""}'
+                f'</span>')
+            self._mismatch_lbl.setVisible(True)
+            self._nav_mismatch(0, absolute=True)   # scroll to first match
+            self._set_status(
+                f"Compare Values — {n} row{'s' if n != 1 else ''} with "
+                "Qty or Unit mismatch highlighted in red.")
+        else:
+            self._mismatch_lbl.setText(
+                '<span style="color:#2E7D32; font-size:11px;">'
+                '&#10003;&nbsp; All values match'
+                '</span>')
+            self._mismatch_lbl.setVisible(True)
+            self._set_status("Compare Values — no Qty or Unit mismatches found.")
+
+    def _nav_mismatch(self, step: int, absolute: bool = False):
+        if not self._mismatch_rows:
+            return
+        n = len(self._mismatch_rows)
+        if absolute:
+            self._mismatch_pos = step          # step is the target index
+        else:
+            self._mismatch_pos = (self._mismatch_pos + step) % n
+
+        src_row = self._mismatch_rows[self._mismatch_pos]
+        proxy   = self._tab_matched.model()
+        if proxy is None:
+            return
+        src_idx   = proxy.sourceModel().index(src_row, 0)
+        proxy_idx = proxy.mapFromSource(src_idx)
+        self._tab_matched.scrollTo(
+            proxy_idx, QAbstractItemView.ScrollHint.PositionAtCenter)
+        self._tab_matched.setCurrentIndex(proxy_idx)
+        self._set_status(
+            f"Mismatch {self._mismatch_pos + 1} of {n}  — "
+            f"Stock Code: {self._display_df.iloc[src_row]['Stock Code']}")
 
     # ── Download ──────────────────────────────────────────────────────────────
 
