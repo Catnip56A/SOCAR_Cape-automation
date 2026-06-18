@@ -18,12 +18,12 @@ from PySide6.QtCore import (
 )
 from PySide6.QtGui import QBrush, QColor, QFont, QPainter, QPen
 from PySide6.QtWidgets import (
-    QAbstractItemView, QApplication, QComboBox, QFileDialog,
+    QAbstractItemView, QApplication, QCheckBox, QComboBox, QFileDialog,
     QFormLayout, QFrame, QGroupBox, QHBoxLayout, QHeaderView,
     QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow,
     QMessageBox, QProgressDialog, QPushButton, QScrollArea,
-    QSplitter, QStackedWidget, QTabWidget, QTableView, QVBoxLayout,
-    QWidget,
+    QSplitter, QStackedWidget, QTabWidget,
+    QTableView, QVBoxLayout, QWidget,
 )
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -156,6 +156,28 @@ class EmptyState(QWidget):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Column-side detection (drives cell / header coloring)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _col_side(col_name: str) -> str:
+    """Return 'mr', 'ctr', or '' (neutral) for a display column name."""
+    if "(MR)" in col_name or col_name in ("MR Document", "Rechargeable", "Allocation"):
+        return "mr"
+    if "(CTR)" in col_name or col_name == "CTR Document":
+        return "ctr"
+    return ""
+
+
+# Cell background colours (filled vs empty within MR/CTR columns)
+_MR_FILL   = QColor("#DDEEFF")   # light blue — MR cell with data
+_MR_EMPTY  = QColor("#F2F7FF")   # very light blue — MR cell, no data
+_CTR_FILL  = QColor("#D6F0EA")   # light teal — CTR cell with data
+_CTR_EMPTY = QColor("#EFF9F6")   # very light teal — CTR cell, no data
+
+
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # DataFrame → QTableView adapter
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -164,23 +186,47 @@ class PandasModel(QAbstractTableModel):
         super().__init__(parent)
         self._df = df.reset_index(drop=True)
 
-    def rowCount(self, parent=QModelIndex()):   return len(self._df)
+    def rowCount(self, parent=QModelIndex()):    return len(self._df)
     def columnCount(self, parent=QModelIndex()): return len(self._df.columns)
 
     def data(self, index, role=Qt.ItemDataRole.DisplayRole):
-        if not index.isValid() or role != Qt.ItemDataRole.DisplayRole:
+        if not index.isValid():
             return None
-        val = self._df.iloc[index.row(), index.column()]
-        if isinstance(val, float) and pd.isna(val):
-            return ""
-        return str(val) if val is not None else ""
+        col_name = str(self._df.columns[index.column()])
+        val      = self._df.iloc[index.row(), index.column()]
+
+        if role == Qt.ItemDataRole.DisplayRole:
+            if isinstance(val, float) and pd.isna(val):
+                return ""
+            return str(val) if val is not None else ""
+
+        if role == Qt.ItemDataRole.BackgroundRole:
+            side = _col_side(col_name)
+            if side:
+                is_empty = (val is None
+                            or (isinstance(val, float) and pd.isna(val))
+                            or str(val).strip() == "")
+                if side == "mr":
+                    return QBrush(_MR_EMPTY if is_empty else _MR_FILL)
+                return QBrush(_CTR_EMPTY if is_empty else _CTR_FILL)
+
+        return None
 
     def headerData(self, section, orientation, role=Qt.ItemDataRole.DisplayRole):
-        if role != Qt.ItemDataRole.DisplayRole:
-            return None
         if orientation == Qt.Orientation.Horizontal:
-            return str(self._df.columns[section])
-        return str(section + 1)
+            col_name = str(self._df.columns[section])
+            if role == Qt.ItemDataRole.DisplayRole:
+                return col_name
+            if role == Qt.ItemDataRole.ForegroundRole:
+                side = _col_side(col_name)
+                if side == "mr":
+                    return QBrush(QColor(MR_COLOR))
+                if side == "ctr":
+                    return QBrush(QColor(CTR_COLOR))
+            return None
+        if role == Qt.ItemDataRole.DisplayRole:
+            return str(section + 1)
+        return None
 
 
 def _make_view(compact: bool = False) -> QTableView:
@@ -235,6 +281,17 @@ def _group_css(color: str) -> str:
             left: 10px;
             padding: 0 4px;
             background: white;
+        }}
+        QHeaderView::section {{
+            background: #F2F2F2;
+            color: #333333;
+            border: none;
+            border-bottom: 1px solid #CCCCCC;
+            border-right: 1px solid #CCCCCC;
+            padding: 3px 6px;
+        }}
+        QHeaderView::section:last {{
+            border-right: none;
         }}
     """
 
@@ -543,7 +600,6 @@ class MainWindow(QMainWindow):
         table_lw = QListWidget()
         table_lw.setFixedHeight(96)
         table_lw.setToolTip(table_tip)
-        table_lw.itemChanged.connect(self._on_table_sel_changed)
         tbl.addWidget(table_lw)
 
         prev_label = QLabel(f"Preview — selected {label} data")
@@ -642,22 +698,23 @@ class MainWindow(QMainWindow):
         worker.start()
 
     def _fill_table_list(self, lw: QListWidget, tables: list):
-        lw.blockSignals(True)
         lw.clear()
         for t in tables:
-            stem = Path(t["source_file"]).stem
-            item = QListWidgetItem(
-                f"{stem} › {t['table_name']}  ({len(t['data'])} rows)"
-            )
-            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-            item.setCheckState(Qt.CheckState.Checked)
-            item.setToolTip(
-                f"File: {t['source_file']}\n"
-                f"Sheet: {t['source_sheet']}\n"
-                f"Rows: {len(t['data'])}"
-            )
+            stem  = Path(t["source_file"]).stem
+            label = f"{stem} › {t['table_name']}  ({len(t['data'])} rows)"
+            tip   = (f"File: {t['source_file']}\n"
+                     f"Sheet: {t['source_sheet']}\n"
+                     f"Rows: {len(t['data'])}")
+            item = QListWidgetItem()
+            item.setFlags(Qt.ItemFlag.ItemIsEnabled)
             lw.addItem(item)
-        lw.blockSignals(False)
+            cb = QCheckBox(label)
+            cb.setChecked(True)
+            cb.setToolTip(tip)
+            # connect after setChecked so the initial toggle doesn't fire yet
+            cb.toggled.connect(lambda _: self._on_table_sel_changed())
+            lw.setItemWidget(item, cb)
+            item.setSizeHint(cb.sizeHint())
 
     # ── Table selection ───────────────────────────────────────────────────────
 
@@ -669,11 +726,11 @@ class MainWindow(QMainWindow):
         self._update_state()
 
     def _concat_checked(self, lw: QListWidget, tables: list) -> pd.DataFrame:
-        parts = [
-            tables[i]["data"]
-            for i in range(lw.count())
-            if lw.item(i).checkState() == Qt.CheckState.Checked and i < len(tables)
-        ]
+        parts = []
+        for i in range(min(lw.count(), len(tables))):
+            w = lw.itemWidget(lw.item(i))
+            if isinstance(w, QCheckBox) and w.isChecked():
+                parts.append(tables[i]["data"])
         return pd.concat(parts, ignore_index=True, sort=False) if parts else pd.DataFrame()
 
     # ── Settings ──────────────────────────────────────────────────────────────
@@ -765,49 +822,52 @@ class MainWindow(QMainWindow):
         only_ctr_df = merged[merged["_merge"] == "right_only"].copy()
         matched     = merged[merged["_merge"] == "both"].copy()
 
-        src_mr  = "_SourceFile_MR"  if "_SourceFile_MR"  in matched.columns else "_SourceFile"
-        src_ctr = "_SourceFile_CTR" if "_SourceFile_CTR" in matched.columns else None
+        src_mr  = "_SourceFile_MR"  if "_SourceFile_MR"  in merged.columns else "_SourceFile"
+        src_ctr = "_SourceFile_CTR" if "_SourceFile_CTR" in merged.columns else None
 
-        # Matched display
-        mc = matched
-        desc_mr   = _find_col(mc, "Description_MR",  "Description")
-        desc_ctr  = _find_col(mc, "Description_CTR")
-        qty_mr    = _find_col(mc, "Qty_MR",           "Qty")
-        unit_mr   = _find_col(mc, "Unit_MR",           "Unit")
-        rech_col  = _find_col(mc, "Rechargeable_MR",  "Rechargeable")
-        alloc_col = _find_col(mc, "Allocation_MR",    "Allocation")
-        qty_ctr   = _find_col(mc, "Quantity_CTR",     "Quantity")
-        unit_ctr  = _find_col(mc, "Unit_CTR")
-        rate_col  = _find_col(mc, "Rate_CTR",         "Rate")
+        # Resolve column references once from the full merged frame so every
+        # subset (matched / only_mr / only_ctr) can reuse them.
+        desc_mr   = _find_col(merged, "Description_MR",  "Description")
+        desc_ctr  = _find_col(merged, "Description_CTR")
+        qty_mr    = _find_col(merged, "Qty_MR",           "Qty")
+        unit_mr   = _find_col(merged, "Unit_MR",           "Unit")
+        rech_col  = _find_col(merged, "Rechargeable_MR",  "Rechargeable")
+        alloc_col = _find_col(merged, "Allocation_MR",    "Allocation")
+        qty_ctr   = _find_col(merged, "Quantity_CTR",     "Quantity")
+        unit_ctr  = _find_col(merged, "Unit_CTR")
+        rate_col  = _find_col(merged, "Rate_CTR",         "Rate")
 
-        display = pd.DataFrame({"Stock Code": mc["_KEY_"].values})
-        if src_mr in mc.columns:
-            display["MR Document"]      = mc[src_mr].values
-        if src_ctr and src_ctr in mc.columns:
-            display["CTR Document"]     = mc[src_ctr].values
-        if desc_mr:   display["Description (MR)"]  = mc[desc_mr].values
-        if desc_ctr:  display["Description (CTR)"] = mc[desc_ctr].values
-        if qty_mr:    display["Qty (MR)"]           = mc[qty_mr].values
-        if unit_mr:   display["Unit (MR)"]          = mc[unit_mr].values
-        if rech_col:  display["Rechargeable"]       = mc[rech_col].values
-        if alloc_col: display["Allocation"]         = mc[alloc_col].values
-        if qty_ctr:   display["Qty (CTR)"]          = mc[qty_ctr].values
-        if unit_ctr:  display["Unit (CTR)"]         = mc[unit_ctr].values
-        if rate_col:  display["Rate (CTR)"]         = mc[rate_col].values
-        self._display_df = display.sort_values("Stock Code").reset_index(drop=True)
-
-        def _only_df(df: pd.DataFrame, src_col: str | None) -> pd.DataFrame:
+        def _build_display(df: pd.DataFrame) -> pd.DataFrame:
+            """
+            Build the standardised display table for any merge subset.
+            Columns that don't exist on one side will contain NaN (shown as
+            blank, tinted with the appropriate side colour).
+            Column order: key → docs → description pair → qty pair →
+                          unit pair → MR-only fields → CTR-only fields.
+            """
             out = pd.DataFrame({"Stock Code": df["_KEY_"].values})
-            if src_col and src_col in df.columns:
-                out.insert(1, "Document", df[src_col].values)
-            return out
+            # Source documents
+            out["MR Document"]  = df[src_mr].values  if src_mr  in df.columns else ""
+            out["CTR Document"] = df[src_ctr].values if (src_ctr and src_ctr in df.columns) else ""
+            # Description pair (side by side)
+            if desc_mr:  out["Description (MR)"]  = df[desc_mr].values
+            if desc_ctr: out["Description (CTR)"] = df[desc_ctr].values
+            # Qty pair (side by side)
+            if qty_mr:   out["Qty (MR)"]   = df[qty_mr].values
+            if qty_ctr:  out["Qty (CTR)"]  = df[qty_ctr].values
+            # Unit pair (side by side)
+            if unit_mr:  out["Unit (MR)"]  = df[unit_mr].values
+            if unit_ctr: out["Unit (CTR)"] = df[unit_ctr].values
+            # MR-only fields
+            if rech_col:  out["Rechargeable"] = df[rech_col].values
+            if alloc_col: out["Allocation"]   = df[alloc_col].values
+            # CTR-only fields
+            if rate_col:  out["Rate (CTR)"]   = df[rate_col].values
+            return out.sort_values("Stock Code").reset_index(drop=True)
 
-        src_omr  = "_SourceFile_MR"  if "_SourceFile_MR"  in only_mr_df.columns  else (
-                   "_SourceFile"     if "_SourceFile"      in only_mr_df.columns  else None)
-        src_octr = "_SourceFile_CTR" if "_SourceFile_CTR" in only_ctr_df.columns else (
-                   "_SourceFile"     if "_SourceFile"      in only_ctr_df.columns else None)
-        self._omr_dl  = _only_df(only_mr_df,  src_omr)
-        self._octr_dl = _only_df(only_ctr_df, src_octr)
+        self._display_df = _build_display(matched)
+        self._omr_dl     = _build_display(only_mr_df)
+        self._octr_dl    = _build_display(only_ctr_df)
 
         # Update metrics
         self._m_matched.setText(str(len(matched)))
