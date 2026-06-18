@@ -41,13 +41,35 @@ The `.exe` bundles Python, PySide6, pandas, and openpyxl — colleagues need not
 
 > **Important:** the build must run on **Windows** (not WSL), since PyInstaller targets the OS it runs on.
 
-On Windows (PowerShell or CMD):
+### How this was actually built (WSL project → Windows PyInstaller)
 
-```powershell
-just setup
-just build
-# Output: dist\MR_CTR_Comparator.exe
-```
+The source code lives in WSL, but the build runs in a **Windows PowerShell** session that points at the WSL filesystem via `\\wsl$\<distro>`.
+
+1. **Find your WSL distro name** (run this in PowerShell):
+   ```powershell
+   wsl --list
+   ```
+   The distro name shown (e.g. `Ubuntu-22.04`) is what you use in the path below.
+
+2. **Open PowerShell and navigate to the project**:
+   ```powershell
+   cd "\\wsl$\Ubuntu-22.04\home\alhiko56\projects\SOCAR_Cape-automation"
+   ```
+
+3. **Install dependencies** (`uv` may not be on the Windows PATH — use plain pip instead):
+   ```powershell
+   pip install PySide6 pandas openpyxl pyinstaller
+   ```
+
+4. **Build the exe**:
+   ```powershell
+   python -m PyInstaller app.spec
+   ```
+   Note the capital `P` in `PyInstaller` — use `python -m PyInstaller` if `pyinstaller` is not found directly.
+
+5. **Collect the output** from `dist\MR_CTR_Comparator.exe` — copy it to wherever you want to distribute it.
+
+> **Tip:** if `\\wsl$\Ubuntu` gives a "path not found" error, run `wsl --list` to get the exact distro name (it is often `Ubuntu-22.04`, not just `Ubuntu`).
 
 Or use GitHub Actions (see `.github/workflows/` if configured) to build automatically on push and download the artifact from the Actions tab.
 
