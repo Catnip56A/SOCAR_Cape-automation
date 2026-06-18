@@ -46,5 +46,5 @@ exe = EXE(
     runtime_tmpdir=None,
     console=False,       # no black console window behind the app
     windowed=True,
-    icon=None,           # replace with "icon.ico" if you have one
+    icon="app_icon.ico",
 )

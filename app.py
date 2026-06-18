@@ -1160,6 +1160,19 @@ class MainWindow(QMainWindow):
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
+    # Suppress the black shadow artifact that appears on X11/WSL without a
+    # compositor. Setting an explicit stylesheet disables Qt's drop-shadow
+    # and gives the tooltip a clean, solid border instead.
+    app.setStyleSheet("""
+        QToolTip {
+            background-color: #FAFAFA;
+            color: #212121;
+            border: 1px solid #BDBDBD;
+            padding: 4px 6px;
+            border-radius: 3px;
+            opacity: 255;
+        }
+    """)
     win = MainWindow()
     win.show()
     sys.exit(app.exec())
