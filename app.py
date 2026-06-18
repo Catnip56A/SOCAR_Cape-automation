@@ -20,7 +20,7 @@ from PySide6.QtWidgets import (
     QFormLayout, QFrame, QGroupBox, QHBoxLayout, QHeaderView,
     QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow,
     QMessageBox, QProgressDialog, QPushButton, QScrollArea,
-    QSizePolicy, QSplitter, QTabWidget, QTableView, QVBoxLayout,
+    QSplitter, QTabWidget, QTableView, QVBoxLayout,
     QWidget,
 )
 
@@ -147,7 +147,6 @@ class MainWindow(QMainWindow):
         self._ctr_df = pd.DataFrame()
         # kept for download
         self._display_df = pd.DataFrame()
-        self._diff_df    = pd.DataFrame()
         self._omr_dl     = pd.DataFrame()
         self._octr_dl    = pd.DataFrame()
         self._workers: list = []   # prevent GC of running threads
@@ -212,11 +211,6 @@ class MainWindow(QMainWindow):
         key_row.addLayout(ctr_form)
         s_layout.addLayout(key_row)
 
-        s_layout.addWidget(QLabel("Fields to compare:"))
-        self._fields_list = QListWidget()
-        self._fields_list.setFixedHeight(110)
-        self._fields_list.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
-        s_layout.addWidget(self._fields_list)
         ctrl_layout.addWidget(settings_box)
 
         # Compare button
@@ -240,7 +234,6 @@ class MainWindow(QMainWindow):
         metrics_row = QHBoxLayout()
         for attr, label in [
             ("_m_matched",  "Matched keys"),
-            ("_m_diffs",    "Field differences"),
             ("_m_only_mr",  "Only in MR"),
             ("_m_only_ctr", "Only in CTR"),
         ]:
@@ -262,14 +255,12 @@ class MainWindow(QMainWindow):
         self._tab_prev_mr  = _make_view()
         self._tab_prev_ctr = _make_view()
         self._tab_matched  = _make_view()
-        self._tab_diffs    = _make_view()
         self._tab_only_mr  = _make_view()
         self._tab_only_ctr = _make_view()
         for view, title in [
             (self._tab_prev_mr,  "Preview MR"),
             (self._tab_prev_ctr, "Preview CTR"),
             (self._tab_matched,  "Matched"),
-            (self._tab_diffs,    "Differences"),
             (self._tab_only_mr,  "Only in MR"),
             (self._tab_only_ctr, "Only in CTR"),
         ]:
@@ -425,22 +416,6 @@ class MainWindow(QMainWindow):
                 cb.setCurrentText(default)
             cb.blockSignals(False)
 
-        mr_key  = self._mr_key_cb.currentText()
-        ctr_key = self._ctr_key_cb.currentText()
-        mr_norm  = {normalize_col(c): c for c in mr_cols  if c != mr_key}
-        ctr_norm = {normalize_col(c): c for c in ctr_cols if c != ctr_key}
-        shared = sorted(set(mr_norm) & set(ctr_norm))
-
-        self._fields_list.blockSignals(True)
-        self._fields_list.clear()
-        for n in shared:
-            a, b = mr_norm[n], ctr_norm[n]
-            item = QListWidgetItem(a if a == b else f"{a} ↔ {b}")
-            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-            item.setCheckState(Qt.CheckState.Checked)
-            item.setData(Qt.ItemDataRole.UserRole, (a, b))
-            self._fields_list.addItem(item)
-        self._fields_list.blockSignals(False)
 
     # ── Preview ───────────────────────────────────────────────────────────────
 
@@ -496,36 +471,7 @@ class MainWindow(QMainWindow):
         src_mr  = "_SourceFile_MR"  if "_SourceFile_MR"  in matched.columns else "_SourceFile"
         src_ctr = "_SourceFile_CTR" if "_SourceFile_CTR" in matched.columns else None
 
-        # Field differences
-        selected_pairs: dict[str, str] = {}
-        for i in range(self._fields_list.count()):
-            item = self._fields_list.item(i)
-            if item.checkState() == Qt.CheckState.Checked:
-                a, b = item.data(Qt.ItemDataRole.UserRole)
-                selected_pairs[a] = b
-
-        diff_rows = []
-        for mr_col, ctr_col in selected_pairs.items():
-            col_mr  = f"{mr_col}_MR"   if f"{mr_col}_MR"   in matched.columns else mr_col
-            col_ctr = f"{ctr_col}_CTR" if f"{ctr_col}_CTR" in matched.columns else ctr_col
-            if col_mr not in matched.columns or col_ctr not in matched.columns:
-                continue
-            a, b = matched[col_mr], matched[col_ctr]
-            both_nan = a.isna() & b.isna()
-            mismatch = (a.astype(str).str.strip() != b.astype(str).str.strip()) & ~both_nan
-            label = mr_col if mr_col == ctr_col else f"{mr_col} / {ctr_col}"
-            for idx in matched[mismatch].index:
-                diff_rows.append({
-                    "Stock Code":   matched.at[idx, "_KEY_"],
-                    "MR Document":  matched.at[idx, src_mr]  if src_mr  in matched.columns else "",
-                    "CTR Document": matched.at[idx, src_ctr] if src_ctr and src_ctr in matched.columns else "",
-                    "Field":        label,
-                    "MR Value":     matched.at[idx, col_mr],
-                    "CTR Value":    matched.at[idx, col_ctr],
-                })
-        self._diff_df = pd.DataFrame(diff_rows)
-
-        # Matched display (mirrors main.py)
+        # Matched display
         mc = matched
         desc_mr   = _find_col(mc, "Description_MR",  "Description")
         desc_ctr  = _find_col(mc, "Description_CTR")
@@ -565,13 +511,11 @@ class MainWindow(QMainWindow):
 
         # Update metrics
         self._m_matched.setText(str(len(matched)))
-        self._m_diffs.setText(str(len(self._diff_df)))
         self._m_only_mr.setText(str(len(only_mr_df)))
         self._m_only_ctr.setText(str(len(only_ctr_df)))
 
         # Populate result tabs
         _load_view(self._tab_matched,  self._display_df if not self._display_df.empty else _EMPTY_INFO)
-        _load_view(self._tab_diffs,    self._diff_df    if not self._diff_df.empty    else _EMPTY_INFO)
         _load_view(self._tab_only_mr,  self._omr_dl     if not self._omr_dl.empty     else _EMPTY_INFO)
         _load_view(self._tab_only_ctr, self._octr_dl    if not self._octr_dl.empty    else _EMPTY_INFO)
 
@@ -591,7 +535,6 @@ class MainWindow(QMainWindow):
             buf = BytesIO()
             with pd.ExcelWriter(buf, engine="openpyxl") as writer:
                 self._display_df.to_excel(writer, index=False, sheet_name="Matched")
-                self._diff_df.to_excel(writer,    index=False, sheet_name="Differences")
                 self._omr_dl.to_excel(writer,     index=False, sheet_name="Only in MR")
                 self._octr_dl.to_excel(writer,    index=False, sheet_name="Only in CTR")
             Path(path).write_bytes(buf.getvalue())
