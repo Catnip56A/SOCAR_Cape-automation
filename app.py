@@ -18,9 +18,9 @@ from PySide6.QtCore import (
 )
 from PySide6.QtGui import QBrush, QColor, QFont, QPainter, QPen
 from PySide6.QtWidgets import (
-    QAbstractItemView, QApplication, QCheckBox, QComboBox, QFileDialog,
+    QAbstractItemView, QApplication, QCheckBox, QFileDialog,
     QFormLayout, QFrame, QGroupBox, QHBoxLayout, QHeaderView,
-    QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow,
+    QLabel, QListWidget, QListWidgetItem, QMainWindow,
     QMessageBox, QProgressDialog, QPushButton, QScrollArea,
     QSplitter, QStackedWidget, QStyle, QStyledItemDelegate, QTabWidget,
     QTableView, QVBoxLayout, QWidget,
@@ -460,24 +460,16 @@ class MainWindow(QMainWindow):
         cl.addLayout(two_col)
 
         self._mr_file_list,  self._mr_table_list,  \
-        self._mr_preview,    self._mr_key_cb,       \
-        self._mr_filter = self._add_side_column(
-            two_col, "mr",
-            MR_COLOR,
+        self._mr_preview = self._add_side_column(
+            two_col, "mr", MR_COLOR,
             file_tip  = "Select one or more MR Excel files (.xlsx / .xlsm).",
             table_tip = "Check the sheets to include.\nUncheck any you want to exclude.",
-            key_tip   = "Column used to match rows between MR and CTR.\nUsually 'Stock Code'.",
-            filt_tip  = "Optional — comma-separated stock codes to limit the comparison.",
         )
         self._ctr_file_list, self._ctr_table_list, \
-        self._ctr_preview,   self._ctr_key_cb,     \
-        self._ctr_filter = self._add_side_column(
-            two_col, "ctr",
-            CTR_COLOR,
+        self._ctr_preview = self._add_side_column(
+            two_col, "ctr", CTR_COLOR,
             file_tip  = "Select one or more CTR Excel files (.xlsx / .xlsm).",
             table_tip = "Check the sheets to include.\nUncheck any you want to exclude.",
-            key_tip   = "Column used to match rows between MR and CTR.\nUsually 'Stock Code' or 'Equipment Code'.",
-            filt_tip  = "Optional — comma-separated stock codes to limit the comparison.",
         )
 
         # Hint + Compare button (full width, below columns)
@@ -677,11 +669,9 @@ class MainWindow(QMainWindow):
         color: str,
         file_tip: str,
         table_tip: str,
-        key_tip: str,
-        filt_tip: str,
     ) -> tuple:
         """Build one full MR or CTR column and add it to parent layout.
-        Returns (file_list, table_list, preview_view, key_cb, filter_le).
+        Returns (file_list, table_list, preview_view).
         """
         label = side.upper()
         col   = QVBoxLayout()
@@ -729,21 +719,8 @@ class MainWindow(QMainWindow):
         tbl.addWidget(preview)
         col.addWidget(tb)
 
-        # ── Step 3: settings ──
-        sb = QGroupBox(f"Step 3 — {label} Settings")
-        sb.setStyleSheet(_group_css(color))
-        sbl = QFormLayout(sb)
-        key_cb = QComboBox()
-        key_cb.setToolTip(key_tip)
-        filt_le = QLineEdit()
-        filt_le.setPlaceholderText("e.g. AS1500100000, AS1500200000")
-        filt_le.setToolTip(filt_tip)
-        sbl.addRow("Join key:", key_cb)
-        sbl.addRow("Filter:", filt_le)
-        col.addWidget(sb)
-
         parent.addLayout(col)
-        return file_lw, table_lw, preview, key_cb, filt_le
+        return file_lw, table_lw, preview
 
     # ── File browsing ─────────────────────────────────────────────────────────
 
@@ -780,7 +757,6 @@ class MainWindow(QMainWindow):
             self._ctr_table_list.clear()
             self._ctr_tables = []
             self._ctr_df = pd.DataFrame()
-        self._refresh_settings()
         self._update_state()
 
     # ── Parsing ───────────────────────────────────────────────────────────────
@@ -836,7 +812,6 @@ class MainWindow(QMainWindow):
     def _on_table_sel_changed(self):
         self._mr_df  = self._concat_checked(self._mr_table_list,  self._mr_tables)
         self._ctr_df = self._concat_checked(self._ctr_table_list, self._ctr_tables)
-        self._refresh_settings()
         self._refresh_inline_previews()
         self._update_state()
 
@@ -849,18 +824,6 @@ class MainWindow(QMainWindow):
         return pd.concat(parts, ignore_index=True, sort=False) if parts else pd.DataFrame()
 
     # ── Settings ──────────────────────────────────────────────────────────────
-
-    def _refresh_settings(self):
-        mr_cols  = [c for c in self._mr_df.columns  if not c.startswith("_")]
-        ctr_cols = [c for c in self._ctr_df.columns if not c.startswith("_")]
-        for cb, cols in [(self._mr_key_cb, mr_cols), (self._ctr_key_cb, ctr_cols)]:
-            cb.blockSignals(True)
-            cb.clear()
-            cb.addItems(cols)
-            default = find_key_col(cols)
-            if default:
-                cb.setCurrentText(default)
-            cb.blockSignals(False)
 
     # ── Inline previews ───────────────────────────────────────────────────────
 
@@ -907,28 +870,23 @@ class MainWindow(QMainWindow):
     # ── Compare ───────────────────────────────────────────────────────────────
 
     def _run_compare(self):
-        mr_key  = self._mr_key_cb.currentText()
-        ctr_key = self._ctr_key_cb.currentText()
-        if not mr_key or not ctr_key:
-            QMessageBox.warning(self, "No join key",
-                                "Select a join key for both MR and CTR.")
-            return
-
         mr  = self._mr_df.copy()
         ctr = self._ctr_df.copy()
 
-        mr["_KEY_"]  = mr[mr_key].astype(str).str.strip().str.upper()
-        ctr["_KEY_"] = ctr[ctr_key].astype(str).str.strip().str.upper()
+        key_col = "Stock Code"
+        for side, df in [("MR", mr), ("CTR", ctr)]:
+            col = find_key_col(list(df.columns))
+            if not col:
+                QMessageBox.warning(
+                    self, "Stock Code not found",
+                    f"Could not find a Stock Code column in the {side} data.\n"
+                    f"Columns available: {', '.join(df.columns[:8])}")
+                return
+            df["_KEY_"] = df[col].astype(str).str.strip().str.upper()
 
         bad = {"", "NAN", "-", "NONE", "STOCKCODE", "0"}
         mr  = mr[~mr["_KEY_"].isin(bad)]
         ctr = ctr[~ctr["_KEY_"].isin(bad)]
-
-        for df, text in [(mr,  self._mr_filter.text().strip()),
-                         (ctr, self._ctr_filter.text().strip())]:
-            if text:
-                codes = {c.strip().upper() for c in text.split(",") if c.strip()}
-                df.drop(df[~df["_KEY_"].isin(codes)].index, inplace=True)
 
         merged = pd.merge(mr, ctr, on="_KEY_", how="outer",
                           suffixes=("_MR", "_CTR"), indicator=True)
