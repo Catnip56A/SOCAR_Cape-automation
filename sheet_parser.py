@@ -460,7 +460,23 @@ def parse_workbook(path, sheet_names=None, filename=None) -> list:
 
     # ---- Method 2: Sheet-based keyword detection (fallback) ----
     file_ref = _make_file()
-    xls = pd.ExcelFile(file_ref)
+    try:
+        xls = pd.ExcelFile(file_ref)
+    except FileNotFoundError:
+        raise ValueError(f"File not found: {display_name}")
+    except PermissionError as e:
+        raise ValueError(
+            f"Cannot open {display_name} — it may be open in Excel in another "
+            f"window. Close it there and try again."
+        ) from e
+    except Exception as e:
+        msg = str(e).lower()
+        if "format cannot be determined" in msg or "not a zip file" in msg:
+            raise ValueError(
+                f"{display_name} doesn't look like a valid Excel file — it may "
+                f"be corrupted or saved in an unsupported format."
+            ) from e
+        raise ValueError(f"Could not read {display_name}: {e}") from e
     all_sheets = xls.sheet_names
 
     if sheet_names is None:

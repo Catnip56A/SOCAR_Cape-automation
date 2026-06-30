@@ -5,6 +5,7 @@ Run:   python app.py
 Build: pyinstaller app.spec   (Windows only, see justfile)
 """
 
+import logging
 import re
 import sys
 from datetime import datetime
@@ -28,6 +29,9 @@ from PySide6.QtWidgets import (
 
 sys.path.insert(0, str(Path(__file__).parent))
 from sheet_parser import parse_workbook
+from ctr_generator.window import CTRGeneratorWidget
+
+log = logging.getLogger(__name__)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -385,12 +389,15 @@ class ParseWorker(QThread):
         self._payloads = payloads
 
     def run(self):
+        log.info("ParseWorker: parsing %d file(s)", len(self._payloads))
         try:
             results = []
             for name, data in self._payloads:
                 results.extend(parse_workbook(BytesIO(data), filename=name))
+            log.info("ParseWorker: produced %d table(s)", len(results))
             self.finished.emit(results)
         except Exception as exc:
+            log.exception("ParseWorker failed")
             self.error.emit(str(exc))
 
 
@@ -427,20 +434,39 @@ class MainWindow(QMainWindow):
         rl.setContentsMargins(12, 8, 12, 4)
         rl.setSpacing(6)
 
+        # Main tab widget
+        self._main_tabs = QTabWidget()
+        self._main_tabs.setStyleSheet(f"""
+            QTabBar::tab {{
+                padding: 7px 24px; min-width: 150px; font-size: 12px;
+            }}
+            QTabBar::tab:selected {{
+                font-weight: bold; color: {PRIMARY};
+            }}
+        """)
+        rl.addWidget(self._main_tabs)
+
+        # ── Tab 0: MR vs CTR Comparator ────────────────────────────────────
+        _comp = QWidget()
+        _crl  = QVBoxLayout(_comp)
+        _crl.setContentsMargins(0, 6, 0, 0)
+        _crl.setSpacing(6)
+        self._main_tabs.addTab(_comp, "MR vs CTR Comparator")
+
         # Step indicator
         self._step_bar = StepIndicator(
             ["Upload Files", "Select Tables", "Compare & Review"]
         )
-        rl.addWidget(self._step_bar)
+        _crl.addWidget(self._step_bar)
 
         sep = QFrame()
         sep.setFrameShape(QFrame.Shape.HLine)
         sep.setStyleSheet(f"color: {BORDER};")
-        rl.addWidget(sep)
+        _crl.addWidget(sep)
 
         # Main vertical splitter
         self._splitter = QSplitter(Qt.Orientation.Vertical)
-        rl.addWidget(self._splitter)
+        _crl.addWidget(self._splitter)
 
         # ── Top: scrollable controls ───────────────────────────────────────
         scroll = QScrollArea()
@@ -661,6 +687,9 @@ class MainWindow(QMainWindow):
         self._download_btn.clicked.connect(self._download_report)
         res_l.addWidget(self._download_btn)
 
+        # ── Tab 1: CTR Generator ────────────────────────────────────────────
+        self._ctr_gen = CTRGeneratorWidget(parent=self)
+        self._main_tabs.addTab(self._ctr_gen, "CTR Generator")
 
     def _add_side_column(
         self,
@@ -731,11 +760,13 @@ class MainWindow(QMainWindow):
         )
         if not paths:
             return
+        log.info("%s: browsing %d file(s)", side.upper(), len(paths))
         payloads: list[tuple[str, bytes]] = []
         for p in paths:
             try:
                 payloads.append((Path(p).name, Path(p).read_bytes()))
             except Exception as exc:
+                log.exception("Failed to read file: %s", p)
                 QMessageBox.warning(self, "File error",
                                     f"Cannot read {Path(p).name}:\n{exc}")
         if not payloads:
@@ -870,6 +901,8 @@ class MainWindow(QMainWindow):
     # ── Compare ───────────────────────────────────────────────────────────────
 
     def _run_compare(self):
+        log.info("Compare started: MR=%d rows, CTR=%d rows",
+                  len(self._mr_df), len(self._ctr_df))
         mr  = self._mr_df.copy()
         ctr = self._ctr_df.copy()
 
@@ -988,6 +1021,8 @@ class MainWindow(QMainWindow):
             f"{len(only_mr_df)} only in MR · "
             f"{len(only_ctr_df)} only in CTR."
         )
+        log.info("Compare finished: matched=%d only_mr=%d only_ctr=%d",
+                  len(matched), len(only_mr_df), len(only_ctr_df))
 
     # ── Value comparison highlights ───────────────────────────────────────────
 
@@ -1098,9 +1133,16 @@ class MainWindow(QMainWindow):
                 self._omr_dl.to_excel(writer,     index=False, sheet_name="Only in MR")
                 self._octr_dl.to_excel(writer,    index=False, sheet_name="Only in CTR")
             Path(path).write_bytes(buf.getvalue())
+            log.info("Report saved: %s", path)
             QMessageBox.information(self, "Saved", f"Report saved:\n{path}")
         except Exception as exc:
+            log.exception("Failed to save report: %s", path)
             QMessageBox.critical(self, "Save error", str(exc))
+
+    # ── CTR Generator ─────────────────────────────────────────────────────────
+
+    def _open_ctr_generator(self):
+        self._main_tabs.setCurrentIndex(1)
 
     # ── Utility ───────────────────────────────────────────────────────────────
 
@@ -1116,6 +1158,10 @@ class MainWindow(QMainWindow):
 # ─────────────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
+    from app_logging import setup_logging
+    log_dir = setup_logging()
+    log.info("Application starting (log directory: %s)", log_dir)
+
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
     # Suppress the black shadow artifact that appears on X11/WSL without a
@@ -1133,4 +1179,7 @@ if __name__ == "__main__":
     """)
     win = MainWindow()
     win.show()
-    sys.exit(app.exec())
+    log.info("Main window shown")
+    exit_code = app.exec()
+    log.info("Application exiting with code %s", exit_code)
+    sys.exit(exit_code)

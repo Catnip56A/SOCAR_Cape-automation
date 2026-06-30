@@ -1,0 +1,90 @@
+"""
+ctr_generator/aliases.py
+
+Persists user-taught name mappings between CTR Request descriptions and
+pricebook/SAGE descriptions, since the same item is often named differently
+across documents (e.g. request says "Rigger-National", pricebook says
+"Rigger"). Once a user fixes a "No match" row by editing "Match By" in the
+matching UI, the mapping is remembered here and applied automatically the
+next time the same requested description appears in a future CTR Request.
+
+Stored as a flat JSON file next to this module, keyed by category
+(manpower / equipment / consumable) to avoid the same word meaning
+different things across item types.
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+_ALIASES_PATH = Path(__file__).parent / "match_aliases.json"
+
+_CATEGORIES = ("manpower", "equipment", "consumable")
+
+
+def load_aliases() -> dict:
+    """Returns {"manpower": {...}, "equipment": {...}, "consumable": {...}}."""
+    data = {}
+    if _ALIASES_PATH.exists():
+        try:
+            data = json.loads(_ALIASES_PATH.read_text())
+        except (json.JSONDecodeError, OSError):
+            data = {}
+    return {cat: dict(data.get(cat, {})) for cat in _CATEGORIES}
+
+
+def save_aliases(aliases: dict) -> None:
+    try:
+        _ALIASES_PATH.write_text(json.dumps(aliases, indent=2, ensure_ascii=False))
+    except OSError:
+        pass  # non-fatal — renames just won't persist across sessions
+
+
+def get_alias(aliases: dict, category: str, requested_desc: str) -> str | None:
+    key = (requested_desc or "").strip().lower()
+    if not key:
+        return None
+    return aliases.get(category, {}).get(key)
+
+
+def set_alias(aliases: dict, category: str, requested_desc: str, match_key: str) -> None:
+    key = (requested_desc or "").strip().lower()
+    match_key = (match_key or "").strip()
+    if not key or not match_key:
+        return
+    aliases.setdefault(category, {})[key] = match_key
+    save_aliases(aliases)
+
+
+def delete_alias(aliases: dict, category: str, requested_desc: str) -> None:
+    key = (requested_desc or "").strip().lower()
+    if category in aliases:
+        aliases[category].pop(key, None)
+    save_aliases(aliases)
+
+
+def export_aliases(aliases: dict, path: str | Path) -> None:
+    """Writes the renames dictionary to an arbitrary file path as pretty JSON,
+    for backup or sharing with another machine/user."""
+    Path(path).write_text(json.dumps(aliases, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def import_aliases(path: str | Path) -> dict:
+    """
+    Reads a renames JSON file (same shape as match_aliases.json) from an
+    arbitrary path, tolerant of files that only contain some categories.
+    Returns {"manpower": {...}, "equipment": {...}, "consumable": {...}}.
+    Raises ValueError if the file isn't a JSON object, or a category isn't
+    an object of {requested name: rename} pairs.
+    """
+    data = json.loads(Path(path).read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError("File does not contain a renames dictionary (expected a JSON object).")
+    result = {}
+    for cat in _CATEGORIES:
+        mapping = data.get(cat) or {}
+        if not isinstance(mapping, dict):
+            raise ValueError(f'"{cat}" should be an object of {{requested name: rename}} pairs.')
+        result[cat] = {str(k): str(v) for k, v in mapping.items()}
+    return result
