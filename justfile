@@ -17,6 +17,10 @@ setup:
 build:
     uv run pyinstaller app.spec
 
+# Build the installer .exe after building the app  ── requires Inno Setup on PATH
+installer: build
+    iscc setup.iss
+
 # Remove build artefacts
 clean:
-    rm -rf build dist __pycache__ .pytest_cache
+    rm -rf build dist __pycache__ .pytest_cache Output

@@ -17,6 +17,10 @@ Pricebook layout (verified from 4410030127):
     9  (J) = Supplier Description   → supplier_desc e.g. "ROPE ACCESS SUPERVISOR"
     14 (O) = Unit Price             → unit_price
 
+These indices (and sheet names / skip rows) are configurable via
+ctr_generator/template_config.json — see the "pricebook", "sage_export",
+and "ctr_request" sections.
+
 CTR Request layout (verified from 102290776 sample):
   Sheet "REQUEST":
     C5  = Name of Requester        J5  = Client / Contract №
@@ -44,8 +48,16 @@ from pathlib import Path
 import openpyxl
 import pandas as pd
 
-# Rows to skip before the first data row in both pricebooks
-_PRICEBOOK_SKIPROWS = 7
+from ctr_generator.config import CFG
+
+_pb  = CFG["pricebook"]
+_sg  = CFG["sage_export"]
+_req = CFG["ctr_request"]
+
+_PRICEBOOK_SHEET   = _pb["sheet_name"]
+_PRICEBOOK_SKIPROWS = _pb["skip_rows"]
+_SAGE_SHEET        = _sg["sheet_name"]
+_REQUEST_SHEET     = _req["sheet_name"]
 
 
 def _open(src) -> BytesIO | Path:
@@ -93,9 +105,6 @@ def _friendly_open_error(exc: Exception, src, file_kind: str, expected_sheet: st
 # Pricebook helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
-_PRICEBOOK_SHEET = "Item Details and Rates"
-
-
 def _read_pricebook_raw(src, file_kind: str) -> pd.DataFrame:
     """Return a DataFrame with integer column names, data only (header skipped)."""
     try:
@@ -109,11 +118,12 @@ def _read_pricebook_raw(src, file_kind: str) -> pd.DataFrame:
     except Exception as e:
         raise _friendly_open_error(e, src, file_kind, _PRICEBOOK_SHEET) from e
 
-    if df.shape[1] < 15:
+    min_cols = _pb["col_unit_price"] + 1
+    if df.shape[1] < min_cols:
         raise ValueError(
             f"{_display_name(src)} has only {df.shape[1]} column(s) on the "
             f'"{_PRICEBOOK_SHEET}" sheet after the header rows — expected at '
-            f"least 15 (Part Number Extension, Product Type, UOM, Supplier "
+            f"least {min_cols} (Part Number Extension, Product Type, UOM, Supplier "
             f"Description, Unit Price). Is this the right {file_kind}?"
         )
     return df
@@ -127,7 +137,12 @@ def parse_azn_pricebook(src) -> pd.DataFrame:
     No filtering — caller decides which rows to use.
     """
     df = _read_pricebook_raw(src, "AZN Pricebook")
-    df = df.rename(columns={4: "stock_code", 6: "uom", 9: "supplier_desc", 14: "unit_price"})
+    df = df.rename(columns={
+        _pb["col_stock_code"]:   "stock_code",
+        _pb["col_uom"]:          "uom",
+        _pb["col_supplier_desc"]: "supplier_desc",
+        _pb["col_unit_price"]:   "unit_price",
+    })
     df = df[["stock_code", "uom", "supplier_desc", "unit_price"]].copy()
     df["stock_code"]    = df["stock_code"].fillna("").str.strip()
     df["uom"]           = df["uom"].fillna("").str.strip()
@@ -138,7 +153,7 @@ def parse_azn_pricebook(src) -> pd.DataFrame:
         raise ValueError(
             f"{_display_name(src)} opened, but no rows had a stock code in the "
             f"expected column after parsing. Is this the right AZN Pricebook "
-            f'(sheet "{_PRICEBOOK_SHEET}", standard 7-row header)?'
+            f'(sheet "{_PRICEBOOK_SHEET}", standard {_PRICEBOOK_SKIPROWS}-row header)?'
         )
     return df.reset_index(drop=True)
 
@@ -152,11 +167,11 @@ def parse_usd_pricebook(src) -> pd.DataFrame:
     """
     df = _read_pricebook_raw(src, "USD Pricebook")
     df = df.rename(columns={
-        4: "stock_code",
-        5: "product_type",
-        6: "uom",
-        9: "supplier_desc",
-        14: "unit_price",
+        _pb["col_stock_code"]:    "stock_code",
+        _pb["col_product_type"]:  "product_type",
+        _pb["col_uom"]:           "uom",
+        _pb["col_supplier_desc"]: "supplier_desc",
+        _pb["col_unit_price"]:    "unit_price",
     })
     df = df[["stock_code", "product_type", "uom", "supplier_desc", "unit_price"]].copy()
     df["stock_code"]    = df["stock_code"].fillna("").str.strip()
@@ -171,7 +186,7 @@ def parse_usd_pricebook(src) -> pd.DataFrame:
         raise ValueError(
             f"{_display_name(src)} opened, but no SERVICE/DAY rows were found "
             f"after parsing. Is this the right USD Pricebook "
-            f'(sheet "{_PRICEBOOK_SHEET}", standard 7-row header)?'
+            f'(sheet "{_PRICEBOOK_SHEET}", standard {_PRICEBOOK_SKIPROWS}-row header)?'
         )
     return df.reset_index(drop=True)
 
@@ -179,9 +194,6 @@ def parse_usd_pricebook(src) -> pd.DataFrame:
 # ─────────────────────────────────────────────────────────────────────────────
 # SAGE export
 # ─────────────────────────────────────────────────────────────────────────────
-
-_SAGE_SHEET = "FROM SAGE"
-
 
 def parse_sage(src) -> pd.DataFrame:
     """
@@ -230,11 +242,55 @@ def parse_sage(src) -> pd.DataFrame:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# CTR Request workbook
+# Equipment names database
 # ─────────────────────────────────────────────────────────────────────────────
 
-_REQUEST_SHEET = "REQUEST"
+def parse_names_db(src) -> pd.DataFrame:
+    """
+    Reads an equipment names / stock-code lookup file (e.g. CTR_NAMES_DB.xlsx).
 
+    Expected columns (row 0 = header row):
+      product          — stock / product code used in CTR Requests
+      long_description — canonical equipment name
+
+    Extra columns are ignored so the file can grow new columns without
+    requiring code changes.
+
+    Returns DataFrame with columns: product | long_description
+    Raises ValueError with an actionable message on any read failure.
+    """
+    try:
+        df = pd.read_excel(_open(src), header=0, dtype=str)
+    except Exception as e:
+        raise _friendly_open_error(e, src, "Equipment Names DB", "(any sheet)") from e
+
+    df.columns = [c.strip() for c in df.columns]
+
+    required = {"product", "long_description"}
+    missing = required - set(df.columns)
+    if missing:
+        found = ", ".join(df.columns[:10]) + ("…" if len(df.columns) > 10 else "")
+        raise ValueError(
+            f"{_display_name(src)} is missing expected column(s): "
+            f"{', '.join(sorted(missing))}. Found columns: {found}. "
+            f"Is this the right Equipment Names DB?"
+        )
+
+    df["product"]          = df["product"].fillna("").str.strip()
+    df["long_description"] = df["long_description"].fillna("").str.strip()
+    df = df[df["product"] != ""][["product", "long_description"]].copy()
+
+    if df.empty:
+        raise ValueError(
+            f"{_display_name(src)} opened but contained no rows after filtering "
+            f"empty product codes. Is this the right Equipment Names DB?"
+        )
+    return df.reset_index(drop=True)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CTR Request workbook
+# ─────────────────────────────────────────────────────────────────────────────
 
 def parse_ctr_request(src) -> dict:
     """
@@ -272,51 +328,54 @@ def parse_ctr_request(src) -> dict:
         return "" if s == "-" else s
 
     result = {
-        "requester":         _v(5, 3),
-        "client":            _v(5, 10),
-        "date_of_survey":    _v(6, 3),
-        "job_id_ref":        _v(6, 10),
-        "surveyor":          _v(7, 3),
-        "project_type":      _v(7, 10),
-        "location":          _v(8, 3),
-        "commencement_date": ws.cell(row=8, column=10).value,
-        "job_description":   _v(9, 3),
+        "requester":         _v(_req["row_requester"],         _req["col_requester"]),
+        "client":            _v(_req["row_client"],            _req["col_client"]),
+        "date_of_survey":    _v(_req["row_date_of_survey"],    _req["col_date_of_survey"]),
+        "job_id_ref":        _v(_req["row_job_id_ref"],        _req["col_job_id_ref"]),
+        "surveyor":          _v(_req["row_surveyor"],          _req["col_surveyor"]),
+        "project_type":      _v(_req["row_project_type"],      _req["col_project_type"]),
+        "location":          _v(_req["row_location"],          _req["col_location"]),
+        "commencement_date": ws.cell(
+            row=_req["row_commencement_date"],
+            column=_req["col_commencement_date"],
+        ).value,
+        "job_description":   _v(_req["row_job_description"],   _req["col_job_description"]),
     }
 
-    # The line-item table runs from row 13 while col 1 (№) is a sequential
-    # integer; below it (e.g. row 164 onward) sits an unrelated logistics/
-    # extras block that must not be parsed as manpower/equipment/consumables.
+    # The line-item table runs from data_start_row while col 1 (№) is a
+    # sequential integer; below it (e.g. row 164 onward) sits an unrelated
+    # logistics/extras block that must not be parsed as line items.
     manpower_rows, equipment_rows, consumable_rows = [], [], []
-    r = 13
+    r = _req["data_start_row"]
     while isinstance(ws.cell(row=r, column=1).value, (int, float)):
-        manpower_desc = _v(r, 2)
+        manpower_desc = _v(r, _req["manpower_desc_col"])
         if manpower_desc:
             manpower_rows.append({
                 "description":   manpower_desc,
-                "quantity":      _v(r, 3),
-                "working_days":  _v(r, 4),
-                "shift":         _v(r, 5),
-                "weekend":       _v(r, 6),
-                "weekend_shift": _v(r, 7),
+                "quantity":      _v(r, _req["manpower_qty_col"]),
+                "working_days":  _v(r, _req["manpower_working_days_col"]),
+                "shift":         _v(r, _req["manpower_shift_col"]),
+                "weekend":       _v(r, _req["manpower_weekend_col"]),
+                "weekend_shift": _v(r, _req["manpower_weekend_shift_col"]),
             })
 
-        equip_desc = _v(r, 9)
+        equip_desc = _v(r, _req["equip_desc_col"])
         if equip_desc:
             equipment_rows.append({
-                "stock_code":  _v(r, 8),
+                "stock_code":  _v(r, _req["equip_stock_code_col"]),
                 "description": equip_desc,
-                "uom":         _v(r, 10),
-                "quantity":    _v(r, 11),
-                "days":        _v(r, 12),
+                "uom":         _v(r, _req["equip_uom_col"]),
+                "quantity":    _v(r, _req["equip_qty_col"]),
+                "days":        _v(r, _req["equip_days_col"]),
             })
 
-        cons_desc = _v(r, 14)
+        cons_desc = _v(r, _req["cons_desc_col"])
         if cons_desc:
             consumable_rows.append({
-                "stock_code":  _v(r, 13),
+                "stock_code":  _v(r, _req["cons_stock_code_col"]),
                 "description": cons_desc,
-                "uom":         _v(r, 15),
-                "quantity":    _v(r, 16),
+                "uom":         _v(r, _req["cons_uom_col"]),
+                "quantity":    _v(r, _req["cons_qty_col"]),
             })
 
         r += 1

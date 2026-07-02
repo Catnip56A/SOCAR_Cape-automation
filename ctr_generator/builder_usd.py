@@ -3,7 +3,11 @@ ctr_generator/builder_usd.py
 
 Copies the USD CTR template and writes equipment + consumable rows.
 
-Template layout (verified from 217_USD template):
+Row/column positions are read from ctr_generator/template_config.json
+(section "usd_template") so they can be adjusted without touching this
+file when a new template version shifts the layout.
+
+Default layout (217_USD template):
 
   Sheet "Main":
     E3  = CTR ref string
@@ -37,22 +41,46 @@ All values written as plain Python numbers — no formula reliance.
 from __future__ import annotations
 
 import shutil
+from copy import copy
 from datetime import datetime
 from pathlib import Path
 
 import openpyxl
 
-_EQUIP_START  = 11
-_EQUIP_END    = 210   # inclusive
-_EQUIP_TOTAL  = 211
+from ctr_generator.config import CFG
 
-_CONS_START   = 216
-_CONS_END     = 365   # inclusive
-_CONS_TOTAL   = 366
+_usd = CFG["usd_template"]
 
-_MARKUP_RATE  = 0.065
+_EQUIP_START = _usd["equip_data_start"]
+_EQUIP_END   = _usd["equip_data_end"]   # default clear range; rows beyond here still write
+
+_CONS_START  = _usd["cons_data_start"]
+_CONS_END    = _usd["cons_data_end"]
+
+_MARKUP_RATE = _usd["markup_rate"]
+
+# Pricing-sheet column positions for section totals (template structure constants)
+_EQUIP_TOTAL_COL  = 7   # G — row total
+_EQUIP_TOTAL_COL2 = 9   # I — SC cost mirror
+_CONS_TOTAL_COL   = 6   # F — row total
 
 _DATE_FORMATS = ("%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y", "%d.%m.%Y")
+
+
+def _copy_row_format(ws, src_row: int, dst_row: int, col_count: int) -> None:
+    """Copy cell formatting (borders, fill, font, alignment) from one row to another."""
+    src_dim = ws.row_dimensions.get(src_row)
+    if src_dim and src_dim.height:
+        ws.row_dimensions[dst_row].height = src_dim.height
+    for col in range(1, col_count + 1):
+        src = ws.cell(row=src_row, column=col)
+        dst = ws.cell(row=dst_row, column=col)
+        if src.has_style:
+            dst.font          = copy(src.font)
+            dst.border        = copy(src.border)
+            dst.fill          = copy(src.fill)
+            dst.number_format = src.number_format
+            dst.alignment     = copy(src.alignment)
 
 
 def _parse_date(value):
@@ -131,43 +159,64 @@ def build_usd(
     except OSError as e:
         raise ValueError(f"Could not copy USD template to {out_path}: {e}") from e
 
+    main_sheet    = _usd["main_sheet"]
+    pricing_sheet = _usd["pricing_sheet"]
     try:
         wb    = openpyxl.load_workbook(out_path, keep_vba=False)
-        ws_m  = wb["Main"]
-        ws_p  = wb["Pricing"]
+        ws_m  = wb[main_sheet]
+        ws_p  = wb[pricing_sheet]
     except KeyError as e:
         raise ValueError(
-            f"USD Template {template_path} is missing a \"Main\" or \"Pricing\" "
-            f"sheet. Is this the right template?"
+            f'USD Template {template_path} is missing a "{main_sheet}" or '
+            f'"{pricing_sheet}" sheet. Is this the right template?'
         ) from e
     except Exception as e:
         raise ValueError(f"Could not read USD Template {template_path}: {e}") from e
 
     # ── Main sheet: header ────────────────────────────────────────────────────
-    ws_m["E3"] = f"CTR-26-{job_ref} USD"
-    ws_m["O3"] = int(job_ref)
+    ws_m[_usd["cell_ctr_ref"]] = f"CTR-26-{job_ref} USD"
+    ws_m[_usd["cell_job_ref"]] = int(job_ref)
 
     if header:
-        if header.get("client"):       ws_m["B3"] = header["client"]
-        if header.get("sub_client"):   ws_m["C3"] = header["sub_client"]
-        if header.get("location"):     ws_m["B4"] = header["location"]
-        if header.get("date"):         ws_m["E4"] = _parse_date(header["date"])
-        if header.get("contract_no"):  ws_m["G4"] = header["contract_no"]
+        if header.get("client"):      ws_m[_usd["cell_client"]]     = header["client"]
+        if header.get("sub_client"):  ws_m[_usd["cell_sub_client"]] = header["sub_client"]
+        if header.get("location"):    ws_m[_usd["cell_location"]]   = header["location"]
+        if header.get("date"):        ws_m[_usd["cell_date"]]       = _parse_date(header["date"])
+        if header.get("contract_no"): ws_m[_usd["cell_contract_no"]] = header["contract_no"]
         if header.get("revision") not in (None, ""):
-            ws_m["E5"] = header["revision"]
-        if header.get("scope"):        ws_m["A6"] = header["scope"]
+            ws_m[_usd["cell_revision"]] = header["revision"]
+        if header.get("scope"):       ws_m[_usd["cell_scope"]]      = header["scope"]
 
-    # ── Pricing sheet: clear equipment rows ───────────────────────────────────
-    for row in range(_EQUIP_START, _EQUIP_END + 1):
-        for col in range(1, 11):   # A–J
+    _COLS = 10   # columns A–J used by data rows
+
+    # ── Insert extra rows before writing so sections don't overwrite each other ─
+    equip_capacity = _EQUIP_END - _EQUIP_START + 1
+    equip_extra    = max(0, len(equip_rows) - equip_capacity)
+    if equip_extra:
+        ws_p.insert_rows(_EQUIP_END + 1, equip_extra)
+        for i in range(equip_extra):
+            _copy_row_format(ws_p, _EQUIP_END, _EQUIP_END + 1 + i, _COLS)
+
+    # Consumables section has shifted down by equip_extra
+    cons_start = _CONS_START + equip_extra
+    cons_end   = _CONS_END   + equip_extra
+
+    cons_capacity = cons_end - cons_start + 1
+    cons_extra    = max(0, len(consump_rows) - cons_capacity)
+    if cons_extra:
+        ws_p.insert_rows(cons_end + 1, cons_extra)
+        for i in range(cons_extra):
+            _copy_row_format(ws_p, cons_end, cons_end + 1 + i, _COLS)
+
+    # ── Pricing sheet: clear and write equipment rows ─────────────────────────
+    equip_eff_end   = _EQUIP_END + equip_extra
+    equip_clear_end = max(equip_eff_end, _EQUIP_START + len(equip_rows) - 1) if equip_rows else equip_eff_end
+    for row in range(_EQUIP_START, equip_clear_end + 1):
+        for col in range(1, _COLS + 1):
             _set_cell(ws_p, row, col, None)
 
-    # ── Pricing sheet: write equipment rows ───────────────────────────────────
     total_equipment = 0.0
     for i, er in enumerate(equip_rows):
-        if i >= (_EQUIP_END - _EQUIP_START + 1):
-            break
-
         r         = _EQUIP_START + i
         item_no   = i + 1
         desc      = str(er.get("description", ""))
@@ -180,7 +229,7 @@ def build_usd(
         try:
             rate = float(rate_raw)
         except (TypeError, ValueError):
-            rate = 0.0   # NONRECHARG or non-numeric → treat as 0
+            rate = 0.0
 
         row_total = rate * days * qty
         total_equipment += row_total
@@ -189,29 +238,27 @@ def build_usd(
         _set_cell(ws_p, r, 2,  desc)
         _set_cell(ws_p, r, 3,  qty)
         _set_cell(ws_p, r, 4,  unit)
-        _set_cell(ws_p, r, 5,  rate)      # plain number, 0 if NONRECHARG
+        _set_cell(ws_p, r, 5,  rate)
         _set_cell(ws_p, r, 6,  days)
         _set_cell(ws_p, r, 7,  row_total)
-        _set_cell(ws_p, r, 8,  item_no)   # counter column mirrors A
+        _set_cell(ws_p, r, 8,  item_no)
         _set_cell(ws_p, r, 9,  row_total)
         _set_cell(ws_p, r, 10, stock)
 
-    # Equipment totals row
-    _set_cell(ws_p, _EQUIP_TOTAL, 7, total_equipment)
-    _set_cell(ws_p, _EQUIP_TOTAL, 9, total_equipment)
+    equip_total_row = _EQUIP_START + len(equip_rows)
+    _set_cell(ws_p, equip_total_row, _EQUIP_TOTAL_COL,  total_equipment)
+    _set_cell(ws_p, equip_total_row, _EQUIP_TOTAL_COL2, total_equipment)
 
-    # ── Pricing sheet: clear consumables rows ─────────────────────────────────
-    for row in range(_CONS_START, _CONS_END + 1):
-        for col in range(1, 11):
+    # ── Pricing sheet: clear and write consumables rows ───────────────────────
+    cons_eff_end   = cons_end
+    cons_clear_end = max(cons_eff_end, cons_start + len(consump_rows) - 1) if consump_rows else cons_eff_end
+    for row in range(cons_start, cons_clear_end + 1):
+        for col in range(1, _COLS + 1):
             _set_cell(ws_p, row, col, None)
 
-    # ── Pricing sheet: write consumables rows ─────────────────────────────────
     total_consumables_raw = 0.0
     for i, cr in enumerate(consump_rows):
-        if i >= (_CONS_END - _CONS_START + 1):
-            break
-
-        r         = _CONS_START + i
+        r         = cons_start + i
         item_no   = i + 1
         desc      = str(cr.get("long_description", ""))
         qty       = _safe_float(cr.get("quantity", 1), 1.0)
@@ -232,8 +279,8 @@ def build_usd(
         _set_cell(ws_p, r, 9,  row_total)
         _set_cell(ws_p, r, 10, product)
 
-    # Consumables totals row
-    _set_cell(ws_p, _CONS_TOTAL, 6, total_consumables_raw)
+    cons_total_row = cons_start + len(consump_rows)
+    _set_cell(ws_p, cons_total_row, _CONS_TOTAL_COL, total_consumables_raw)
 
     # ── Derived totals ────────────────────────────────────────────────────────
     consumables_markup      = total_consumables_raw * _MARKUP_RATE
@@ -241,14 +288,14 @@ def build_usd(
     estimated_ctr_total_usd = total_equipment + total_consumables
 
     # ── Main sheet: totals ────────────────────────────────────────────────────
-    ws_m["G110"] = total_equipment
-    ws_m["G112"] = total_equipment
-    ws_m["G115"] = total_consumables_raw
-    ws_m["G116"] = consumables_markup
-    ws_m["G120"] = total_consumables
-    ws_m["G126"] = total_equipment
-    ws_m["G127"] = total_consumables_raw
-    ws_m["G130"] = estimated_ctr_total_usd
+    ws_m[_usd["cell_total_equip_1"]]     = total_equipment
+    ws_m[_usd["cell_total_equip_2"]]     = total_equipment
+    ws_m[_usd["cell_total_cons_raw"]]    = total_consumables_raw
+    ws_m[_usd["cell_total_cons_markup"]] = consumables_markup
+    ws_m[_usd["cell_total_cons"]]        = total_consumables
+    ws_m[_usd["cell_summary_equip"]]     = total_equipment
+    ws_m[_usd["cell_summary_cons_raw"]]  = total_consumables_raw
+    ws_m[_usd["cell_summary_grand"]]     = estimated_ctr_total_usd
 
     try:
         wb.save(out_path)

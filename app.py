@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pandas as pd
 from PySide6.QtCore import (
-    QAbstractTableModel, QModelIndex, QSortFilterProxyModel,
+    QAbstractTableModel, QModelIndex, QSettings, QSortFilterProxyModel,
     Qt, QThread, Signal,
 )
 from PySide6.QtGui import QBrush, QColor, QFont, QPainter, QPen
@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
 
 sys.path.insert(0, str(Path(__file__).parent))
 from sheet_parser import parse_workbook
+from ctr_generator import __version__ as _CTR_VERSION
 from ctr_generator.window import CTRGeneratorWidget
 
 log = logging.getLogger(__name__)
@@ -408,7 +409,7 @@ class ParseWorker(QThread):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("MR vs CTR Comparator — SOCAR Cape")
+        self.setWindowTitle(f"MR vs CTR Comparator — SOCAR Cape  v{_CTR_VERSION}")
         self.resize(1440, 920)
 
         self._mr_tables:  list = []
@@ -423,7 +424,17 @@ class MainWindow(QMainWindow):
         self._mismatch_pos:  int       = -1   # current navigation position
 
         self._build_ui()
-        self._set_status("Upload MR and CTR files to begin.")
+
+        s = QSettings("SOCAR", "CTRGenerator")
+        geom = s.value("window/geometry")
+        if geom:
+            self.restoreGeometry(geom)
+
+    def closeEvent(self, event):
+        s = QSettings("SOCAR", "CTRGenerator")
+        s.setValue("window/geometry", self.saveGeometry())
+        self._ctr_gen.save_settings()
+        super().closeEvent(event)
 
     # ── UI construction ───────────────────────────────────────────────────────
 
@@ -690,6 +701,10 @@ class MainWindow(QMainWindow):
         # ── Tab 1: CTR Generator ────────────────────────────────────────────
         self._ctr_gen = CTRGeneratorWidget(parent=self)
         self._main_tabs.addTab(self._ctr_gen, "CTR Generator")
+        self._ctr_gen.restore_settings()
+
+    def _app_settings(self) -> QSettings:
+        return QSettings("SOCAR", "CTRGenerator")
 
     def _add_side_column(
         self,
@@ -880,7 +895,7 @@ class MainWindow(QMainWindow):
             self._step_bar.set_step(0)
             self._compare_hint.setText(
                 "Upload at least one MR and one CTR file to continue.")
-            self._set_status("Upload MR and CTR files to begin.")
+            self._set_status("")
         elif has_mr and not has_ctr:
             self._step_bar.set_step(1)
             self._compare_hint.setText("Now upload a CTR file to continue.")

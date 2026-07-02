@@ -210,3 +210,199 @@ The app looks for the following columns in MR tables (column names are matched c
 10. Use ↑ ↓ to step through each mismatch
 11. Click Download Excel Report to save results
 ```
+
+---
+
+---
+
+# CTR Generator — User Guide
+
+---
+
+## What the CTR Generator does
+
+The **CTR Generator** tab produces the two standard CTR spreadsheets (AZN and USD) plus their PDF equivalents from a single CTR Request form. It:
+
+1. Reads the requested manpower, equipment, and consumables from a **CTR Request** Excel file.
+2. Looks up each requested item in the **AZN Pricebook**, **USD Pricebook**, **SAGE Export**, and optionally an **Equipment Names DB** to find the correct rate.
+3. Lets you review, correct, and approve every match on screen before writing any output.
+4. Writes filled copies of the **AZN Template** and **USD Template** with all rows, totals, and header fields populated — and exports each to PDF via LibreOffice.
+
+---
+
+## Required files
+
+| File | Purpose | Format |
+|---|---|---|
+| **AZN Template** | Blank CTR template for AZN currency | `.xlsx` |
+| **USD Template** | Blank CTR template for USD currency | `.xlsx` |
+| **AZN Pricebook** | Rates for manpower (labor) items | `.xlsx` |
+| **USD Pricebook** | Rates for plant & equipment items | `.xlsx` |
+| **SAGE Export** | Rates for consumables | `.xlsm` or `.xlsx` |
+| **CTR Request** | The customer's request form | `.xlsm` or `.xlsx` |
+| **Equipment Names DB** *(optional)* | Bridges customer stock codes → pricebook descriptions | `.xlsx` |
+
+---
+
+## Input file formats
+
+### AZN Pricebook
+Must contain a sheet named **"Item Details and Rates"**. The app reads from row 8 onwards and expects these columns (1-indexed):
+
+| Column | Content |
+|---|---|
+| D (4) | Stock Code |
+| E (5) | Product Type |
+| F (6) | Unit of Measure |
+| I (9) | Supplier Description |
+| N (14) | Unit Price (AZN) |
+
+### USD Pricebook
+Same sheet and column layout as the AZN Pricebook above.
+
+### SAGE Export
+Must contain a sheet named **"FROM SAGE"** with at least these columns (exact header names):
+
+| Header | Content |
+|---|---|
+| `product` | Stock code / product code |
+| `long_description` | Item description |
+| `unit_code` | Unit of measure |
+| `local_expect_cost` | Unit cost |
+
+### CTR Request
+Must contain a sheet named **"REQUEST"**. The standard SOCAR Cape CTR Request form already has the correct layout. Header fields (requester, client, date, etc.) are in rows 5–9. Line items start at row 13:
+
+| Columns A–G | Manpower items |
+|---|---|
+| Columns H–L | Plant & Equipment items |
+| Columns M–P | Consumables |
+
+### Equipment Names DB *(optional)*
+Any Excel file with at least these two columns (exact header names, case-sensitive):
+
+| Header | Content |
+|---|---|
+| `product` | Customer stock code (as written in the CTR Request) |
+| `long_description` | Canonical description used in the USD Pricebook |
+
+Extra columns are ignored. This file is only needed when customer stock codes differ from pricebook descriptions — it acts as a translation table.
+
+---
+
+## Step-by-step usage
+
+### 1. Select templates
+
+In the **Source Files** group at the top, use the **Browse…** buttons next to **AZN Template** and **USD Template** to select your blank CTR Excel templates.
+
+---
+
+### 2. Load pricebook / SAGE reference data
+
+Click the **Pricebook-Based** sub-tab. Select:
+- **AZN Pricebook** — required for manpower rate lookup
+- **USD Pricebook** — required for plant & equipment rate lookup
+- **SAGE Export** — required for consumables rate lookup
+- **Equipment Names DB** — optional; enables stock-code based equipment matching
+
+Click **Load Files**. The button is greyed out while loading (files are parsed in parallel in the background — you can continue working). A status line shows how many rows were loaded from each file.
+
+---
+
+### 3. Load a CTR Request
+
+Click the **CTR Request-Based** sub-tab. Browse to the CTR Request `.xlsm` file and click **Load CTR Request**.
+
+The app fills in the **CTR Header Info** fields below (Client, Location, Scope, Date) and populates three tables:
+
+- **Manpower — AZN**: each requested labor row
+- **Plant & Equipment — USD**: each requested equipment row
+- **Consumables — USD**: each requested consumable row
+
+Every row immediately shows its match status:
+- **✓ Matched** — an exact match was found in the pricebook/SAGE; rate is pre-filled
+- **✗ No match** — highlighted in red; the row needs attention before generating
+
+---
+
+### 4. Fix unmatched rows
+
+Red rows could not be matched automatically. For each:
+
+1. Look at the **Match By** column — this is the search key used for lookup.
+2. Edit **Match By** to the correct pricebook description or stock code; the app re-runs the lookup instantly.
+3. Alternatively, clear the rate field and tick it as **✓ Manual** if you want to enter a rate by hand.
+
+Use the **◀ Prev Unmatched** and **Next Unmatched ▶** buttons to jump between red rows without scrolling.
+
+Once you fix a mismatch, the correction is saved automatically. The next time the same CTR Request description appears, the app applies the saved rename without you having to fix it again.
+
+---
+
+### 5. Review totals
+
+Running totals are shown below each table:
+- **AZN**: Project Support (onshore) + Total Offshore = AZN CTR Total
+- **USD**: Equipment total + Consumables (with 6.5% markup) = USD CTR Total
+
+Only **✓ Matched** and **✓ Manual** rows are included in totals and in the generated output. Red **✗ No match** rows are excluded and never written to the output file at a rate of zero.
+
+---
+
+### 6. Fill in the Generate section
+
+Scroll down to the **Generate** group:
+
+| Field | Notes |
+|---|---|
+| **Client** | Written to cell B3 of both templates |
+| **Sub-Client** | Written to cell C3 |
+| **Location** | Written to cell B4 |
+| **Scope** | Written to cell A6 |
+| **Date** | Defaults to today; written to cell E4 |
+| **Contract No (AZN)** | Written to cell G4 of the AZN template |
+| **Contract No (USD)** | Written to cell G4 of the USD template |
+| **Revision** | Defaults to 0; written to cell E5 |
+| **Job Ref** | Must be a number (e.g. 217); used in the file name and cell O3 |
+| **Output folder** | Where the generated files are saved |
+
+**Presets** — save common field combinations (client, contract numbers, output folder) under a name so you don't have to re-type them for recurring projects. Use **Save…** to store the current values, then **Load** next time.
+
+---
+
+### 7. Generate
+
+Click **Generate CTR Documents**. The app:
+
+1. Copies both template files to the output folder
+2. Writes all matched rows and totals into the copies
+3. Exports each spreadsheet to PDF via LibreOffice (requires LibreOffice to be installed; PDF step is skipped with a clear warning if LibreOffice is not found)
+
+A progress dialog is shown during generation. When complete, a message lists the four output files (AZN xlsx, USD xlsx, AZN pdf, USD pdf).
+
+Output file names follow the pattern:  
+`{JobRef}_AZN_WCH_CTR.xlsx` / `{JobRef}_USD_WCH_CTR.xlsx`
+
+---
+
+## Common errors and fixes
+
+| Error message | What it means | Fix |
+|---|---|---|
+| *"AZN Pricebook not selected"* | The required AZN Pricebook field is empty | Select the pricebook file and click Load Files |
+| *"SAGE Export not selected"* | The required SAGE Export field is empty | Select the SAGE file and click Load Files |
+| *"Missing columns: product, long_description"* | The Equipment Names DB doesn't have the expected headers | Check that the header row uses exactly `product` and `long_description` (lower-case) |
+| *"No sheet named REQUEST"* | The CTR Request file uses a different sheet name | Open the file in Excel and rename the sheet to `REQUEST` |
+| *"Job Ref must be a number"* | Non-numeric text was entered in Job Ref | Enter a number only, e.g. `217` |
+| *"AZN Template not found"* | The template file was moved or deleted since it was selected | Browse to the file again |
+| *"Cannot save … it may be open in Excel"* | The output file is already open in Excel | Close the file in Excel and click Generate again |
+| *PDF export skipped* | LibreOffice (soffice) is not on PATH | Install LibreOffice — the xlsx files are still produced correctly |
+
+---
+
+## Saved Renames
+
+When you fix a **Match By** value to get a ✓ match, the correction is remembered permanently in `ctr_generator/match_aliases.json`. Next time the same CTR Request description appears, the corrected search key is applied automatically.
+
+To view, delete, or export saved renames: click the **Manage Saved Renames…** button in the Manpower section header. You can also use **Import…** and **Export…** to share a renames file between machines.

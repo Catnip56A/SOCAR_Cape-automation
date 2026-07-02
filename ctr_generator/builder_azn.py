@@ -3,7 +3,11 @@ ctr_generator/builder_azn.py
 
 Copies the AZN CTR template and writes labor rows into sheet "Main AZN".
 
-Template layout (verified from 217_AZN template):
+Row/column positions are read from ctr_generator/template_config.json
+(section "azn_template") so they can be adjusted without touching this
+file when a new template version shifts the layout.
+
+Default layout (217_AZN template):
   Row 3  : E3 = CTR ref string, O3 = job ref integer
   Row 7  : "Project Support" section header
   Row 8  : column headers for Project Support section
@@ -28,20 +32,49 @@ All values written as plain Python numbers — no formula reliance.
 from __future__ import annotations
 
 import shutil
+from copy import copy
 from datetime import datetime
 from pathlib import Path
 
 import openpyxl
+from openpyxl.utils import column_index_from_string as _col_idx
 
-# Project Support (Onshore) section — rows 9–18, total at G20
-_ONSHORE_DATA_START  = 9
-_ONSHORE_DATA_END    = 18   # 10 writable rows
+from ctr_generator.config import CFG
 
-# Offshore Activities section — rows 23–62, total at G64
-_OFFSHORE_DATA_START = 23
-_OFFSHORE_DATA_END   = 62
+_azn = CFG["azn_template"]
+
+_ONSHORE_DATA_START  = _azn["onshore_data_start"]
+_ONSHORE_DATA_END    = _azn["onshore_data_end"]
+_ONSHORE_TOTAL_GAP   = _azn["onshore_total_gap"]   # blank rows between data end and total
+
+_OFFSHORE_DATA_START = _azn["offshore_data_start"]
+_OFFSHORE_DATA_END   = _azn["offshore_data_end"]
+_OFFSHORE_TOTAL_GAP  = _azn["offshore_total_gap"]
 
 _DATE_FORMATS = ("%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y", "%d.%m.%Y")
+
+
+def _cell_row_col(addr: str) -> tuple[int, int]:
+    """Convert a cell address like 'G67' to (row=67, col=7)."""
+    col_str = "".join(c for c in addr if c.isalpha())
+    row_str = "".join(c for c in addr if c.isdigit())
+    return int(row_str), _col_idx(col_str)
+
+
+def _copy_row_format(ws, src_row: int, dst_row: int, col_count: int) -> None:
+    """Copy cell formatting (borders, fill, font, alignment) from one row to another."""
+    src_dim = ws.row_dimensions.get(src_row)
+    if src_dim and src_dim.height:
+        ws.row_dimensions[dst_row].height = src_dim.height
+    for col in range(1, col_count + 1):
+        src = ws.cell(row=src_row, column=col)
+        dst = ws.cell(row=dst_row, column=col)
+        if src.has_style:
+            dst.font         = copy(src.font)
+            dst.border       = copy(src.border)
+            dst.fill         = copy(src.fill)
+            dst.number_format = src.number_format
+            dst.alignment    = copy(src.alignment)
 
 
 def _parse_date(value):
@@ -99,40 +132,66 @@ def build_azn(
     except OSError as e:
         raise ValueError(f"Could not copy AZN template to {out_path}: {e}") from e
 
+    sheet_name = _azn["sheet_name"]
     try:
         wb = openpyxl.load_workbook(out_path, keep_vba=False)
-        ws = wb["Main AZN"]
+        ws = wb[sheet_name]
     except KeyError as e:
         raise ValueError(
-            f'AZN Template {template_path} has no sheet named "Main AZN". '
+            f'AZN Template {template_path} has no sheet named "{sheet_name}". '
             f"Is this the right template?"
         ) from e
     except Exception as e:
         raise ValueError(f"Could not read AZN Template {template_path}: {e}") from e
 
     # ── Header cells ──────────────────────────────────────────────────────────
-    ws["E3"] = f"CTR-26-{job_ref} AZN"
-    ws["O3"] = int(job_ref)
+    ws[_azn["cell_ctr_ref"]] = f"CTR-26-{job_ref} AZN"
+    ws[_azn["cell_job_ref"]] = int(job_ref)
 
     if header:
-        if header.get("client"):       ws["B3"] = header["client"]
-        if header.get("sub_client"):   ws["C3"] = header["sub_client"]
-        if header.get("location"):     ws["B4"] = header["location"]
-        if header.get("date"):         ws["E4"] = _parse_date(header["date"])
-        if header.get("contract_no"):  ws["G4"] = header["contract_no"]
+        if header.get("client"):      ws[_azn["cell_client"]]     = header["client"]
+        if header.get("sub_client"):  ws[_azn["cell_sub_client"]] = header["sub_client"]
+        if header.get("location"):    ws[_azn["cell_location"]]   = header["location"]
+        if header.get("date"):        ws[_azn["cell_date"]]       = _parse_date(header["date"])
+        if header.get("contract_no"): ws[_azn["cell_contract_no"]] = header["contract_no"]
         if header.get("revision") not in (None, ""):
-            ws["E5"] = header["revision"]
-        if header.get("scope"):        ws["A6"] = header["scope"]
+            ws[_azn["cell_revision"]] = header["revision"]
+        if header.get("scope"):       ws[_azn["cell_scope"]]      = header["scope"]
 
-    def _write_section(rows, start, end):
-        for row in range(start, end + 1):
-            for col in range(1, 10):
+    # ── Insert extra rows before writing so overflow doesn't clobber the
+    #    offshore section or the summary block ──────────────────────────────────
+    _COLS = 9   # columns A–I used by data rows
+
+    onshore_capacity = _ONSHORE_DATA_END - _ONSHORE_DATA_START + 1
+    onshore_extra    = max(0, len(onshore_rows) - onshore_capacity)
+    if onshore_extra:
+        ws.insert_rows(_ONSHORE_DATA_END + 1, onshore_extra)
+        for i in range(onshore_extra):
+            _copy_row_format(ws, _ONSHORE_DATA_END, _ONSHORE_DATA_END + 1 + i, _COLS)
+
+    # Offshore section has shifted down by onshore_extra
+    off_start = _OFFSHORE_DATA_START + onshore_extra
+    off_end   = _OFFSHORE_DATA_END   + onshore_extra
+
+    offshore_capacity = off_end - off_start + 1
+    offshore_extra    = max(0, len(offshore_rows) - offshore_capacity)
+    if offshore_extra:
+        ws.insert_rows(off_end + 1, offshore_extra)
+        for i in range(offshore_extra):
+            _copy_row_format(ws, off_end, off_end + 1 + i, _COLS)
+
+    # Total row-shift to apply to summary cell addresses
+    _row_shift = onshore_extra + offshore_extra
+
+    # ── Write section helper (captures ws via closure) ─────────────────────────
+    def _write_section(rows, start, eff_end, total_gap):
+        clear_end = max(eff_end, start + len(rows) - 1) if rows else eff_end
+        for row in range(start, clear_end + 1):
+            for col in range(1, _COLS + 1):
                 ws.cell(row=row, column=col).value = None
 
         section_total = 0.0
         for i, lr in enumerate(rows):
-            if i >= (end - start + 1):
-                break
             r = start + i
             try:
                 num_emp = float(lr.get("num_employees", 1) or 1)
@@ -160,17 +219,23 @@ def build_azn(
             ws.cell(row=r, column=8).value = row_total
             ws.cell(row=r, column=9).value = str(lr.get("nationality", "NAT"))
 
+        total_row = start + len(rows) + total_gap
+        ws.cell(row=total_row, column=7).value = section_total
         return section_total
 
-    total_onshore  = _write_section(onshore_rows,  _ONSHORE_DATA_START,  _ONSHORE_DATA_END)
-    total_offshore = _write_section(offshore_rows, _OFFSHORE_DATA_START, _OFFSHORE_DATA_END)
+    total_onshore  = _write_section(
+        onshore_rows,  _ONSHORE_DATA_START, _ONSHORE_DATA_END + onshore_extra,  _ONSHORE_TOTAL_GAP)
+    total_offshore = _write_section(
+        offshore_rows, off_start,           off_end,                             _OFFSHORE_TOTAL_GAP)
 
-    # ── Totals ────────────────────────────────────────────────────────────────
-    ws["G20"] = total_onshore
-    ws["G64"] = total_offshore
-    ws["G67"] = total_onshore
-    ws["G68"] = total_offshore
-    ws["G71"] = total_onshore + total_offshore
+    # ── Summary cells — addresses from config, shifted by any inserted rows ────
+    for _key, _val in (
+        ("cell_summary_onshore",  total_onshore),
+        ("cell_summary_offshore", total_offshore),
+        ("cell_summary_combined", total_onshore + total_offshore),
+    ):
+        _r, _c = _cell_row_col(_azn[_key])
+        ws.cell(row=_r + _row_shift, column=_c).value = _val
 
     try:
         wb.save(out_path)

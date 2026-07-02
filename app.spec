@@ -2,11 +2,25 @@
 # PyInstaller spec — produces a single .exe (Windows)
 # Build: pyinstaller app.spec   (must run on Windows, not WSL)
 
+import os
+
+# JSON config/data files that must travel with the exe.
+# match_aliases.json and ctr_presets.json are written at runtime if they
+# don't exist, but bundling any current copy means user renames/presets
+# carry over into the freshly built exe automatically.
+_DATA_FILES = [
+    ("ctr_generator/template_config.json", "ctr_generator"),
+]
+for _fname in ("match_aliases.json", "ctr_presets.json"):
+    _src = os.path.join("ctr_generator", _fname)
+    if os.path.exists(_src):
+        _DATA_FILES.append((_src, "ctr_generator"))
+
 a = Analysis(
     ["app.py"],
     pathex=[],
     binaries=[],
-    datas=[],
+    datas=_DATA_FILES,
     hiddenimports=[
         "openpyxl",
         "openpyxl.cell._writer",
@@ -15,6 +29,8 @@ a = Analysis(
         "PySide6.QtCore",
         "PySide6.QtGui",
         "PySide6.QtWidgets",
+        "ctr_generator.presets",
+        "ctr_generator.config",
     ],
     hookspath=[],
     hooksconfig={},
