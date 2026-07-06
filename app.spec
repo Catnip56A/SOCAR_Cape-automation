@@ -54,7 +54,7 @@ exe = EXE(
     a.zipfiles,
     a.datas,
     [],
-    name="MR_CTR_Comparator",
+    name="Commercial-automation",
     debug=False,
     strip=False,
     upx=True,

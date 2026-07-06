@@ -1,14 +1,14 @@
-; Inno Setup script — MR vs CTR Comparator
+; Inno Setup script — SOCAR CAPE Commercial-automation
 ; Build steps (Windows only):
-;   1. pyinstaller app.spec          → produces dist\MR_CTR_Comparator.exe
-;   2. iscc setup.iss                → produces Output\MR_CTR_Comparator_Setup_1.0.0.exe
+;   1. pyinstaller app.spec          → produces dist\Commercial-automation.exe
+;   2. iscc setup.iss                → produces Output\Commercial-automation_Setup_1.0.0.exe
 ;
 ; Requires: Inno Setup 6  https://jrsoftware.org/isinfo.php
 
-#define AppName      "MR vs CTR Comparator"
+#define AppName      "SOCAR CAPE Commercial-automation"
 #define AppVersion   "1.0.0"
-#define AppPublisher "SOCAR Cape"
-#define AppExeName   "MR_CTR_Comparator.exe"
+#define AppPublisher "Magsud Abbaszade"
+#define AppExeName   "Commercial-automation.exe"
 #define AppURL       ""
 
 [Setup]
@@ -19,12 +19,12 @@ AppPublisher={#AppPublisher}
 AppPublisherURL={#AppURL}
 AppSupportURL={#AppURL}
 AppUpdatesURL={#AppURL}
-DefaultDirName={autopf}\SOCAR Cape\MR CTR Comparator
+DefaultDirName={autopf}\SOCAR Cape\Commercial-automation
 DefaultGroupName=SOCAR Cape
 AllowNoIcons=yes
 ; Installer output
 OutputDir=Output
-OutputBaseFilename=MR_CTR_Comparator_Setup_{#AppVersion}
+OutputBaseFilename=Commercial-automation_Setup_{#AppVersion}
 SetupIconFile=app_icon.ico
 Compression=lzma
 SolidCompression=yes

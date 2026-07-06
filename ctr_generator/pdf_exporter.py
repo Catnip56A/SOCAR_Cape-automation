@@ -2,14 +2,48 @@
 ctr_generator/pdf_exporter.py
 
 Converts an xlsx file to PDF using LibreOffice headless.
-Requires soffice (LibreOffice) to be on PATH.
+Looks for soffice on PATH first, then falls back to the standard install
+locations per OS — LibreOffice's own installer does not add itself to PATH
+on Windows, so relying on PATH alone misses most real installs there.
 """
 
 from __future__ import annotations
 
+import os
+import platform
 import shutil
 import subprocess
 from pathlib import Path
+
+
+def _find_soffice() -> str | None:
+    """Locate the soffice executable via PATH, then well-known install dirs."""
+    found = shutil.which("soffice") or shutil.which("libreoffice")
+    if found:
+        return found
+
+    candidates: list[str] = []
+    system = platform.system()
+    if system == "Windows":
+        for env_var in ("ProgramFiles", "ProgramFiles(x86)", "ProgramW6432"):
+            base = os.environ.get(env_var)
+            if base:
+                candidates.append(str(Path(base) / "LibreOffice" / "program" / "soffice.exe"))
+    elif system == "Darwin":
+        candidates.append("/Applications/LibreOffice.app/Contents/MacOS/soffice")
+    else:
+        candidates += [
+            "/usr/bin/soffice",
+            "/usr/local/bin/soffice",
+            "/opt/libreoffice/program/soffice",
+            "/snap/bin/libreoffice",
+        ]
+        candidates += [str(p) for p in Path("/opt").glob("libreoffice*/program/soffice")]
+
+    for candidate in candidates:
+        if Path(candidate).is_file():
+            return candidate
+    return None
 
 
 def export_to_pdf(xlsx_path: str | Path, output_dir: str | Path) -> Path:
@@ -22,11 +56,14 @@ def export_to_pdf(xlsx_path: str | Path, output_dir: str | Path) -> Path:
     xlsx_path  = Path(xlsx_path)
     output_dir = Path(output_dir)
 
-    soffice = shutil.which("soffice") or shutil.which("libreoffice")
+    soffice = _find_soffice()
     if soffice is None:
         raise RuntimeError(
-            "LibreOffice (soffice) was not found on PATH.\n"
-            "Please install LibreOffice and ensure 'soffice' is accessible:\n"
+            "LibreOffice (soffice) was not found on PATH or in the standard "
+            "install locations.\n"
+            "Please install LibreOffice — the default installer location "
+            "(e.g. C:\\Program Files\\LibreOffice) is detected automatically, "
+            "no PATH changes needed:\n"
             "  https://www.libreoffice.org/download/download/"
         )
 

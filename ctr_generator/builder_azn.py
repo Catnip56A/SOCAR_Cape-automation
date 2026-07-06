@@ -26,7 +26,12 @@ Default layout (217_AZN template):
     B3 = Client, C3 = Sub-Client, B4 = Location, E4 = Date,
     G4 = Contract No, E5 = Revision, A6 = Scope / description (merged A6:G6)
 
-All values written as plain Python numbers — no formula reliance.
+Input values (comment, employees, quantity, rate, etc.) are written as
+plain Python values. Anything derived from another cell — row totals,
+section totals, summary cells — is written as an Excel formula referencing
+that cell, so editing an input in Excel recalculates its dependents. This
+only matters for the .xlsx output; the PDF export is a flat rendering, so
+formulas there simply show their last-calculated value.
 """
 
 from __future__ import annotations
@@ -38,6 +43,7 @@ from pathlib import Path
 
 import openpyxl
 from openpyxl.utils import column_index_from_string as _col_idx
+from openpyxl.utils import get_column_letter as _col_letter
 
 from ctr_generator.config import CFG
 
@@ -59,6 +65,31 @@ def _cell_row_col(addr: str) -> tuple[int, int]:
     col_str = "".join(c for c in addr if c.isalpha())
     row_str = "".join(c for c in addr if c.isdigit())
     return int(row_str), _col_idx(col_str)
+
+
+def _insert_rows_preserving_merges(ws, insert_row: int, amount: int) -> None:
+    """
+    openpyxl's insert_rows() shifts cell values down but leaves merged-cell
+    ranges at their original row numbers — a stale merge left behind at the
+    insertion point (e.g. a section-header row) silently swallows any data
+    later written into whichever row now occupies that position. Unmerging
+    *after* insert_rows() also fails (the merge's cached cell objects no
+    longer match reality), so affected ranges must be unmerged first,
+    inserted around, then re-merged at their shifted position.
+    """
+    affected = [
+        (mr.min_row, mr.min_col, mr.max_row, mr.max_col)
+        for mr in ws.merged_cells.ranges if mr.min_row >= insert_row
+    ]
+    for min_row, min_col, max_row, max_col in affected:
+        ws.unmerge_cells(start_row=min_row, start_column=min_col,
+                          end_row=max_row, end_column=max_col)
+
+    ws.insert_rows(insert_row, amount)
+
+    for min_row, min_col, max_row, max_col in affected:
+        ws.merge_cells(start_row=min_row + amount, start_column=min_col,
+                        end_row=max_row + amount, end_column=max_col)
 
 
 def _copy_row_format(ws, src_row: int, dst_row: int, col_count: int) -> None:
@@ -165,7 +196,7 @@ def build_azn(
     onshore_capacity = _ONSHORE_DATA_END - _ONSHORE_DATA_START + 1
     onshore_extra    = max(0, len(onshore_rows) - onshore_capacity)
     if onshore_extra:
-        ws.insert_rows(_ONSHORE_DATA_END + 1, onshore_extra)
+        _insert_rows_preserving_merges(ws, _ONSHORE_DATA_END + 1, onshore_extra)
         for i in range(onshore_extra):
             _copy_row_format(ws, _ONSHORE_DATA_END, _ONSHORE_DATA_END + 1 + i, _COLS)
 
@@ -176,21 +207,22 @@ def build_azn(
     offshore_capacity = off_end - off_start + 1
     offshore_extra    = max(0, len(offshore_rows) - offshore_capacity)
     if offshore_extra:
-        ws.insert_rows(off_end + 1, offshore_extra)
+        _insert_rows_preserving_merges(ws, off_end + 1, offshore_extra)
         for i in range(offshore_extra):
             _copy_row_format(ws, off_end, off_end + 1 + i, _COLS)
+    off_eff_end = off_end + offshore_extra
 
     # Total row-shift to apply to summary cell addresses
     _row_shift = onshore_extra + offshore_extra
 
     # ── Write section helper (captures ws via closure) ─────────────────────────
-    def _write_section(rows, start, eff_end, total_gap):
+    def _write_section(rows, start, eff_end, total_gap) -> int:
+        """Writes one section's rows and its total; returns the total row number."""
         clear_end = max(eff_end, start + len(rows) - 1) if rows else eff_end
         for row in range(start, clear_end + 1):
             for col in range(1, _COLS + 1):
                 ws.cell(row=row, column=col).value = None
 
-        section_total = 0.0
         for i, lr in enumerate(rows):
             r = start + i
             try:
@@ -206,36 +238,43 @@ def build_azn(
             except (ValueError, TypeError):
                 rate = 0.0
 
-            row_total = num_emp * qty * rate
-            section_total += row_total
-
             ws.cell(row=r, column=1).value = str(lr.get("comment", ""))
             ws.cell(row=r, column=2).value = num_emp
             ws.cell(row=r, column=3).value = str(lr.get("description", ""))
             ws.cell(row=r, column=4).value = qty
             ws.cell(row=r, column=5).value = str(lr.get("uom", "Hours"))
             ws.cell(row=r, column=6).value = rate
-            ws.cell(row=r, column=7).value = row_total
-            ws.cell(row=r, column=8).value = row_total
+            ws.cell(row=r, column=7).value = f"=B{r}*D{r}*F{r}"
+            ws.cell(row=r, column=8).value = f"=G{r}"
             ws.cell(row=r, column=9).value = str(lr.get("nationality", "NAT"))
 
-        total_row = start + len(rows) + total_gap
-        ws.cell(row=total_row, column=7).value = section_total
-        return section_total
+        # The total always sits total_gap rows after the section's full
+        # capacity block (eff_end), not after however many rows were
+        # actually written — otherwise a request with fewer rows than the
+        # template's capacity writes the total into a blank filler row
+        # instead of the fixed "Total Project Support"/"Total Offshore" row.
+        # Summing the whole capacity range (not just the written rows) is
+        # safe — the cleared rows above are blank and contribute 0.
+        total_row = eff_end + total_gap + 1
+        ws.cell(row=total_row, column=7).value = f"=SUM(G{start}:G{eff_end})"
+        return total_row
 
-    total_onshore  = _write_section(
+    onshore_total_row  = _write_section(
         onshore_rows,  _ONSHORE_DATA_START, _ONSHORE_DATA_END + onshore_extra,  _ONSHORE_TOTAL_GAP)
-    total_offshore = _write_section(
-        offshore_rows, off_start,           off_end,                             _OFFSHORE_TOTAL_GAP)
+    offshore_total_row = _write_section(
+        offshore_rows, off_start,           off_eff_end,                        _OFFSHORE_TOTAL_GAP)
 
     # ── Summary cells — addresses from config, shifted by any inserted rows ────
-    for _key, _val in (
-        ("cell_summary_onshore",  total_onshore),
-        ("cell_summary_offshore", total_offshore),
-        ("cell_summary_combined", total_onshore + total_offshore),
-    ):
-        _r, _c = _cell_row_col(_azn[_key])
-        ws.cell(row=_r + _row_shift, column=_c).value = _val
+    _r, _c = _cell_row_col(_azn["cell_summary_onshore"])
+    onshore_summary_addr = f"{_col_letter(_c)}{_r + _row_shift}"
+    ws.cell(row=_r + _row_shift, column=_c).value = f"=G{onshore_total_row}"
+
+    _r, _c = _cell_row_col(_azn["cell_summary_offshore"])
+    offshore_summary_addr = f"{_col_letter(_c)}{_r + _row_shift}"
+    ws.cell(row=_r + _row_shift, column=_c).value = f"=G{offshore_total_row}"
+
+    _r, _c = _cell_row_col(_azn["cell_summary_combined"])
+    ws.cell(row=_r + _row_shift, column=_c).value = f"={onshore_summary_addr}+{offshore_summary_addr}"
 
     try:
         wb.save(out_path)

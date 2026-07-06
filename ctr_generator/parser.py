@@ -2,10 +2,11 @@
 ctr_generator/parser.py
 
 Reads the source files for CTR generation:
-  - AZN pricebook  (4410030127_*.xlsx)
-  - USD pricebook  (4410030190_*.xlsx)
-  - SAGE export    (FROM_SAGE_*.xlsm)
-  - CTR Request    (<job>_*.xlsm)
+  - AZN pricebook  (4410030127_*.xlsx)                        — manpower rates
+  - Combined DB    (CTR_NAMES_DB & CTR_REQUEST.xlsx)           — SAGE, equipment
+                                                                  names bridge,
+                                                                  and CTR Request,
+                                                                  all in one file
 
 Pricebook layout (verified from 4410030127):
   Rows 0–6 are header / guidance metadata.
@@ -19,7 +20,23 @@ Pricebook layout (verified from 4410030127):
 
 These indices (and sheet names / skip rows) are configurable via
 ctr_generator/template_config.json — see the "pricebook", "sage_export",
-and "ctr_request" sections.
+"names_db", and "ctr_request" sections.
+
+Combined DB layout:
+  Sheet "SAGE" — unchanged consumables/equipment rate export, columns
+    product | long_description | local_expect_cost | unit_code (+ extras).
+    Equipment rates now live here too (keyed by stock code), not in a
+    separate USD Pricebook file.
+
+  Sheet "CTR_NAMES_DB_USD" — bridges a CTR Request equipment stock code to
+    the canonical name used to look it up in SAGE by description, for the
+    codes that aren't themselves present as a SAGE product code (e.g. fleet
+    items where several serials share one generic day rate):
+      col A = product / stock code
+      col B = legacy name (CTR_CREATOR_LEGACY naming)
+      col C = canonical pricebook name, or the literal "NON-RECHARGEABLE"
+              tag for items that are never billed to the client — those are
+              always shown using the column B name at a rate of 0.
 
 CTR Request layout (verified from 102290776 sample):
   Sheet "REQUEST":
@@ -52,11 +69,13 @@ from ctr_generator.config import CFG
 
 _pb  = CFG["pricebook"]
 _sg  = CFG["sage_export"]
+_nm  = CFG["names_db"]
 _req = CFG["ctr_request"]
 
 _PRICEBOOK_SHEET   = _pb["sheet_name"]
 _PRICEBOOK_SKIPROWS = _pb["skip_rows"]
 _SAGE_SHEET        = _sg["sheet_name"]
+_NAMES_DB_SHEET    = _nm["sheet_name"]
 _REQUEST_SHEET     = _req["sheet_name"]
 
 
@@ -158,39 +177,6 @@ def parse_azn_pricebook(src) -> pd.DataFrame:
     return df.reset_index(drop=True)
 
 
-def parse_usd_pricebook(src) -> pd.DataFrame:
-    """
-    Returns DataFrame with columns:
-      stock_code | uom | supplier_desc | unit_price (float)
-
-    Filtered to rows where product_type == 'SERVICE' and uom == 'DAY'.
-    """
-    df = _read_pricebook_raw(src, "USD Pricebook")
-    df = df.rename(columns={
-        _pb["col_stock_code"]:    "stock_code",
-        _pb["col_product_type"]:  "product_type",
-        _pb["col_uom"]:           "uom",
-        _pb["col_supplier_desc"]: "supplier_desc",
-        _pb["col_unit_price"]:    "unit_price",
-    })
-    df = df[["stock_code", "product_type", "uom", "supplier_desc", "unit_price"]].copy()
-    df["stock_code"]    = df["stock_code"].fillna("").str.strip()
-    df["product_type"]  = df["product_type"].fillna("").str.strip().str.upper()
-    df["uom"]           = df["uom"].fillna("").str.strip().str.upper()
-    df["supplier_desc"] = df["supplier_desc"].fillna("").str.strip().str.title()
-    df["unit_price"]    = pd.to_numeric(df["unit_price"], errors="coerce").fillna(0.0)
-
-    mask = (df["product_type"] == "SERVICE") & (df["uom"] == "DAY")
-    df = df[mask].drop(columns=["product_type"]).copy()
-    if df.empty:
-        raise ValueError(
-            f"{_display_name(src)} opened, but no SERVICE/DAY rows were found "
-            f"after parsing. Is this the right USD Pricebook "
-            f'(sheet "{_PRICEBOOK_SHEET}", standard {_PRICEBOOK_SKIPROWS}-row header)?'
-        )
-    return df.reset_index(drop=True)
-
-
 # ─────────────────────────────────────────────────────────────────────────────
 # SAGE export
 # ─────────────────────────────────────────────────────────────────────────────
@@ -206,7 +192,11 @@ def parse_sage(src) -> pd.DataFrame:
     item (equipment rentals, misc charges, etc.) as a consumable line.
 
     Filters:
-      - product does NOT start with 'S'
+      - excludes the "S0000000000" placeholder code (generic
+        "Service Order Description" rows with arbitrary, unmatchable prices —
+        not a real stock code). Real stock codes that merely start with "S"
+        (e.g. "SP3000054035") are kept; an earlier version of this filter
+        excluded any code starting with "S" and silently dropped those too.
     """
     try:
         df = pd.read_excel(
@@ -236,56 +226,70 @@ def parse_sage(src) -> pd.DataFrame:
     df["unit_code"]         = df["unit_code"].fillna("EA").str.strip()
     df["local_expect_cost"] = pd.to_numeric(df["local_expect_cost"], errors="coerce").fillna(0.0)
 
-    mask = ~df["product"].str.upper().str.startswith("S")
+    mask = df["product"].str.upper() != "S0000000000"
     df = df[mask][["product", "long_description", "local_expect_cost", "unit_code"]].copy()
     return df.reset_index(drop=True)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Equipment names database
+# Equipment names database (stock code → canonical SAGE lookup name)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def parse_names_db(src) -> pd.DataFrame:
+def parse_equip_names_db(src) -> pd.DataFrame:
     """
-    Reads an equipment names / stock-code lookup file (e.g. CTR_NAMES_DB.xlsx).
+    Reads the "CTR_NAMES_DB_USD" sheet of the Combined DB workbook.
 
-    Expected columns (row 0 = header row):
-      product          — stock / product code used in CTR Requests
-      long_description — canonical equipment name
+    Columns are read by position (configurable via the "names_db" section of
+    template_config.json — col_product / col_legacy_name / col_canonical_name
+    / col_rate), since the header labels on this sheet aren't standardized:
+      product / stock code
+      legacy name (CTR_CREATOR_LEGACY naming)
+      canonical pricebook name, or the literal "NON-RECHARGEABLE"
+      USD rate — authoritative for this stock code, used directly instead
+        of looking the canonical name up in SAGE
 
-    Extra columns are ignored so the file can grow new columns without
-    requiring code changes.
+    Returns DataFrame with columns:
+      product | legacy_name | canonical_name | non_recharge (bool) | rate
 
-    Returns DataFrame with columns: product | long_description
-    Raises ValueError with an actionable message on any read failure.
+    non_recharge rows always bill at 0 regardless of the rate column (some
+    NON-RECHARGEABLE rows carry a leftover nonzero rate that should be
+    ignored) — the caller should use legacy_name for display in that case.
+    Rechargeable rows use the rate column directly.
     """
     try:
-        df = pd.read_excel(_open(src), header=0, dtype=str)
+        df = pd.read_excel(
+            _open(src), sheet_name=_NAMES_DB_SHEET, header=0, dtype=str,
+        )
     except Exception as e:
-        raise _friendly_open_error(e, src, "Equipment Names DB", "(any sheet)") from e
+        raise _friendly_open_error(e, src, "Equipment Names DB", _NAMES_DB_SHEET) from e
 
-    df.columns = [c.strip() for c in df.columns]
-
-    required = {"product", "long_description"}
-    missing = required - set(df.columns)
-    if missing:
-        found = ", ".join(df.columns[:10]) + ("…" if len(df.columns) > 10 else "")
+    _cols = (_nm["col_product"], _nm["col_legacy_name"], _nm["col_canonical_name"], _nm["col_rate"])
+    if df.shape[1] < max(_cols):
         raise ValueError(
-            f"{_display_name(src)} is missing expected column(s): "
-            f"{', '.join(sorted(missing))}. Found columns: {found}. "
-            f"Is this the right Equipment Names DB?"
+            f'{_display_name(src)} has only {df.shape[1]} column(s) on the '
+            f'"{_NAMES_DB_SHEET}" sheet — expected at least {max(_cols)} (stock '
+            f"code, legacy name, canonical pricebook name, UOM, USD rate). Is "
+            f"this the right Combined DB file?"
         )
 
-    df["product"]          = df["product"].fillna("").str.strip()
-    df["long_description"] = df["long_description"].fillna("").str.strip()
-    df = df[df["product"] != ""][["product", "long_description"]].copy()
+    df = df.iloc[:, [c - 1 for c in _cols]].copy()
+    df.columns = ["product", "legacy_name", "canonical_name", "rate"]
+    df["product"]         = df["product"].fillna("").str.strip()
+    df["legacy_name"]     = df["legacy_name"].fillna("").str.strip()
+    df["canonical_name"]  = df["canonical_name"].fillna("").str.strip()
+    df["non_recharge"]    = df["canonical_name"].str.upper() == "NON-RECHARGEABLE"
+    df.loc[df["non_recharge"], "canonical_name"] = ""
+    df["rate"] = pd.to_numeric(df["rate"], errors="coerce").fillna(0.0)
+    df.loc[df["non_recharge"], "rate"] = 0.0
+    df = df[df["product"] != ""].reset_index(drop=True)
 
     if df.empty:
         raise ValueError(
             f"{_display_name(src)} opened but contained no rows after filtering "
-            f"empty product codes. Is this the right Equipment Names DB?"
+            f'empty stock codes on the "{_NAMES_DB_SHEET}" sheet. Is this the '
+            f"right Combined DB file?"
         )
-    return df.reset_index(drop=True)
+    return df
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -342,43 +346,85 @@ def parse_ctr_request(src) -> dict:
         "job_description":   _v(_req["row_job_description"],   _req["col_job_description"]),
     }
 
-    # The line-item table runs from data_start_row while col 1 (№) is a
-    # sequential integer; below it (e.g. row 164 onward) sits an unrelated
-    # logistics/extras block that must not be parsed as line items.
+    # The line-item table runs from data_start_row; below it (e.g. row 164
+    # onward in the standard template) sits an unrelated logistics/extras
+    # block that must not be parsed as line items.
+    #
+    # Manpower rows are still gated on col 1 (№) being a sequential integer
+    # — that column is specifically the manpower row counter, and the
+    # logistics block reuses the manpower description column with text
+    # like "Additional Information", so col 1 is the only reliable guard
+    # there.
+    #
+    # Equipment/consumables are gated on their stock-code column instead —
+    # a request can have far more equipment/consumable lines than manpower
+    # lines (or the requester may not have extended the № column to match
+    # when pasting in extra rows), so tying their continuation to col 1
+    # would silently truncate the list once № ran out even though real
+    # stock codes continue below. A stock code is recognised by containing
+    # a digit, which every real code does (e.g. "S0000000000") but the
+    # logistics block's column-reused labels ("TRANSPORT") do not.
+    def _looks_like_stock_code(value: str) -> bool:
+        return bool(value) and any(ch.isdigit() for ch in value)
+
     manpower_rows, equipment_rows, consumable_rows = [], [], []
     r = _req["data_start_row"]
-    while isinstance(ws.cell(row=r, column=1).value, (int, float)):
+    blank_streak = 0
+    _MAX_BLANK_STREAK = 5    # consecutive empty rows before the table is considered done
+    _MAX_ROWS_SCANNED  = 1000  # hard safety cap against a malformed sheet
+    scanned = 0
+    while blank_streak < _MAX_BLANK_STREAK and scanned < _MAX_ROWS_SCANNED:
+        has_row_number = isinstance(ws.cell(row=r, column=1).value, (int, float))
+
         manpower_desc = _v(r, _req["manpower_desc_col"])
-        if manpower_desc:
-            manpower_rows.append({
-                "description":   manpower_desc,
-                "quantity":      _v(r, _req["manpower_qty_col"]),
-                "working_days":  _v(r, _req["manpower_working_days_col"]),
-                "shift":         _v(r, _req["manpower_shift_col"]),
-                "weekend":       _v(r, _req["manpower_weekend_col"]),
-                "weekend_shift": _v(r, _req["manpower_weekend_shift_col"]),
-            })
+        has_manpower  = has_row_number and bool(manpower_desc)
 
+        equip_code = _v(r, _req["equip_stock_code_col"])
         equip_desc = _v(r, _req["equip_desc_col"])
-        if equip_desc:
-            equipment_rows.append({
-                "stock_code":  _v(r, _req["equip_stock_code_col"]),
-                "description": equip_desc,
-                "uom":         _v(r, _req["equip_uom_col"]),
-                "quantity":    _v(r, _req["equip_qty_col"]),
-                "days":        _v(r, _req["equip_days_col"]),
+        has_equip  = _looks_like_stock_code(equip_code) and bool(equip_desc)
+
+        cons_code = _v(r, _req["cons_stock_code_col"])
+        cons_desc = _v(r, _req["cons_desc_col"])
+        has_cons  = _looks_like_stock_code(cons_code) and bool(cons_desc)
+
+        if not (has_manpower or has_equip or has_cons or has_row_number):
+            blank_streak += 1
+            r += 1
+            scanned += 1
+            continue
+        blank_streak = 0
+
+        if has_manpower:
+            manpower_rows.append({
+                "description":    manpower_desc,
+                "quantity":       _v(r, _req["manpower_qty_col"]),
+                "working_days":   _v(r, _req["manpower_working_days_col"]),
+                "shift":          _v(r, _req["manpower_shift_col"]),
+                "status":         _v(r, _req["manpower_status_col"]),
+                "encoding":       _v(r, _req["manpower_encoding_col"]),
             })
 
-        cons_desc = _v(r, _req["cons_desc_col"])
-        if cons_desc:
+        if has_equip:
+            equipment_rows.append({
+                "stock_code":     equip_code,
+                "description":    equip_desc,
+                "rechargability": _v(r, _req["equip_rechargability_col"]),
+                "uom":            _v(r, _req["equip_uom_col"]),
+                "quantity":       _v(r, _req["equip_qty_col"]),
+                "days":           _v(r, _req["equip_days_col"]),
+            })
+
+        if has_cons:
             consumable_rows.append({
-                "stock_code":  _v(r, _req["cons_stock_code_col"]),
-                "description": cons_desc,
-                "uom":         _v(r, _req["cons_uom_col"]),
-                "quantity":    _v(r, _req["cons_qty_col"]),
+                "stock_code":     cons_code,
+                "description":    cons_desc,
+                "uom":            _v(r, _req["cons_uom_col"]),
+                "quantity":       _v(r, _req["cons_qty_col"]),
+                "rechargability": _v(r, _req["cons_rechargability_col"]),
             })
 
         r += 1
+        scanned += 1
 
     result["manpower_rows"]   = manpower_rows
     result["equipment_rows"]  = equipment_rows

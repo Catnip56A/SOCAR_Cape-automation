@@ -9,16 +9,28 @@ file when a new template version shifts the layout.
 
 Default layout (217_USD template):
 
-  Sheet "Main":
+  Sheet "Main" (two independent item lists, each growing downward inside
+  its own section — "Plant & Equipment" and "Materials/Consumables &
+  Others" — right before that section's own Total row; every fixed cell
+  below a list shifts down by however many extra rows it needed):
     E3  = CTR ref string
     O3  = job ref integer
-    G110, G112 = total_equipment
-    G115       = total_consumables_raw
-    G116       = consumables_markup
-    G120       = total_consumables  (raw + markup)
-    G126       = total_equipment   (summary row 4)
-    G127       = total_consumables_raw (summary row 5)
-    G130       = estimated_ctr_total_usd
+    C111, G111 = equipment list, one row per item (name, cost) — grows
+                 into the "Plant & Equipment" block. Cells configurable via
+                 cell_equip_list_name / cell_equip_list_cost.
+    G112       = total_equipment (shifts with the equipment list; G110,
+                 the redundant mirror at the section header row, is left
+                 untouched)
+    G115       = total_consumables_raw (shifts with the equipment list)
+    G116       = consumables_markup (shifts with the equipment list)
+    C119, G119 = consumables list, one row per item (name, cost) — grows
+                 into the "Materials/Consumables & Others" block, below
+                 the equipment list's own shift. Cells configurable via
+                 cell_cons_list_name / cell_cons_list_cost.
+    G120       = total_consumables  (raw + markup; shifts with both lists)
+    G126       = total_equipment   (summary row 4; shifts with both lists)
+    G127       = total_consumables_raw (summary row 5; shifts with both lists)
+    G130       = estimated_ctr_total_usd (shifts with both lists)
 
   Sheet "Pricing":
     Row 10       : equipment header
@@ -35,7 +47,14 @@ Default layout (217_USD template):
     B3 = Client, C3 = Sub-Client, B4 = Location, E4 = Date,
     G4 = Contract No, E5 = Revision, A6 = Scope / description (merged A6:G6)
 
-All values written as plain Python numbers — no formula reliance.
+Input values (description, quantity, rate, price, etc.) are written as
+plain Python values. Anything derived from another cell — row totals,
+section totals, the Main-sheet item lists, and the summary block — is
+written as an Excel formula referencing that cell (including cross-sheet
+references from "Main" to "Pricing"), so editing an input in Excel
+recalculates its dependents. This only matters for the .xlsx output; the
+PDF export is a flat rendering, so formulas there simply show their
+last-calculated value.
 """
 
 from __future__ import annotations
@@ -46,6 +65,8 @@ from datetime import datetime
 from pathlib import Path
 
 import openpyxl
+from openpyxl.utils import column_index_from_string as _col_idx
+from openpyxl.utils import get_column_letter as _col_letter
 
 from ctr_generator.config import CFG
 
@@ -65,6 +86,66 @@ _EQUIP_TOTAL_COL2 = 9   # I — SC cost mirror
 _CONS_TOTAL_COL   = 6   # F — row total
 
 _DATE_FORMATS = ("%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y", "%d.%m.%Y")
+
+
+def _cell_row_col(addr: str) -> tuple[int, int]:
+    """Convert a cell address like 'G111' to (row=111, col=7)."""
+    col_str = "".join(c for c in addr if c.isalpha())
+    row_str = "".join(c for c in addr if c.isdigit())
+    return int(row_str), _col_idx(col_str)
+
+
+def _shift_cell(addr: str, row_shift: int) -> str:
+    """Return addr with its row number increased by row_shift."""
+    row, col = _cell_row_col(addr)
+    return f"{_col_letter(col)}{row + row_shift}"
+
+
+def _insert_rows_preserving_merges(ws, insert_row: int, amount: int) -> None:
+    """
+    openpyxl's insert_rows() shifts cell values down but leaves merged-cell
+    ranges at their original row numbers — a stale merge left behind at the
+    insertion point (e.g. a section-header row) silently swallows any data
+    later written into whichever row now occupies that position. Unmerging
+    *after* insert_rows() also fails (the merge's cached cell objects no
+    longer match reality), so affected ranges must be unmerged first,
+    inserted around, then re-merged at their shifted position.
+    """
+    affected = [
+        (mr.min_row, mr.min_col, mr.max_row, mr.max_col)
+        for mr in ws.merged_cells.ranges if mr.min_row >= insert_row
+    ]
+    for min_row, min_col, max_row, max_col in affected:
+        ws.unmerge_cells(start_row=min_row, start_column=min_col,
+                          end_row=max_row, end_column=max_col)
+
+    ws.insert_rows(insert_row, amount)
+
+    for min_row, min_col, max_row, max_col in affected:
+        ws.merge_cells(start_row=min_row + amount, start_column=min_col,
+                        end_row=max_row + amount, end_column=max_col)
+
+
+def _write_item_list(
+    ws, list_row: int, name_col: int, cost_col: int, items: list[tuple[str, float]],
+) -> int:
+    """
+    Writes `items` as one row per item starting at list_row (name in
+    name_col, cost in cost_col), inserting extra rows below the first item
+    if there's more than one — mirrors how the Pricing sheet sections grow.
+    Returns the number of extra rows inserted (0 if 0 or 1 items), so the
+    caller can shift everything below by that amount.
+    """
+    shift = max(0, len(items) - 1)
+    if shift:
+        _insert_rows_preserving_merges(ws, list_row + 1, shift)
+        for i in range(shift):
+            _copy_row_format(ws, list_row, list_row + 1 + i, max(name_col, cost_col))
+    for i, (name, cost) in enumerate(items):
+        r = list_row + i
+        ws.cell(row=r, column=name_col).value = name
+        ws.cell(row=r, column=cost_col).value = cost
+    return shift
 
 
 def _copy_row_format(ws, src_row: int, dst_row: int, col_count: int) -> None:
@@ -193,7 +274,7 @@ def build_usd(
     equip_capacity = _EQUIP_END - _EQUIP_START + 1
     equip_extra    = max(0, len(equip_rows) - equip_capacity)
     if equip_extra:
-        ws_p.insert_rows(_EQUIP_END + 1, equip_extra)
+        _insert_rows_preserving_merges(ws_p, _EQUIP_END + 1, equip_extra)
         for i in range(equip_extra):
             _copy_row_format(ws_p, _EQUIP_END, _EQUIP_END + 1 + i, _COLS)
 
@@ -204,7 +285,7 @@ def build_usd(
     cons_capacity = cons_end - cons_start + 1
     cons_extra    = max(0, len(consump_rows) - cons_capacity)
     if cons_extra:
-        ws_p.insert_rows(cons_end + 1, cons_extra)
+        _insert_rows_preserving_merges(ws_p, cons_end + 1, cons_extra)
         for i in range(cons_extra):
             _copy_row_format(ws_p, cons_end, cons_end + 1 + i, _COLS)
 
@@ -215,7 +296,12 @@ def build_usd(
         for col in range(1, _COLS + 1):
             _set_cell(ws_p, row, col, None)
 
-    total_equipment = 0.0
+    # Items are (name, cost) pairs, where cost is a formula string referencing
+    # this same row's total on the Pricing sheet — not a duplicated literal —
+    # so the Main-sheet list stays in sync with the Pricing sheet in Excel.
+    equip_cost_list: list[tuple[str, str]] = []
+    cons_cost_list:  list[tuple[str, str]] = []
+
     for i, er in enumerate(equip_rows):
         r         = _EQUIP_START + i
         item_no   = i + 1
@@ -231,8 +317,8 @@ def build_usd(
         except (TypeError, ValueError):
             rate = 0.0
 
-        row_total = rate * days * qty
-        total_equipment += row_total
+        if desc:
+            equip_cost_list.append((desc, f"='{pricing_sheet}'!G{r}"))
 
         _set_cell(ws_p, r, 1,  item_no)
         _set_cell(ws_p, r, 2,  desc)
@@ -240,23 +326,29 @@ def build_usd(
         _set_cell(ws_p, r, 4,  unit)
         _set_cell(ws_p, r, 5,  rate)
         _set_cell(ws_p, r, 6,  days)
-        _set_cell(ws_p, r, 7,  row_total)
-        _set_cell(ws_p, r, 8,  item_no)
-        _set_cell(ws_p, r, 9,  row_total)
+        _set_cell(ws_p, r, 7,  f"=C{r}*E{r}*F{r}")
+        _set_cell(ws_p, r, 8,  f"=A{r}")
+        _set_cell(ws_p, r, 9,  f"=G{r}")
         _set_cell(ws_p, r, 10, stock)
 
-    equip_total_row = _EQUIP_START + len(equip_rows)
-    _set_cell(ws_p, equip_total_row, _EQUIP_TOTAL_COL,  total_equipment)
-    _set_cell(ws_p, equip_total_row, _EQUIP_TOTAL_COL2, total_equipment)
+    # The total always sits immediately after the section's full capacity
+    # block (equip_eff_end), not after however many rows were actually
+    # written — otherwise a request with fewer rows than the template's
+    # capacity writes the total into a blank filler row instead of the
+    # fixed "Total Plant & Equipment" row.
+    equip_total_row = equip_eff_end + 1
+    equip_total_col_letter = _col_letter(_EQUIP_TOTAL_COL)
+    _set_cell(ws_p, equip_total_row, _EQUIP_TOTAL_COL,
+              f"=SUM({equip_total_col_letter}{_EQUIP_START}:{equip_total_col_letter}{equip_eff_end})")
+    _set_cell(ws_p, equip_total_row, _EQUIP_TOTAL_COL2, f"=G{equip_total_row}")
 
     # ── Pricing sheet: clear and write consumables rows ───────────────────────
-    cons_eff_end   = cons_end
+    cons_eff_end   = cons_end + cons_extra
     cons_clear_end = max(cons_eff_end, cons_start + len(consump_rows) - 1) if consump_rows else cons_eff_end
     for row in range(cons_start, cons_clear_end + 1):
         for col in range(1, _COLS + 1):
             _set_cell(ws_p, row, col, None)
 
-    total_consumables_raw = 0.0
     for i, cr in enumerate(consump_rows):
         r         = cons_start + i
         item_no   = i + 1
@@ -266,36 +358,71 @@ def build_usd(
         price     = _safe_float(cr.get("local_expect_cost", 0), 0.0)
         product   = str(cr.get("product", ""))
 
-        row_total = price * qty
-        total_consumables_raw += row_total
+        if desc:
+            cons_cost_list.append((desc, f"='{pricing_sheet}'!F{r}"))
 
         _set_cell(ws_p, r, 1,  item_no)
         _set_cell(ws_p, r, 2,  desc)
         _set_cell(ws_p, r, 3,  qty)
         _set_cell(ws_p, r, 4,  unit)
         _set_cell(ws_p, r, 5,  price)
-        _set_cell(ws_p, r, 6,  row_total)
-        _set_cell(ws_p, r, 8,  item_no)
-        _set_cell(ws_p, r, 9,  row_total)
+        _set_cell(ws_p, r, 6,  f"=C{r}*E{r}")
+        _set_cell(ws_p, r, 8,  f"=A{r}")
+        _set_cell(ws_p, r, 9,  f"=F{r}")
         _set_cell(ws_p, r, 10, product)
 
-    cons_total_row = cons_start + len(consump_rows)
-    _set_cell(ws_p, cons_total_row, _CONS_TOTAL_COL, total_consumables_raw)
+    # Same fixed-position rule as equip_total_row above.
+    cons_total_row = cons_eff_end + 1
+    cons_total_col_letter = _col_letter(_CONS_TOTAL_COL)
+    _set_cell(ws_p, cons_total_row, _CONS_TOTAL_COL,
+              f"=SUM({cons_total_col_letter}{cons_start}:{cons_total_col_letter}{cons_eff_end})")
 
-    # ── Derived totals ────────────────────────────────────────────────────────
-    consumables_markup      = total_consumables_raw * _MARKUP_RATE
-    total_consumables       = total_consumables_raw + consumables_markup
-    estimated_ctr_total_usd = total_equipment + total_consumables
+    # ── Main sheet: equipment list — one row per item, name/cost, growing
+    #    downward from cell_equip_list_name/_cost (inside the "Plant &
+    #    Equipment" block, right before its own Total row). ───────────────
+    equip_list_row, equip_name_col = _cell_row_col(_usd["cell_equip_list_name"])
+    _,              equip_cost_col = _cell_row_col(_usd["cell_equip_list_cost"])
+    equip_shift = _write_item_list(
+        ws_m, equip_list_row, equip_name_col, equip_cost_col, equip_cost_list)
 
-    # ── Main sheet: totals ────────────────────────────────────────────────────
-    ws_m[_usd["cell_total_equip_1"]]     = total_equipment
-    ws_m[_usd["cell_total_equip_2"]]     = total_equipment
-    ws_m[_usd["cell_total_cons_raw"]]    = total_consumables_raw
-    ws_m[_usd["cell_total_cons_markup"]] = consumables_markup
-    ws_m[_usd["cell_total_cons"]]        = total_consumables
-    ws_m[_usd["cell_summary_equip"]]     = total_equipment
-    ws_m[_usd["cell_summary_cons_raw"]]  = total_consumables_raw
-    ws_m[_usd["cell_summary_grand"]]     = estimated_ctr_total_usd
+    # ── Main sheet: consumables list — same idea, inside the "Materials/
+    #    Consumables & Others" block. Its configured row is shifted down by
+    #    equip_shift first, since the equipment list above it already moved
+    #    it when it grew. ────────────────────────────────────────────────
+    cons_list_row, cons_name_col = _cell_row_col(_usd["cell_cons_list_name"])
+    _,             cons_cost_col = _cell_row_col(_usd["cell_cons_list_cost"])
+    cons_shift = _write_item_list(
+        ws_m, cons_list_row + equip_shift, cons_name_col, cons_cost_col, cons_cost_list)
+
+    total_shift = equip_shift + cons_shift
+
+    # ── Main sheet: totals — cells between the two lists shift by
+    #    equip_shift only; everything at/after the consumables list shifts
+    #    by both. Every cell here is a formula: a direct cross-sheet
+    #    reference to its Pricing-sheet total, or an arithmetic combination
+    #    of other Main-sheet cells already addressed above — never a
+    #    duplicated literal. The Summary block keeps equipment and
+    #    consumables as separate line items (no double-counting). ──────────
+    total_equip_addr = _shift_cell(_usd["cell_total_equip_2"], equip_shift)
+    ws_m[total_equip_addr] = f"='{pricing_sheet}'!G{equip_total_row}"
+
+    cons_raw_addr = _shift_cell(_usd["cell_total_cons_raw"], equip_shift)
+    ws_m[cons_raw_addr] = f"='{pricing_sheet}'!F{cons_total_row}"
+
+    cons_markup_addr = _shift_cell(_usd["cell_total_cons_markup"], equip_shift)
+    ws_m[cons_markup_addr] = f"={cons_raw_addr}*{_MARKUP_RATE}"
+
+    cons_total_addr = _shift_cell(_usd["cell_total_cons"], total_shift)
+    ws_m[cons_total_addr] = f"={cons_raw_addr}+{cons_markup_addr}"
+
+    summary_equip_addr = _shift_cell(_usd["cell_summary_equip"], total_shift)
+    ws_m[summary_equip_addr] = f"={total_equip_addr}"
+
+    summary_cons_raw_addr = _shift_cell(_usd["cell_summary_cons_raw"], total_shift)
+    ws_m[summary_cons_raw_addr] = f"={cons_raw_addr}"
+
+    summary_grand_addr = _shift_cell(_usd["cell_summary_grand"], total_shift)
+    ws_m[summary_grand_addr] = f"={summary_equip_addr}+{cons_total_addr}"
 
     try:
         wb.save(out_path)

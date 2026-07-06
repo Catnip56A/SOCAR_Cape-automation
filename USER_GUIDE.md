@@ -223,8 +223,8 @@ The app looks for the following columns in MR tables (column names are matched c
 
 The **CTR Generator** tab produces the two standard CTR spreadsheets (AZN and USD) plus their PDF equivalents from a single CTR Request form. It:
 
-1. Reads the requested manpower, equipment, and consumables from a **CTR Request** Excel file.
-2. Looks up each requested item in the **AZN Pricebook**, **USD Pricebook**, **SAGE Export**, and optionally an **Equipment Names DB** to find the correct rate.
+1. Reads the requested manpower, equipment, and consumables from the **Combined DB** file's CTR Request sheet.
+2. Looks up each requested item in the **AZN Pricebook** (manpower) and, for equipment/consumables, in the **Combined DB** file's SAGE and equipment-names sheets, to find the correct rate.
 3. Lets you review, correct, and approve every match on screen before writing any output.
 4. Writes filled copies of the **AZN Template** and **USD Template** with all rows, totals, and header fields populated — and exports each to PDF via LibreOffice.
 
@@ -237,10 +237,15 @@ The **CTR Generator** tab produces the two standard CTR spreadsheets (AZN and US
 | **AZN Template** | Blank CTR template for AZN currency | `.xlsx` |
 | **USD Template** | Blank CTR template for USD currency | `.xlsx` |
 | **AZN Pricebook** | Rates for manpower (labor) items | `.xlsx` |
-| **USD Pricebook** | Rates for plant & equipment items | `.xlsx` |
-| **SAGE Export** | Rates for consumables | `.xlsm` or `.xlsx` |
-| **CTR Request** | The customer's request form | `.xlsm` or `.xlsx` |
-| **Equipment Names DB** *(optional)* | Bridges customer stock codes → pricebook descriptions | `.xlsx` |
+| **Combined DB** | SAGE rates, equipment names bridge, and the CTR Request — all in one workbook | `.xlsx` |
+
+The Combined DB file replaces what used to be three separate files (SAGE Export, Equipment Names DB, CTR Request). It must contain these sheets:
+
+| Sheet | Purpose |
+|---|---|
+| `SAGE` | Rates for consumables **and** equipment, keyed by stock code |
+| `CTR_NAMES_DB_USD` | Bridges a CTR Request equipment stock code to the canonical name used to search SAGE by description |
+| `CTR_REQUEST` | The customer's request form |
 
 ---
 
@@ -257,11 +262,8 @@ Must contain a sheet named **"Item Details and Rates"**. The app reads from row 
 | I (9) | Supplier Description |
 | N (14) | Unit Price (AZN) |
 
-### USD Pricebook
-Same sheet and column layout as the AZN Pricebook above.
-
-### SAGE Export
-Must contain a sheet named **"FROM SAGE"** with at least these columns (exact header names):
+### Combined DB — SAGE sheet
+Sheet named **"SAGE"** with at least these columns (exact header names):
 
 | Header | Content |
 |---|---|
@@ -270,49 +272,44 @@ Must contain a sheet named **"FROM SAGE"** with at least these columns (exact he
 | `unit_code` | Unit of measure |
 | `local_expect_cost` | Unit cost |
 
-### CTR Request
-Must contain a sheet named **"REQUEST"**. The standard SOCAR Cape CTR Request form already has the correct layout. Header fields (requester, client, date, etc.) are in rows 5–9. Line items start at row 13:
+### Combined DB — CTR_NAMES_DB_USD sheet
+Read by column position (A, B, C) — header text doesn't matter:
+
+| Column | Content |
+|---|---|
+| A | Stock code (as written in the CTR Request) |
+| B | Legacy name (fallback display name) |
+| C | Canonical pricebook name used to search SAGE by description, or the literal text `NON-RECHARGEABLE` |
+
+Equipment matching tries, in order: (1) if the stock code is tagged `NON-RECHARGEABLE` in column C, the row is auto-matched using the column B name at a rate of **0** — these items are never billed to the client, even if SAGE happens to show a rate for that code; (2) otherwise, if column C has a canonical name, SAGE is searched by that description; (3) if neither applies, the stock code (or description) is looked up directly in SAGE.
+
+### Combined DB — CTR_REQUEST sheet
+Must be named **"CTR_REQUEST"**. The standard SOCAR Cape CTR Request form already has the correct layout. Header fields (requester, client, date, etc.) are in rows 5–9. Line items start at row 13:
 
 | Columns A–G | Manpower items |
 |---|---|
 | Columns H–L | Plant & Equipment items |
 | Columns M–P | Consumables |
 
-### Equipment Names DB *(optional)*
-Any Excel file with at least these two columns (exact header names, case-sensitive):
-
-| Header | Content |
-|---|---|
-| `product` | Customer stock code (as written in the CTR Request) |
-| `long_description` | Canonical description used in the USD Pricebook |
-
-Extra columns are ignored. This file is only needed when customer stock codes differ from pricebook descriptions — it acts as a translation table.
-
 ---
 
 ## Step-by-step usage
 
-### 1. Select templates
+### 1. Select templates and Combined DB
 
-In the **Source Files** group at the top, use the **Browse…** buttons next to **AZN Template** and **USD Template** to select your blank CTR Excel templates.
+In the **Source Files** group at the top, use the **Browse…** buttons next to **AZN Template**, **USD Template**, and **Combined DB (SAGE + Names + Request)** to select your files. All three are shared by both sub-tabs below.
 
 ---
 
 ### 2. Load pricebook / SAGE reference data
 
-Click the **Pricebook-Based** sub-tab. Select:
-- **AZN Pricebook** — required for manpower rate lookup
-- **USD Pricebook** — required for plant & equipment rate lookup
-- **SAGE Export** — required for consumables rate lookup
-- **Equipment Names DB** — optional; enables stock-code based equipment matching
-
-Click **Load Files**. The button is greyed out while loading (files are parsed in parallel in the background — you can continue working). A status line shows how many rows were loaded from each file.
+Click the **Pricebook-Based** sub-tab. Select **AZN Pricebook**, then click **Load Files**. This loads the AZN Pricebook plus the SAGE and equipment-names sheets from the Combined DB file selected above. The button is greyed out while loading (files are parsed in parallel in the background — you can continue working). A status line shows how many rows were loaded from each source.
 
 ---
 
 ### 3. Load a CTR Request
 
-Click the **CTR Request-Based** sub-tab. Browse to the CTR Request `.xlsm` file and click **Load CTR Request**.
+Click the **CTR Request-Based** sub-tab and click **Load CTR Request**. This reads the CTR_REQUEST sheet from the Combined DB file selected above.
 
 The app fills in the **CTR Header Info** fields below (Client, Location, Scope, Date) and populates three tables:
 
@@ -367,7 +364,7 @@ Scroll down to the **Generate** group:
 | **Job Ref** | Must be a number (e.g. 217); used in the file name and cell O3 |
 | **Output folder** | Where the generated files are saved |
 
-**Presets** — save common field combinations (client, contract numbers, output folder) under a name so you don't have to re-type them for recurring projects. Use **Save…** to store the current values, then **Load** next time.
+**Presets** — save common field combinations (client, location, scope, revision, job ref, output folder) under a name so you don't have to re-type them for recurring projects. Use **Save…** to store the current values, then **Load** next time. Contract No (AZN/USD) is deliberately *not* included in presets, since it's specific to each generated document — loading a preset never overwrites whatever you've typed there.
 
 ---
 
@@ -391,9 +388,9 @@ Output file names follow the pattern:
 | Error message | What it means | Fix |
 |---|---|---|
 | *"AZN Pricebook not selected"* | The required AZN Pricebook field is empty | Select the pricebook file and click Load Files |
-| *"SAGE Export not selected"* | The required SAGE Export field is empty | Select the SAGE file and click Load Files |
-| *"Missing columns: product, long_description"* | The Equipment Names DB doesn't have the expected headers | Check that the header row uses exactly `product` and `long_description` (lower-case) |
-| *"No sheet named REQUEST"* | The CTR Request file uses a different sheet name | Open the file in Excel and rename the sheet to `REQUEST` |
+| *"Combined DB file not selected"* | The required Combined DB field is empty | Select the Combined DB file in the Source Files section |
+| *"…is missing expected column(s)…"* on the SAGE sheet | The Combined DB's SAGE sheet doesn't have the expected headers | Check that the header row uses exactly `product`, `long_description`, `unit_code`, `local_expect_cost` |
+| *"Could not find a sheet named CTR_REQUEST"* | The Combined DB file uses a different sheet name | Open the file in Excel and rename the sheet to `CTR_REQUEST` |
 | *"Job Ref must be a number"* | Non-numeric text was entered in Job Ref | Enter a number only, e.g. `217` |
 | *"AZN Template not found"* | The template file was moved or deleted since it was selected | Browse to the file again |
 | *"Cannot save … it may be open in Excel"* | The output file is already open in Excel | Close the file in Excel and click Generate again |

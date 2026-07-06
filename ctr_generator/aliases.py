@@ -8,9 +8,12 @@ across documents (e.g. request says "Rigger-National", pricebook says
 matching UI, the mapping is remembered here and applied automatically the
 next time the same requested description appears in a future CTR Request.
 
-Stored as a flat JSON file next to this module, keyed by category
-(manpower / equipment / consumable) to avoid the same word meaning
-different things across item types.
+Stored as a flat JSON file in a stable per-user data directory (see
+paths.py) so saved renames survive restarts of the packaged .exe — not
+next to this module, which under PyInstaller onefile bundling is a temp
+dir wiped every launch. Keyed by category (manpower / equipment /
+consumable) to avoid the same word meaning different things across item
+types.
 """
 
 from __future__ import annotations
@@ -18,13 +21,31 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-_ALIASES_PATH = Path(__file__).parent / "match_aliases.json"
+from ctr_generator.paths import user_data_dir
+
+_ALIASES_PATH = user_data_dir() / "match_aliases.json"
+_BUNDLED_DEFAULT_PATH = Path(__file__).parent / "match_aliases.json"
 
 _CATEGORIES = ("manpower", "equipment", "consumable")
 
 
+def _seed_from_bundled_default() -> None:
+    """On first run, copy any renames shipped with the app into the
+    writable user data directory, so they're available immediately without
+    clobbering what a returning user has already saved there."""
+    if _ALIASES_PATH.exists() or not _BUNDLED_DEFAULT_PATH.exists():
+        return
+    try:
+        _ALIASES_PATH.write_text(
+            _BUNDLED_DEFAULT_PATH.read_text(encoding="utf-8"), encoding="utf-8"
+        )
+    except OSError:
+        pass
+
+
 def load_aliases() -> dict:
     """Returns {"manpower": {...}, "equipment": {...}, "consumable": {...}}."""
+    _seed_from_bundled_default()
     data = {}
     if _ALIASES_PATH.exists():
         try:

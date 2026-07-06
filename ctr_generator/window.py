@@ -4,11 +4,15 @@ ctr_generator/window.py
 CTR Generator dialog for the SOCAR Cape desktop app.
 
 Layout (top → bottom inside a QScrollArea):
-  [Section 1] Source Files — AZN/USD templates (shared) + two sub-tabs:
-                "Pricebook-Based"   — AZN/USD pricebook + SAGE pickers,
-                                       loaded as reference data only
-                "CTR Request-Based" — CTR Request picker, fills header
-                                       fields and the three tables below
+  [Section 1] Source Files — AZN/USD templates + Combined DB (shared) + two
+                sub-tabs:
+                "Pricebook-Based"   — AZN pricebook picker; loads AZN
+                                       pricebook plus the SAGE and equipment
+                                       names sheets from the Combined DB as
+                                       reference data only
+                "CTR Request-Based" — reads the CTR Request sheet from the
+                                       Combined DB, fills header fields and
+                                       the three tables below
   [Section 2] Manpower / Equipment / Consumables — one table per category.
                 Each row shows what was requested next to its pricebook/SAGE
                 match, and IS the row used for CTR generation — there is no
@@ -48,8 +52,8 @@ from ctr_generator.presets import load_presets, save_presets, _PRESET_FIELDS
 from ctr_generator.builder_azn import build_azn
 from ctr_generator.builder_usd import build_usd
 from ctr_generator.parser import (
-    parse_azn_pricebook, parse_usd_pricebook, parse_sage,
-    parse_ctr_request, parse_names_db,
+    parse_azn_pricebook, parse_sage,
+    parse_ctr_request, parse_equip_names_db,
 )
 from ctr_generator.pdf_exporter import export_to_pdf
 
@@ -284,6 +288,7 @@ def _make_table(headers: list[str], stretch_col: int = 0) -> QTableWidget:
     t.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
     t.horizontalHeader().setStretchLastSection(False)
     t.horizontalHeader().setSectionResizeMode(stretch_col, QHeaderView.ResizeMode.Stretch)
+    t.itemSelectionChanged.connect(lambda: _on_table_selection_changed(t))
     return t
 
 
@@ -294,7 +299,52 @@ def _ro_item(text: str) -> QTableWidgetItem:
     return item
 
 
-_NO_MATCH_BG = QColor("#FFEBEE")   # light red tint for unmatched rows
+_ROW_TINT_ROLE = Qt.UserRole + 1   # stores a row's warning colour key ("red"/"yellow"/None)
+
+# (background, font) colours per warning key. A row's background tint is
+# swapped for a font colour while the row is selected — Qt's selection
+# highlight paints over any background colour, so a background-only tint
+# quietly vanishes for exactly the rows the user is looking at.
+_ROW_TINT_COLORS: dict[str, tuple[QColor, QColor]] = {
+    "red":    (QColor("#FFEBEE"), QColor("#B71C1C")),   # unmatched rows
+    "yellow": (QColor("#FFF9C4"), QColor("#F57F17")),   # matched-with-a-warning rows
+}
+
+
+def _apply_row_tint(tbl: QTableWidget, row: int) -> None:
+    """Repaints a row per its stored warning key and current selection state."""
+    col0 = tbl.item(row, 0)
+    key = col0.data(_ROW_TINT_ROLE) if col0 else None
+    colors = _ROW_TINT_COLORS.get(key)
+    selected = bool(col0) and col0.isSelected()
+    for col in range(tbl.columnCount()):
+        item = tbl.item(row, col)
+        if not item:
+            continue
+        if colors is None:
+            item.setBackground(QBrush())
+            item.setForeground(QBrush())
+        elif selected:
+            item.setBackground(QBrush())
+            item.setForeground(QBrush(colors[1]))
+        else:
+            item.setBackground(QBrush(colors[0]))
+            item.setForeground(QBrush())
+
+
+def _set_row_tint(tbl: QTableWidget, row: int, key: str | None) -> None:
+    """Sets a row's warning colour ("red"/"yellow"/None) and repaints it."""
+    col0 = tbl.item(row, 0)
+    if col0:
+        col0.setData(_ROW_TINT_ROLE, key)
+    _apply_row_tint(tbl, row)
+
+
+def _on_table_selection_changed(tbl: QTableWidget) -> None:
+    """Re-applies every row's tint so it switches between background (not
+    selected) and font colour (selected) as the selection changes."""
+    for row in range(tbl.rowCount()):
+        _apply_row_tint(tbl, row)
 
 
 def _highlight_row(tbl: QTableWidget, row: int, matched: bool) -> None:
@@ -302,11 +352,7 @@ def _highlight_row(tbl: QTableWidget, row: int, matched: bool) -> None:
     Colour every cell in the row with a light red tint when not matched,
     or clear back to the default alternating colour when matched / manual.
     """
-    brush = QBrush() if matched else QBrush(_NO_MATCH_BG)
-    for col in range(tbl.columnCount()):
-        item = tbl.item(row, col)
-        if item:
-            item.setBackground(brush)
+    _set_row_tint(tbl, row, None if matched else "red")
 
 
 def _file_picker_row(label: str, ext_filter: str) -> tuple[QHBoxLayout, QLineEdit]:
@@ -339,8 +385,9 @@ def _file_picker_row(label: str, ext_filter: str) -> tuple[QHBoxLayout, QLineEdi
 
 def _match_lookup(df: pd.DataFrame, code_col: str, desc_col: str, price_col: str, key: str):
     """
-    Look up a row in a reference dataframe (AZN/USD pricebook or SAGE) by
-    stock code first, then by description — case-insensitive exact match.
+    Look up a row in a reference dataframe (SAGE, or the AZN pricebook via
+    _match_azn_labor) by stock code first, then by description —
+    case-insensitive exact match.
 
     Returns (matched_description, rate, stock_code) or None if no match.
     """
@@ -401,6 +448,39 @@ def _decode_azn_stock_code(stock_code: str):
         return None
     shift, shift_type = shift_info
     return location, shift, shift_type
+
+
+def _decode_manpower_encoding(encoding: str) -> str | None:
+    """
+    Decodes the CTR Request's "ENCODING" column (e.g. "NAT-ON-12",
+    "NAT-OFF-10") into "Onshore"/"Offshore". This is the same
+    NAT-<ON|OFF>-<hours> suffix used in AZN labor stock codes (see
+    _decode_azn_stock_code) with the shift-type prefix already stripped —
+    confirmed against the pricebook's own "Part Number Extension" codes
+    (e.g. "MSU-NAT-ON-12"). Returns None if the text doesn't match.
+    """
+    parts = (encoding or "").strip().upper().split("-")
+    if len(parts) < 2:
+        return None
+    if parts[1] == "ON":
+        return "Onshore"
+    if parts[1] == "OFF":
+        return "Offshore"
+    return None
+
+
+def _recharge_mismatch(request_tag: str, db_non_recharge: bool) -> bool:
+    """
+    True if the CTR Request's own Rechargability column (equipment col J /
+    consumables col R) disagrees with what the CTR_NAMES_DB_USD bridge
+    determined for the matched stock code. The request-sheet tag is usually
+    populated by the requester from the same DB, so a mismatch is worth
+    surfacing as a warning rather than silently trusting either side.
+    """
+    tag = (request_tag or "").strip().upper()
+    if not tag:
+        return False
+    return ("NON" in tag) != db_non_recharge
 
 
 def _normalize_location(raw: str) -> str:
@@ -650,7 +730,6 @@ class CTRGeneratorWidget(QWidget):
         super().__init__(parent)
 
         self._azn_df:      pd.DataFrame = pd.DataFrame()
-        self._usd_df:      pd.DataFrame = pd.DataFrame()
         self._sage_df:     pd.DataFrame = pd.DataFrame()
         self._names_db_df: pd.DataFrame = pd.DataFrame()
         self._workers:     list = []
@@ -705,11 +784,14 @@ class CTRGeneratorWidget(QWidget):
         gl = QVBoxLayout(grp)
         gl.setSpacing(6)
 
-        # Output templates — shared by both data-source sub-tabs below
+        # Output templates + Combined DB — shared by both data-source sub-tabs below
         row4, self._azn_tpl_edit = _file_picker_row("AZN Template", "Excel (*.xlsx *.xls)")
         row5, self._usd_tpl_edit = _file_picker_row("USD Template", "Excel (*.xlsx *.xls)")
+        row6, self._combined_db_edit = _file_picker_row(
+            "Combined DB (SAGE + Names + Request)", "Excel (*.xlsx *.xls)")
         gl.addLayout(row4)
         gl.addLayout(row5)
+        gl.addLayout(row6)
 
         sub_tabs = QTabWidget()
         sub_tabs.setStyleSheet(f"""
@@ -733,40 +815,16 @@ class CTRGeneratorWidget(QWidget):
             "Loads these as reference data for the \"Customer Request vs "
             "Pricebook/SAGE Match\" lookups below — no rows are added to "
             "the CTR generation tables here. Use \"+ Add Row\" in a CTR "
-            "table directly if you want to add an item by hand."
+            "table directly if you want to add an item by hand. SAGE and "
+            "the equipment names bridge are read from the Combined DB file "
+            "selected above."
         )
         info.setWordWrap(True)
         info.setStyleSheet(f"color: {MUTED}; font-size: 11px;")
         tl.addWidget(info)
 
-        row1, self._azn_pb_edit  = _file_picker_row("AZN Pricebook",     "Excel (*.xlsx *.xls)")
-        row2, self._usd_pb_edit  = _file_picker_row("USD Pricebook",     "Excel (*.xlsx *.xls)")
-        row3, self._sage_edit    = _file_picker_row("SAGE Export",        "Excel Macro (*.xlsm *.xlsx)")
-        row4, self._names_db_edit = _file_picker_row("Equipment Names DB", "Excel (*.xlsx *.xls)")
-
-        # Re-wire Browse buttons to pass self as parent for centering
-        for layout in (row1, row2, row3, row4):
-            btn = layout.itemAt(2).widget()
-            edit = layout.itemAt(1).widget()
-            def _make_browse(e=edit):
-                def _browse():
-                    dlg_filter = {
-                        self._azn_pb_edit:  "Excel (*.xlsx *.xls)",
-                        self._usd_pb_edit:  "Excel (*.xlsx *.xls)",
-                        self._sage_edit:    "Excel Macro (*.xlsm *.xlsx)",
-                        self._names_db_edit: "Excel (*.xlsx *.xls)",
-                    }.get(e, "Excel (*.xlsx *.xls)")
-                    path, _ = QFileDialog.getOpenFileName(self, "Select file", "", dlg_filter)
-                    if path:
-                        e.setText(path)
-                return _browse
-            btn.clicked.disconnect()
-            btn.clicked.connect(_make_browse())
-
+        row1, self._azn_pb_edit = _file_picker_row("AZN Pricebook", "Excel (*.xlsx *.xls)")
         tl.addLayout(row1)
-        tl.addLayout(row2)
-        tl.addLayout(row3)
-        tl.addLayout(row4)
 
         load_btn = QPushButton("Load Files")
         load_btn.setFixedHeight(36)
@@ -797,8 +855,12 @@ class CTRGeneratorWidget(QWidget):
         tl.setSpacing(6)
         tl.setContentsMargins(2, 8, 2, 2)
 
-        row, self._ctr_req_edit = _file_picker_row("CTR Request", "Excel Macro (*.xlsm *.xlsx)")
-        tl.addLayout(row)
+        info = QLabel(
+            "Reads the CTR_REQUEST sheet from the Combined DB file selected above."
+        )
+        info.setWordWrap(True)
+        info.setStyleSheet(f"color: {MUTED}; font-size: 11px;")
+        tl.addWidget(info)
 
         load_btn = QPushButton("Load CTR Request")
         load_btn.setFixedHeight(36)
@@ -817,7 +879,7 @@ class CTRGeneratorWidget(QWidget):
         tl.addWidget(load_btn)
 
         self._ctr_req_status = QLabel(
-            "Parses the REQUEST sheet: fills the Client/Location/Scope/Date "
+            "Parses the CTR_REQUEST sheet: fills the Client/Location/Scope/Date "
             "fields below, and shows requested manpower/equipment/consumables "
             "in the \"Customer Request vs Pricebook/SAGE Match\" section below."
         )
@@ -1191,10 +1253,7 @@ class CTRGeneratorWidget(QWidget):
             "azn_template":   self._azn_tpl_edit,
             "usd_template":   self._usd_tpl_edit,
             "azn_pricebook":  self._azn_pb_edit,
-            "usd_pricebook":  self._usd_pb_edit,
-            "sage_export":    self._sage_edit,
-            "names_db":       self._names_db_edit,
-            "ctr_request":    self._ctr_req_edit,
+            "combined_db":    self._combined_db_edit,
             "output_dir":     self._out_dir_edit,
         }
         for key, edit in _edits.items():
@@ -1208,22 +1267,20 @@ class CTRGeneratorWidget(QWidget):
         s.setValue("paths/azn_template",  self._azn_tpl_edit.text())
         s.setValue("paths/usd_template",  self._usd_tpl_edit.text())
         s.setValue("paths/azn_pricebook", self._azn_pb_edit.text())
-        s.setValue("paths/usd_pricebook", self._usd_pb_edit.text())
-        s.setValue("paths/sage_export",   self._sage_edit.text())
-        s.setValue("paths/names_db",      self._names_db_edit.text())
-        s.setValue("paths/ctr_request",   self._ctr_req_edit.text())
+        s.setValue("paths/combined_db",   self._combined_db_edit.text())
         s.setValue("paths/output_dir",    self._out_dir_edit.text())
 
     # ── Presets ───────────────────────────────────────────────────────────────
 
     def _current_preset_data(self) -> dict:
+        # Contract No (AZN/USD) is deliberately excluded — it's specific to
+        # each generated document, so loading a preset must never overwrite
+        # whatever the user has already typed there.
         return {
             "client":          self._client_edit.text(),
             "sub_client":      self._sub_client_edit.text(),
             "location":        self._location_edit.text(),
             "scope":           self._scope_edit.text(),
-            "contract_no_azn": self._contract_no_azn_edit.text(),
-            "contract_no_usd": self._contract_no_usd_edit.text(),
             "revision":        self._revision_edit.text(),
             "job_ref":         self._job_ref_edit.text(),
             "output_dir":      self._out_dir_edit.text(),
@@ -1234,8 +1291,6 @@ class CTRGeneratorWidget(QWidget):
         self._sub_client_edit.setText(data.get("sub_client", ""))
         self._location_edit.setText(data.get("location", ""))
         self._scope_edit.setText(data.get("scope", ""))
-        self._contract_no_azn_edit.setText(data.get("contract_no_azn", ""))
-        self._contract_no_usd_edit.setText(data.get("contract_no_usd", ""))
         self._revision_edit.setText(data.get("revision", ""))
         self._job_ref_edit.setText(data.get("job_ref", ""))
         if data.get("output_dir"):
@@ -1288,28 +1343,26 @@ class CTRGeneratorWidget(QWidget):
 
     def _load_files(self):
         """
-        Submits AZN/USD pricebook, SAGE, and Equipment Names DB to the thread
-        pool and returns immediately — the UI stays responsive while Excel files
-        are being parsed. Results arrive via _on_file_loaded (queued connection).
+        Submits AZN pricebook + SAGE + Equipment Names DB (both from the
+        Combined DB file) to the thread pool and returns immediately — the
+        UI stays responsive while Excel files are being parsed. Results
+        arrive via _on_file_loaded (queued connection).
         """
         azn_pb   = self._azn_pb_edit.text().strip()
-        usd_pb   = self._usd_pb_edit.text().strip()
-        sage     = self._sage_edit.text().strip()
-        names_db = self._names_db_edit.text().strip()
+        combined = self._combined_db_edit.text().strip()
 
         errors = []
         if not azn_pb:  errors.append("AZN Pricebook not selected.")
-        if not sage:    errors.append("SAGE Export not selected.")
+        if not combined: errors.append("Combined DB file not selected.")
         if errors:
             QMessageBox.warning(self, "Missing files", "\n".join(errors))
             return
 
-        tasks = [("azn_pb", lambda p=azn_pb: parse_azn_pricebook(p))]
-        if usd_pb:
-            tasks.append(("usd_pb", lambda p=usd_pb: parse_usd_pricebook(p)))
-        tasks.append(("sage", lambda p=sage: parse_sage(p)))
-        if names_db:
-            tasks.append(("names_db", lambda p=names_db: parse_names_db(p)))
+        tasks = [
+            ("azn_pb",   lambda p=azn_pb:   parse_azn_pricebook(p)),
+            ("sage",     lambda p=combined: parse_sage(p)),
+            ("names_db", lambda p=combined: parse_equip_names_db(p)),
+        ]
 
         self._pending_loads += len(tasks)
         self._load_errors.clear()
@@ -1317,26 +1370,20 @@ class CTRGeneratorWidget(QWidget):
         self._load_files_btn.setEnabled(False)
         self._pricebook_status.setText(f"Loading {len(tasks)} file(s)…")
 
-        log.info(
-            "Async loading pricebook/SAGE files: azn=%s usd=%s sage=%s names_db=%s",
-            azn_pb, usd_pb or "(skipped)", sage, names_db or "(skipped)",
-        )
+        log.info("Async loading pricebook/SAGE files: azn=%s combined_db=%s", azn_pb, combined)
         for name, fn in tasks:
             _LOAD_POOL.start(_LoadTask(name, fn, self._load_signals))
 
     def _on_file_loaded(self, name: str, result) -> None:
         """Slot (always on main thread via queued connection) for pool-task results."""
         if isinstance(result, Exception):
-            is_warning = name in ("usd_pb", "names_db")
+            is_warning = name == "names_db"
             self._load_errors.append((name, str(result), is_warning))
             log.error("Failed to load %s: %s", name, result)
         else:
             if name == "azn_pb":
                 self._azn_df = result
                 self._load_status.append(f"AZN Pricebook ({len(result)} rows)")
-            elif name == "usd_pb":
-                self._usd_df = result
-                self._load_status.append(f"USD Pricebook ({len(result)} rows)")
             elif name == "sage":
                 self._sage_df = result
                 self._load_status.append(f"SAGE Export ({len(result)} rows)")
@@ -1354,14 +1401,12 @@ class CTRGeneratorWidget(QWidget):
         """Called when all pool tasks in the current batch have completed."""
         _label = {
             "azn_pb":   "AZN Pricebook",
-            "usd_pb":   "USD Pricebook",
             "sage":     "SAGE Export",
             "names_db": "Equipment Names DB",
         }
         _fallback = {
-            "usd_pb":   "Equipment rate lookup will show no matches.",
-            "names_db": ("Equipment stock-code matching will fall back to "
-                         "USD pricebook description search."),
+            "names_db": ("Equipment matching will fall back to a direct "
+                         "SAGE lookup by stock code or description."),
         }
         for name, msg, is_warning in self._load_errors:
             label = _label.get(name, name)
@@ -1382,10 +1427,13 @@ class CTRGeneratorWidget(QWidget):
             )
 
     def _load_ctr_request(self):
-        """Starts parsing the CTR Request file on a background thread."""
-        path = self._ctr_req_edit.text().strip()
+        """Starts parsing the CTR Request sheet of the Combined DB file on a background thread."""
+        path = self._combined_db_edit.text().strip()
         if not path:
-            QMessageBox.warning(self, "Missing file", "Select a CTR Request file first.")
+            QMessageBox.warning(
+                self, "Missing file",
+                "Select the Combined DB file first (Source Files section above).",
+            )
             return
 
         log.info("Loading CTR Request: %s", path)
@@ -1539,10 +1587,11 @@ class CTRGeneratorWidget(QWidget):
 
         desc = request_item.get("description", "")
         default_key = get_alias(self._aliases, "manpower", desc) or desc
-        row_type = "Onshore" if "(onshore)" in desc.lower() else "Offshore"
+        encoded_location = _decode_manpower_encoding(request_item.get("encoding") or "")
+        row_type = encoded_location or ("Onshore" if "(onshore)" in desc.lower() else "Offshore")
         shift = "Night" if "night" in (request_item.get("shift") or "").lower() else "Day"
-        shift_type_raw = (request_item.get("weekend_shift") or "").strip()
-        shift_type = shift_type_raw if shift_type_raw else "Normal"
+        shift_type_raw = (request_item.get("status") or "").strip()
+        shift_type = shift_type_raw.title() if shift_type_raw else "Normal"
         try:
             num_emp = float(request_item.get("quantity") or 1)
         except (TypeError, ValueError):
@@ -1706,6 +1755,9 @@ class CTRGeneratorWidget(QWidget):
         tbl.setItem(r, _EQ_DAYS,   QTableWidgetItem(str(days)))
         tbl.setItem(r, _EQ_TOTAL,  _ro_item("0.00"))
         tbl.setItem(r, _EQ_STATUS, _ro_item("✗ No match — edit Match By or Description"))
+        # Stash the request sheet's own Rechargability tag so _rematch_equip_row
+        # can cross-check it against the CTR_NAMES_DB_USD bridge result.
+        tbl.item(r, _EQ_DESC).setData(Qt.UserRole, request_item.get("rechargability") or "")
 
         self._rematch_equip_row(r, learn_alias=False)
 
@@ -1789,12 +1841,16 @@ class CTRGeneratorWidget(QWidget):
         identity = (code or desc).lower()
         was_includable = bool(status_item) and status_item.text().startswith("✓")
 
-        # Stage 1: Equipment Names DB — match "Match By" as a stock code.
-        # If found, use its long_description for display and then try the USD
-        # pricebook for a rate (by description match). Rate stays 0 if the
-        # USD pricebook has no entry — the user can fill it in manually.
+        # Stage 1: Equipment Names DB bridge lookup by "Match By" as a stock
+        # code — this sheet's own "Rate" column (E) is authoritative once a
+        # code is found there, so no SAGE lookup is needed for it at all.
+        # non_recharge rows always bill at 0 (via legacy_name for display),
+        # overriding column E even on the handful of rows that still carry a
+        # leftover nonzero rate there.
         matched_name: str | None = None
         matched_rate: float = 0.0
+        db_non_recharge: bool | None = None
+        bridge_hit = None
 
         if not self._names_db_df.empty:
             key_up = key.upper()
@@ -1802,25 +1858,36 @@ class CTRGeneratorWidget(QWidget):
                 self._names_db_df["product"].str.strip().str.upper() == key_up
             ]
             if not db_hits.empty:
-                matched_name = db_hits.iloc[0]["long_description"]
-                if not self._usd_df.empty:
-                    rate_match = _match_lookup(
-                        self._usd_df, "stock_code", "supplier_desc", "unit_price", matched_name
-                    )
-                    if rate_match:
-                        _, matched_rate, _ = rate_match
+                bridge_hit = db_hits.iloc[0]
+                db_non_recharge = bool(bridge_hit["non_recharge"])
+                if bridge_hit["non_recharge"]:
+                    matched_name = bridge_hit["legacy_name"]
+                    matched_rate = 0.0
+                else:
+                    matched_name = bridge_hit["canonical_name"]
+                    matched_rate = float(bridge_hit["rate"])
 
-        # Stage 2: fall back to direct USD pricebook search (code or description)
-        if matched_name is None and not self._usd_df.empty:
-            fb = _match_lookup(self._usd_df, "stock_code", "supplier_desc", "unit_price", key)
+        # Stage 2: the stock code isn't in the bridge at all — fall back to a
+        # direct SAGE lookup by code, then by whatever "Match By" contains.
+        if matched_name is None:
+            fb = _match_lookup(self._sage_df, "product", "long_description", "local_expect_cost", key)
             if fb:
                 matched_name, matched_rate, _ = fb
+
+        # Cross-check the request sheet's own Rechargability tag against the
+        # DB bridge's determination — the tag is normally sourced from the
+        # same DB, so a mismatch usually means a stale/hand-edited request row.
+        request_tag = desc_item.data(Qt.UserRole) or ""
+        mismatch = db_non_recharge is not None and _recharge_mismatch(request_tag, db_non_recharge)
 
         tbl.blockSignals(True)
         if matched_name is not None:
             tbl.setItem(row, _EQ_MDESC, _ro_item(matched_name))
             tbl.setItem(row, _EQ_RATE, QTableWidgetItem(f"{matched_rate:.2f}"))
-            tbl.setItem(row, _EQ_STATUS, _ro_item("✓ Matched"))
+            status = "✓ Matched"
+            if mismatch:
+                status += "  ⚠ Rechargability mismatch vs. request sheet"
+            tbl.setItem(row, _EQ_STATUS, _ro_item(status))
         else:
             tbl.setItem(row, _EQ_MDESC, _ro_item(""))
             tbl.setItem(row, _EQ_STATUS, _ro_item(
@@ -1856,6 +1923,9 @@ class CTRGeneratorWidget(QWidget):
         tbl.setItem(r, _CS_PRICE,  QTableWidgetItem("0.00"))
         tbl.setItem(r, _CS_TOTAL,  _ro_item("0.00"))
         tbl.setItem(r, _CS_STATUS, _ro_item("✗ No match — edit Match By or Description"))
+        # Stash the request sheet's own Rechargability tag so _rematch_cons_row
+        # can cross-check it against the CTR_NAMES_DB_USD bridge result.
+        tbl.item(r, _CS_DESC).setData(Qt.UserRole, request_item.get("rechargability") or "")
 
         self._rematch_cons_row(r, learn_alias=False)
 
@@ -1938,12 +2008,29 @@ class CTRGeneratorWidget(QWidget):
         was_includable = bool(status_item) and status_item.text().startswith("✓")
         match = _match_lookup(self._sage_df, "product", "long_description", "local_expect_cost", key)
 
+        # Cross-check the request sheet's own Rechargability tag against the
+        # CTR_NAMES_DB_USD bridge, purely as a data-quality warning — consumable
+        # pricing itself still comes straight from SAGE, unaffected by this.
+        db_non_recharge: bool | None = None
+        if not self._names_db_df.empty:
+            key_up = key.upper()
+            db_hits = self._names_db_df[
+                self._names_db_df["product"].str.strip().str.upper() == key_up
+            ]
+            if not db_hits.empty:
+                db_non_recharge = bool(db_hits.iloc[0]["non_recharge"])
+        request_tag = desc_item.data(Qt.UserRole) or ""
+        mismatch = db_non_recharge is not None and _recharge_mismatch(request_tag, db_non_recharge)
+
         tbl.blockSignals(True)
         if match:
             mdesc, price, _code = match
             tbl.setItem(row, _CS_MDESC, _ro_item(mdesc))
             tbl.setItem(row, _CS_PRICE, QTableWidgetItem(f"{price:.2f}"))
-            tbl.setItem(row, _CS_STATUS, _ro_item("✓ Matched"))
+            status = "✓ Matched"
+            if mismatch:
+                status += "  ⚠ Rechargability mismatch vs. request sheet"
+            tbl.setItem(row, _CS_STATUS, _ro_item(status))
         else:
             tbl.setItem(row, _CS_MDESC, _ro_item(""))
             tbl.setItem(row, _CS_STATUS, _ro_item(
@@ -2188,8 +2275,12 @@ class CTRGeneratorWidget(QWidget):
                 days = float(_etxt(_EQ_DAYS) or 30)
             except ValueError:
                 days = 30.0
+            # Prefer the matched/corrected name over the raw requested
+            # description — the customer's request form sometimes has a
+            # placeholder like "NON-RECHARGEABLE" typed as the item name,
+            # which the match lookup already resolved to the real name.
             equip_rows.append({
-                "description":  _etxt(_EQ_DESC),
+                "description":  _etxt(_EQ_MDESC) or _etxt(_EQ_DESC),
                 "quantity":     qty,
                 "unit":         _etxt(_EQ_UNIT) or "DAY",
                 "rate_per_day": rate,
@@ -2215,8 +2306,9 @@ class CTRGeneratorWidget(QWidget):
                 price = float(_ctxt(_CS_PRICE) or 0)
             except ValueError:
                 price = 0.0
+            # Same reasoning as equipment above — prefer the matched name.
             consump_rows.append({
-                "long_description":  _ctxt(_CS_DESC),
+                "long_description":  _ctxt(_CS_MDESC) or _ctxt(_CS_DESC),
                 "local_expect_cost": price,
                 "unit_code":         _ctxt(_CS_UNIT) or "EA",
                 "product":           _ctxt(_CS_CODE),
