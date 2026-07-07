@@ -73,6 +73,17 @@ The source code lives in WSL, but the build runs in a **Windows PowerShell** ses
 
 Or use GitHub Actions (see `.github/workflows/` if configured) to build automatically on push and download the artifact from the Actions tab.
 
+### Building the installer (.exe setup)
+
+Once `just` ([just.systems](https://just.systems)) and [Inno Setup](https://jrsoftware.org/isinfo.php) are installed on the Windows side, `just installer` builds the app (`just build`) and then packages it into a Windows installer via `setup.iss` — from the same WSL-mounted path as above:
+
+```powershell
+PS Microsoft.PowerShell.Core\FileSystem::\\wsl$\Ubuntu-22.04\home\alhiko56\projects\SOCAR_Cape-automation> cd "\\wsl$\Ubuntu-22.04\home\alhiko56\projects\SOCAR_Cape-automation"
+>> just installer
+```
+
+The resulting installer is written wherever `setup.iss` configures its output (see that file for the exact path).
+
 ---
 
 ## Project structure
