@@ -9,33 +9,50 @@ file when a new template version shifts the layout.
 
 Default layout (217_USD template):
 
-  Sheet "Main" (two independent item lists, each growing downward inside
-  its own section — "Plant & Equipment" and "Materials/Consumables &
-  Others" — right before that section's own Total row; every fixed cell
-  below a list shifts down by however many extra rows it needed):
+  Sheet "Main":
     E3  = CTR ref string
     O3  = job ref integer
-    C111, G111 = equipment list, one row per item (name, cost) — grows
-                 into the "Plant & Equipment" block. Cells configurable via
-                 cell_equip_list_name / cell_equip_list_cost.
-    G112       = total_equipment (shifts with the equipment list; G110,
-                 the redundant mirror at the section header row, is left
-                 untouched)
-    G115       = total_consumables_raw (shifts with the equipment list)
-    G116       = consumables_markup (shifts with the equipment list)
-    C119, G119 = consumables list, one row per item (name, cost) — grows
-                 into the "Materials/Consumables & Others" block, below
-                 the equipment list's own shift. Cells configurable via
-                 cell_cons_list_name / cell_cons_list_cost.
-    G120       = total_consumables  (raw + markup; shifts with both lists)
-    G126       = total_equipment   (summary row 4; shifts with both lists)
-    G127       = total_consumables_raw (summary row 5; shifts with both lists)
-    G130       = estimated_ctr_total_usd (shifts with both lists)
+    G112 = total_equipment
+    G115 = total_consumables_raw
+    E116 = markup_rate (fraction, e.g. 0.065 — the build_usd() markup_rate
+           argument, written as a value so it stays visible/editable in
+           Excel; defaults to usd_template.markup_rate if not given)
+    G116 = consumables_markup (= total_consumables_raw * E116)
+    G120 = total_consumables  (raw + markup)
+    G126 = total_equipment   (summary row 4)
+    G127 = total_consumables_raw (summary row 5)
+    G130 = estimated_ctr_total_usd
+
+    Each of these is a formula referencing its Pricing-sheet total
+    directly, so they're correct whether or not the per-item lists below
+    are written.
+
+    Optional (usd_template.list_items_on_main, default false): when
+    enabled, two independent item lists also get written, each growing
+    downward inside its own section — "Plant & Equipment" and
+    "Materials/Consumables & Others" — right before that section's own
+    Total row; every fixed cell below a list then shifts down by however
+    many extra rows it needed:
+      C111, G111 = equipment list, one row per item (name, cost) — grows
+                   into the "Plant & Equipment" block. Cells configurable
+                   via cell_equip_list_name / cell_equip_list_cost. (G110,
+                   the redundant mirror at the section header row, is left
+                   untouched.)
+      C119, G119 = consumables list, one row per item (name, cost) — grows
+                   into the "Materials/Consumables & Others" block, below
+                   the equipment list's own shift. Cells configurable via
+                   cell_cons_list_name / cell_cons_list_cost.
+    When disabled (the default), Main shows only the section totals above
+    and per-item detail (description, qty, unit, rate, days, stock code)
+    lives solely on the Pricing sheet — see below.
 
   Sheet "Pricing":
     Row 10       : equipment header
     Rows 11–210  : equipment data
       A=item#, B=desc, C=qty, D=unit, E=rate_per_day, F=days, G=total, H=counter, I=SC cost, J=stock_code
+      E is either a numeric rate or the literal "NONRECHARG" for
+      non-rechargeable items; G is guarded with IF(ISNUMBER(...)) so a
+      "NONRECHARG" row totals 0 instead of an Excel #VALUE! error.
     Row 211      : G211=total_equipment, I211=total_equipment
 
     Row 215      : consumables header
@@ -69,6 +86,7 @@ from openpyxl.utils import column_index_from_string as _col_idx
 from openpyxl.utils import get_column_letter as _col_letter
 
 from ctr_generator.config import CFG
+from ctr_generator.naming import ctr_output_filename
 
 _usd = CFG["usd_template"]
 
@@ -78,7 +96,9 @@ _EQUIP_END   = _usd["equip_data_end"]   # default clear range; rows beyond here 
 _CONS_START  = _usd["cons_data_start"]
 _CONS_END    = _usd["cons_data_end"]
 
-_MARKUP_RATE = _usd["markup_rate"]
+_DEFAULT_MARKUP_RATE = _usd["markup_rate"]   # used when build_usd() isn't given an override
+
+_LIST_ITEMS_ON_MAIN = bool(_usd.get("list_items_on_main", False))
 
 # Pricing-sheet column positions for section totals (template structure constants)
 _EQUIP_TOTAL_COL  = 7   # G — row total
@@ -86,6 +106,8 @@ _EQUIP_TOTAL_COL2 = 9   # I — SC cost mirror
 _CONS_TOTAL_COL   = 6   # F — row total
 
 _DATE_FORMATS = ("%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y", "%d.%m.%Y")
+
+_NONRECHARG = "NONRECHARG"
 
 
 def _cell_row_col(addr: str) -> tuple[int, int]:
@@ -200,6 +222,7 @@ def build_usd(
     output_dir: str | Path,
     job_ref: str,
     header: dict | None = None,
+    markup_rate: float | None = None,
 ) -> Path:
     """
     equip_rows: list of dicts with keys:
@@ -214,12 +237,19 @@ def build_usd(
     header: optional dict with keys client, sub_client, location, scope,
         date, contract_no, revision. Only non-empty values overwrite the
         corresponding template cell — leaving a field blank preserves
-        whatever the template already has.
+        whatever the template already has. location and scope are also
+        used to build the output filename (see ctr_generator.naming).
+
+    markup_rate: consumables markup as a fraction (e.g. 0.065 for 6.5%).
+        Defaults to usd_template.markup_rate from template_config.json
+        when omitted — callers (e.g. the UI's per-preset markup field)
+        override it here rather than editing the config file.
 
     Returns the path to the saved xlsx file.
     """
     template_path = Path(template_path)
     output_dir    = Path(output_dir)
+    markup_rate   = _DEFAULT_MARKUP_RATE if markup_rate is None else markup_rate
 
     if not template_path.is_file():
         raise ValueError(f"USD Template not found: {template_path}")
@@ -229,7 +259,8 @@ def build_usd(
     except OSError as e:
         raise ValueError(f"Cannot create output folder {output_dir}: {e}") from e
 
-    out_path = output_dir / f"{job_ref}_USD_WCH_CTR.xlsx"
+    out_path = output_dir / ctr_output_filename(
+        job_ref, "USD", (header or {}).get("location", ""), (header or {}).get("scope", ""))
     try:
         shutil.copy2(template_path, out_path)
     except PermissionError as e:
@@ -312,10 +343,14 @@ def build_usd(
         days      = _safe_float(er.get("days", 30), 30.0)
         stock     = str(er.get("stock_code", ""))
 
+        # A non-rechargeable item carries the "NONRECHARG" sentinel instead of
+        # a numeric rate (set upstream once the pricebook/DB match marks it
+        # non-rechargeable) — preserved verbatim so it prints instead of a
+        # misleading 0.00. Any other non-numeric junk still collapses to 0.0.
         try:
-            rate = float(rate_raw)
+            rate: float | str = float(rate_raw)
         except (TypeError, ValueError):
-            rate = 0.0
+            rate = _NONRECHARG if str(rate_raw).strip().upper() == _NONRECHARG else 0.0
 
         if desc:
             equip_cost_list.append((desc, f"='{pricing_sheet}'!G{r}"))
@@ -326,7 +361,8 @@ def build_usd(
         _set_cell(ws_p, r, 4,  unit)
         _set_cell(ws_p, r, 5,  rate)
         _set_cell(ws_p, r, 6,  days)
-        _set_cell(ws_p, r, 7,  f"=C{r}*E{r}*F{r}")
+        # Guarded so a "NONRECHARG" rate totals 0 instead of erroring (#VALUE!).
+        _set_cell(ws_p, r, 7,  f"=IF(ISNUMBER(E{r}),C{r}*E{r}*F{r},0)")
         _set_cell(ws_p, r, 8,  f"=A{r}")
         _set_cell(ws_p, r, 9,  f"=G{r}")
         _set_cell(ws_p, r, 10, stock)
@@ -377,22 +413,31 @@ def build_usd(
     _set_cell(ws_p, cons_total_row, _CONS_TOTAL_COL,
               f"=SUM({cons_total_col_letter}{cons_start}:{cons_total_col_letter}{cons_eff_end})")
 
-    # ── Main sheet: equipment list — one row per item, name/cost, growing
-    #    downward from cell_equip_list_name/_cost (inside the "Plant &
-    #    Equipment" block, right before its own Total row). ───────────────
-    equip_list_row, equip_name_col = _cell_row_col(_usd["cell_equip_list_name"])
-    _,              equip_cost_col = _cell_row_col(_usd["cell_equip_list_cost"])
-    equip_shift = _write_item_list(
-        ws_m, equip_list_row, equip_name_col, equip_cost_col, equip_cost_list)
+    # ── Main sheet: item lists (optional, usd_template.list_items_on_main).
+    #    When enabled, one row per item (name/cost) is written per section,
+    #    growing downward from cell_equip_list_name/_cost and
+    #    cell_cons_list_name/_cost respectively — inside the "Plant &
+    #    Equipment" and "Materials/Consumables & Others" blocks, right
+    #    before each one's own Total row. The consumables list's configured
+    #    row is shifted down by equip_shift first, since the equipment list
+    #    above it already moved it when it grew.
+    #    When disabled, Main is left untouched here — per-item detail lives
+    #    only on the Pricing sheet, and the section totals below are
+    #    unaffected either way (each is a direct formula to its
+    #    Pricing-sheet total, not a sum of these Main-sheet rows). ────────
+    if _LIST_ITEMS_ON_MAIN:
+        equip_list_row, equip_name_col = _cell_row_col(_usd["cell_equip_list_name"])
+        _,              equip_cost_col = _cell_row_col(_usd["cell_equip_list_cost"])
+        equip_shift = _write_item_list(
+            ws_m, equip_list_row, equip_name_col, equip_cost_col, equip_cost_list)
 
-    # ── Main sheet: consumables list — same idea, inside the "Materials/
-    #    Consumables & Others" block. Its configured row is shifted down by
-    #    equip_shift first, since the equipment list above it already moved
-    #    it when it grew. ────────────────────────────────────────────────
-    cons_list_row, cons_name_col = _cell_row_col(_usd["cell_cons_list_name"])
-    _,             cons_cost_col = _cell_row_col(_usd["cell_cons_list_cost"])
-    cons_shift = _write_item_list(
-        ws_m, cons_list_row + equip_shift, cons_name_col, cons_cost_col, cons_cost_list)
+        cons_list_row, cons_name_col = _cell_row_col(_usd["cell_cons_list_name"])
+        _,             cons_cost_col = _cell_row_col(_usd["cell_cons_list_cost"])
+        cons_shift = _write_item_list(
+            ws_m, cons_list_row + equip_shift, cons_name_col, cons_cost_col, cons_cost_list)
+    else:
+        equip_shift = 0
+        cons_shift  = 0
 
     total_shift = equip_shift + cons_shift
 
@@ -409,8 +454,15 @@ def build_usd(
     cons_raw_addr = _shift_cell(_usd["cell_total_cons_raw"], equip_shift)
     ws_m[cons_raw_addr] = f"='{pricing_sheet}'!F{cons_total_row}"
 
+    # The rate itself is written into its own visible template cell (E116 by
+    # default, the "Mark up (For Consumables)" row) rather than baked into
+    # the formula as a literal, so it still shows correctly if opened in
+    # Excel and can be hand-tweaked there like any other input cell.
+    cons_markup_rate_addr = _shift_cell(_usd["cell_cons_markup_rate"], equip_shift)
+    ws_m[cons_markup_rate_addr] = markup_rate
+
     cons_markup_addr = _shift_cell(_usd["cell_total_cons_markup"], equip_shift)
-    ws_m[cons_markup_addr] = f"={cons_raw_addr}*{_MARKUP_RATE}"
+    ws_m[cons_markup_addr] = f"={cons_raw_addr}*{cons_markup_rate_addr}"
 
     cons_total_addr = _shift_cell(_usd["cell_total_cons"], total_shift)
     ws_m[cons_total_addr] = f"={cons_raw_addr}+{cons_markup_addr}"

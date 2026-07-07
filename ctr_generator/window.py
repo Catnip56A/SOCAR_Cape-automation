@@ -38,7 +38,7 @@ from ctr_generator import __version__ as _VERSION
 from PySide6.QtCore import Qt, QObject, QRunnable, QSettings, QThread, QThreadPool, Signal
 from PySide6.QtGui import QBrush, QColor
 from PySide6.QtWidgets import (
-    QAbstractItemView, QComboBox, QDialog, QFileDialog,
+    QAbstractItemView, QComboBox, QDialog, QDoubleSpinBox, QFileDialog,
     QGroupBox, QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit,
     QMessageBox, QProgressDialog, QPushButton, QScrollArea,
     QSizePolicy, QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget,
@@ -74,7 +74,7 @@ BORDER    = "#E0E0E0"
 MR_LIGHT  = "#E3F2FD"
 CTR_LIGHT = "#E0F2F1"
 
-_MARKUP = 0.065
+_DEFAULT_MARKUP_PCT = CFG["usd_template"]["markup_rate"] * 100   # spinbox default, e.g. 6.5
 
 # ── unified manpower table column indices ─────────────────────────────────────
 # One table does double duty: shows the CTR Request match AND is the direct
@@ -156,6 +156,7 @@ class CTRWorker(QThread):
         job_ref:       str,
         header_azn:    dict | None = None,
         header_usd:    dict | None = None,
+        markup_rate:   float | None = None,
         parent=None,
     ):
         super().__init__(parent)
@@ -169,6 +170,7 @@ class CTRWorker(QThread):
         self._job_ref       = job_ref
         self._header_azn    = header_azn
         self._header_usd    = header_usd
+        self._markup_rate   = markup_rate
 
     def run(self):
         log.info(
@@ -189,7 +191,7 @@ class CTRWorker(QThread):
             self.progress.emit("Writing USD CTR spreadsheet…")
             usd_xlsx = build_usd(
                 self._equip_rows, self._consump_rows, self._usd_tpl, out, self._job_ref,
-                header=self._header_usd,
+                header=self._header_usd, markup_rate=self._markup_rate,
             )
             log.info("CTRWorker: USD spreadsheet written: %s", usd_xlsx)
 
@@ -1241,6 +1243,25 @@ class CTRGeneratorWidget(QWidget):
         ref_row.addStretch()
         gl.addLayout(ref_row)
 
+        markup_row = QHBoxLayout()
+        markup_lbl = QLabel("Markup Rate:")
+        markup_lbl.setFixedWidth(70)
+        self._markup_spin = QDoubleSpinBox()
+        self._markup_spin.setFixedWidth(120)
+        self._markup_spin.setRange(0.0, 100.0)
+        self._markup_spin.setDecimals(2)
+        self._markup_spin.setSuffix(" %")
+        self._markup_spin.setValue(_DEFAULT_MARKUP_PCT)
+        self._markup_spin.setToolTip(
+            "USD consumables markup — written into the generated CTR's "
+            '"Mark up (For Consumables)" cell. Saved/loaded with presets.'
+        )
+        self._markup_spin.valueChanged.connect(self._recalc_usd_totals)
+        markup_row.addWidget(markup_lbl)
+        markup_row.addWidget(self._markup_spin)
+        markup_row.addStretch()
+        gl.addLayout(markup_row)
+
         # ── Presets ────────────────────────────────────────────────────────────
         preset_lbl = QLabel("Presets:")
         pf = preset_lbl.font()
@@ -1341,6 +1362,10 @@ class CTRGeneratorWidget(QWidget):
 
     # ── Presets ───────────────────────────────────────────────────────────────
 
+    def _markup_rate(self) -> float:
+        """Current markup rate as a fraction (e.g. 0.065), for build_usd()."""
+        return self._markup_spin.value() / 100.0
+
     def _current_preset_data(self) -> dict:
         # Contract No (AZN/USD) is deliberately excluded — it's specific to
         # each generated document, so loading a preset must never overwrite
@@ -1354,6 +1379,7 @@ class CTRGeneratorWidget(QWidget):
             "project_type":    self._project_type_edit.text(),
             "job_ref":         self._job_ref_edit.text(),
             "output_dir":      self._out_dir_edit.text(),
+            "markup_rate_pct": self._markup_spin.value(),
         }
 
     def _apply_preset_data(self, data: dict) -> None:
@@ -1366,6 +1392,10 @@ class CTRGeneratorWidget(QWidget):
         self._job_ref_edit.setText(data.get("job_ref", ""))
         if data.get("output_dir"):
             self._out_dir_edit.setText(data["output_dir"])
+        try:
+            self._markup_spin.setValue(float(data.get("markup_rate_pct", _DEFAULT_MARKUP_PCT)))
+        except (TypeError, ValueError):
+            self._markup_spin.setValue(_DEFAULT_MARKUP_PCT)
 
     def _refresh_preset_combo(self) -> None:
         self._preset_combo.clear()
@@ -1973,7 +2003,8 @@ class CTRGeneratorWidget(QWidget):
         tbl.blockSignals(True)
         if matched_name is not None:
             tbl.setItem(row, _EQ_MDESC, _ro_item(matched_name))
-            tbl.setItem(row, _EQ_RATE, QTableWidgetItem(f"{matched_rate:.2f}"))
+            rate_text = "NONRECHARG" if db_non_recharge else f"{matched_rate:.2f}"
+            tbl.setItem(row, _EQ_RATE, QTableWidgetItem(rate_text))
             status = "✓ Matched"
             if mismatch:
                 status += "  ⚠ Rechargability mismatch vs. request sheet"
@@ -2181,12 +2212,13 @@ class CTRGeneratorWidget(QWidget):
             except ValueError:
                 pass
 
-        cons_with_markup = cons_raw * (1 + _MARKUP)
+        markup_pct       = self._markup_spin.value()
+        cons_with_markup = cons_raw * (1 + markup_pct / 100.0)
         ctr_total        = equip_total + cons_with_markup
 
         self._usd_equip_lbl.setText(f"Equipment:  ${equip_total:,.2f}")
         self._usd_cons_lbl.setText(
-            f"Consumables (incl. 6.5% markup):  ${cons_with_markup:,.2f}")
+            f"Consumables (incl. {markup_pct:.2f}% markup):  ${cons_with_markup:,.2f}")
         self._usd_total_lbl.setText(f"USD CTR Total:  ${ctr_total:,.2f}")
 
     # ── Search filter ─────────────────────────────────────────────────────────
@@ -2357,10 +2389,13 @@ class CTRGeneratorWidget(QWidget):
                 qty = float(_etxt(_EQ_QTY) or 1)
             except ValueError:
                 qty = 1.0
+            rate_txt = _etxt(_EQ_RATE)
             try:
-                rate = float(_etxt(_EQ_RATE) or 0)
+                rate = float(rate_txt or 0)
             except ValueError:
-                rate = 0.0
+                # Non-numeric — e.g. "NONRECHARG" — passed through as-is so
+                # build_usd can print it instead of a misleading 0.00.
+                rate = rate_txt
             try:
                 days = float(_etxt(_EQ_DAYS) or 30)
             except ValueError:
@@ -2445,6 +2480,7 @@ class CTRGeneratorWidget(QWidget):
             job_ref       = job_ref,
             header_azn    = header_azn,
             header_usd    = header_usd,
+            markup_rate   = self._markup_rate(),
             parent        = self,
         )
         self._workers.append(worker)

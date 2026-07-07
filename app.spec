@@ -10,6 +10,7 @@ import os
 # carry over into the freshly built exe automatically.
 _DATA_FILES = [
     ("ctr_generator/template_config.json", "ctr_generator"),
+    ("VERSION", "."),
 ]
 for _fname in ("match_aliases.json", "ctr_presets.json"):
     _src = os.path.join("ctr_generator", _fname)

@@ -1,12 +1,17 @@
 ; Inno Setup script — SOCAR CAPE Commercial-automation
 ; Build steps (Windows only):
 ;   1. pyinstaller app.spec          → produces dist\Commercial-automation.exe
-;   2. iscc setup.iss                → produces Output\Commercial-automation_Setup_1.0.0.exe
+;   2. iscc setup.iss                → produces Output\Commercial-automation_Setup_<version>.exe
+;
+; To release a new version, edit VERSION only — it's the single source of
+; truth for both the in-app version and this installer's version.
 ;
 ; Requires: Inno Setup 6  https://jrsoftware.org/isinfo.php
 
 #define AppName      "SOCAR CAPE Commercial-automation"
-#define AppVersion   "1.0.0"
+; AppVersion is read from VERSION — the same file the running app reads for
+; __version__ — so the installer and in-app version can't drift.
+#define AppVersion   Trim(FileRead(FileOpen("VERSION")))
 #define AppPublisher "Magsud Abbaszade"
 #define AppExeName   "Commercial-automation.exe"
 #define AppURL       ""
@@ -19,7 +24,7 @@ AppPublisher={#AppPublisher}
 AppPublisherURL={#AppURL}
 AppSupportURL={#AppURL}
 AppUpdatesURL={#AppURL}
-DefaultDirName={autopf}\SOCAR Cape\Commercial-automation
+DefaultDirName={autopf}\SOCAR Cape automation\Commercial-automation
 DefaultGroupName=SOCAR Cape
 AllowNoIcons=yes
 ; Installer output

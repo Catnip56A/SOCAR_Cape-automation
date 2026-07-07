@@ -1,5 +1,5 @@
 {
-  "_comment": "CTR Generator layout configuration. Edit here instead of the Python source. Derived values (section totals, total column positions) are computed automatically from the start/end ranges — only update start/end when the template layout changes.",
+  "_comment": "CTR Generator layout configuration. Edit here instead of the Python source. Derived values (section totals, total column positions) are computed automatically from the start/end ranges — only update start/end when the template layout changes. usd_template.list_items_on_main controls whether each equipment/consumable item also gets its own row on the Main sheet (true) or Main only shows the section totals, with per-item detail living solely on the Pricing sheet (false).",
 
   "azn_template": {
     "sheet_name": "Main AZN",
@@ -29,6 +29,7 @@
     "main_sheet":    "Main",
     "pricing_sheet": "Pricing",
     "markup_rate": 0.065,
+    "list_items_on_main": false,
     "equip_data_start": 11,
     "equip_data_end":   210,
     "cons_data_start": 216,
@@ -44,6 +45,7 @@
     "cell_scope":      "A6",
     "cell_total_equip_2":    "G112",
     "cell_total_cons_raw":   "G115",
+    "cell_cons_markup_rate": "E116",
     "cell_total_cons_markup": "G116",
     "cell_total_cons":       "G120",
     "cell_summary_equip":    "G126",

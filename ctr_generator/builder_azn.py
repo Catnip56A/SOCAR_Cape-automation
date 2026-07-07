@@ -56,6 +56,7 @@ from openpyxl.utils import column_index_from_string as _col_idx
 from openpyxl.utils import get_column_letter as _col_letter
 
 from ctr_generator.config import CFG
+from ctr_generator.naming import ctr_output_filename
 
 _azn = CFG["azn_template"]
 
@@ -197,6 +198,8 @@ def build_azn(
         the row-21 section header text (see activities_label) and, unlike
         the other header fields, has no dedicated template cell to fall
         back to — a blank/missing value defaults to "Offshore Activities".
+        location and scope are also used to build the output filename
+        (see ctr_generator.naming).
 
     Returns the path to the saved xlsx file.
     """
@@ -211,7 +214,8 @@ def build_azn(
     except OSError as e:
         raise ValueError(f"Cannot create output folder {output_dir}: {e}") from e
 
-    out_path = output_dir / f"{job_ref}_AZN_WCH_CTR.xlsx"
+    out_path = output_dir / ctr_output_filename(
+        job_ref, "AZN", (header or {}).get("location", ""), (header or {}).get("scope", ""))
     try:
         shutil.copy2(template_path, out_path)
     except PermissionError as e:
