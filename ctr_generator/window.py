@@ -89,8 +89,8 @@ _MP_DESC      = 3   # description — editable
 _MP_MATCH     = 4   # match-by search key (work name, or a literal stock code override) — editable
 _MP_MDESC     = 5   # matched pricebook item + stock code — read-only
 _MP_NUMEMP    = 6   # num employees — editable
-_MP_QTY       = 7   # quantity (hrs/days) — editable
-_MP_UOM       = 8   # UOM — editable
+_MP_QTY       = 7   # quantity in hours (working days × hours/shift) — editable
+_MP_UOM       = 8   # UOM — always "Hours" for manpower, read-only
 _MP_RATE      = 9   # rate AZN — editable (auto-filled from match, overridable)
 _MP_TOTAL     = 10  # read-only, computed
 _MP_STATUS    = 11  # read-only: "✓ Matched" / "✓ Manual" / "✗ No match — ..."
@@ -98,7 +98,7 @@ _MP_NAT       = 12  # nationality — editable
 
 _MANPOWER_HEADERS = [
     "Type", "Shift", "Shift Type", "Description", "Match By", "Matched Item",
-    "Num\nEmployees", "Quantity", "UOM", "Rate AZN", "Total AZN", "Status", "Nationality",
+    "Num\nEmployees", "Quantity (Hrs)", "UOM", "Rate AZN", "Total AZN", "Status", "Nationality",
 ]
 
 # ── unified equipment table column indices ────────────────────────────────────
@@ -1707,9 +1707,21 @@ class CTRGeneratorWidget(QWidget):
         except (TypeError, ValueError):
             num_emp = 1.0
         try:
-            qty = float(request_item.get("working_days") or 0)
+            working_days = float(request_item.get("working_days") or 0)
         except (TypeError, ValueError):
-            qty = 0.0
+            working_days = 0.0
+        # Quantity is billed in hours (working days × hours/shift), not days
+        # — the AZN pricebook's labor rows are all rated per hour (UOM
+        # "HUR"), and the shift length lives in the matched stock code's
+        # suffix (see _decode_azn_stock_code). The actual hours/shift is
+        # only known once matching runs, so start from the plain working-day
+        # count here and let _rematch_manpower_row multiply it in once the
+        # shift length is resolved. working_days itself is stashed on the
+        # Quantity cell so a later rematch (e.g. after Shift/Type/Match By
+        # changes the matched stock code's hours) can recompute from the
+        # original day count instead of compounding onto an already-
+        # multiplied value.
+        qty = working_days
 
         tbl.setItem(r, _MP_TYPE,      QTableWidgetItem(row_type))
         tbl.setItem(r, _MP_SHIFT,     QTableWidgetItem(shift))
@@ -1720,7 +1732,8 @@ class CTRGeneratorWidget(QWidget):
         tbl.setItem(r, _MP_MDESC,     _ro_item(""))
         tbl.setItem(r, _MP_NUMEMP,    QTableWidgetItem(str(num_emp)))
         tbl.setItem(r, _MP_QTY,       QTableWidgetItem(str(qty)))
-        tbl.setItem(r, _MP_UOM,       QTableWidgetItem("Days"))
+        tbl.item(r, _MP_QTY).setData(Qt.UserRole, working_days)
+        tbl.setItem(r, _MP_UOM,       _ro_item("Hours"))
         tbl.setItem(r, _MP_RATE,      QTableWidgetItem("0.00"))
         tbl.setItem(r, _MP_TOTAL,     _ro_item("0.00"))
         tbl.setItem(r, _MP_STATUS,    _ro_item("✗ No match — edit Match By or Description"))
@@ -1741,7 +1754,7 @@ class CTRGeneratorWidget(QWidget):
         tbl.setItem(r, _MP_MDESC,     _ro_item(""))
         tbl.setItem(r, _MP_NUMEMP,    QTableWidgetItem("1"))
         tbl.setItem(r, _MP_QTY,       QTableWidgetItem("0"))
-        tbl.setItem(r, _MP_UOM,       QTableWidgetItem("Hours"))
+        tbl.setItem(r, _MP_UOM,       _ro_item("Hours"))
         tbl.setItem(r, _MP_RATE,      QTableWidgetItem("0.00"))
         tbl.setItem(r, _MP_TOTAL,     _ro_item("0.00"))
         tbl.setItem(r, _MP_STATUS,    _ro_item("✓ Manual"))
@@ -1837,6 +1850,31 @@ class CTRGeneratorWidget(QWidget):
             else:
                 status_text = "✗ No match — edit Match By or Description"
             tbl.setItem(row, _MP_STATUS, _ro_item(status_text))
+
+        # Quantity is billed in hours (working days × hours/shift) — the
+        # matched stock code's suffix is the authoritative hours/shift once
+        # a match is found (see _decode_azn_stock_code); the request's own
+        # ENCODING hint is used as a fallback for e.g. a "✓ Manual" row that
+        # never matched a stock code. working_days (stashed on this cell by
+        # _append_manpower_row_from_request) is the original day count, so
+        # rematching (e.g. after Shift/Type changes the resolved hours)
+        # recomputes from that instead of compounding onto an
+        # already-multiplied value. Manually-added rows have no stashed
+        # working_days and are left as a plain hours entry.
+        qty_item = tbl.item(row, _MP_QTY)
+        working_days = qty_item.data(Qt.UserRole) if qty_item else None
+        if isinstance(working_days, (int, float)):
+            effective_hours = None
+            if match:
+                decoded = _decode_azn_stock_code(stock_code)
+                if decoded:
+                    effective_hours = decoded[3]
+            effective_hours = effective_hours or hours
+            if effective_hours:
+                try:
+                    qty_item.setText(str(float(working_days) * float(effective_hours)))
+                except (TypeError, ValueError):
+                    pass
         tbl.blockSignals(False)
         self._recalc_manpower_row(row)
         _highlight_row(tbl, row, bool(match))

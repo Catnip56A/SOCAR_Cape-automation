@@ -7,6 +7,10 @@ and version numbers come from the [VERSION](VERSION) file.
 
 ## [Unreleased]
 
+## [1.0.2] - 2026-07-07
+### Changed
+- Fixed issue with AZN pricebook UOMin order to calculate using working hours rather than working days
+
 ## [1.0.1] - 2026-07-07
 ### Changed
 - Consumable and equipment costs moved to their own line items on the pricing page.
