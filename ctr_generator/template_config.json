@@ -20,7 +20,9 @@
     "cell_date":       "E4",
     "cell_contract_no": "G4",
     "cell_revision":   "E5",
-    "cell_scope":      "A6"
+    "cell_scope":      "A6",
+    "label_onshore_activities":  "Onshore Activities",
+    "label_offshore_activities": "Offshore Activities"
   },
 
   "usd_template": {
@@ -61,6 +63,17 @@
     "col_uom":          6,
     "col_supplier_desc": 9,
     "col_unit_price":   14
+  },
+
+  "azn_shift_prefixes": {
+    "MS":  ["day", "normal"],
+    "MSU": ["day", "normal"],
+    "MF":  ["day", "normal"],
+    "OV":  ["day", "overtime"],
+    "SB":  ["day", "standby"],
+    "NS":  ["night", "normal"],
+    "NOV": ["night", "overtime"],
+    "NSB": ["night", "standby"]
   },
 
   "sage_export": {

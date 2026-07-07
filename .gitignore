@@ -49,3 +49,7 @@ desktop.ini
 
 # CTR Generator — locally learned request/pricebook renames (per-user state)
 ctr_generator/match_aliases.json
+
+
+# builds
+*Output/

@@ -40,6 +40,8 @@ _DEFAULTS: dict = {
         "cell_contract_no": "G4",
         "cell_revision":    "E5",
         "cell_scope":       "A6",
+        "label_onshore_activities":  "Onshore Activities",
+        "label_offshore_activities": "Offshore Activities",
     },
     "usd_template": {
         "main_sheet":    "Main",
@@ -78,6 +80,23 @@ _DEFAULTS: dict = {
         "col_uom":           6,
         "col_supplier_desc": 9,
         "col_unit_price":    14,
+    },
+    # Maps an AZN labor stock code's shift-type prefix (the segment before
+    # "-NAT-", e.g. "MSU" in "MSU-NAT-OFF-12") to [shift, shift_type].
+    # A "GE" prefix (e.g. "GENOV-...") is stripped before lookup — see
+    # ctr_generator/window.py _decode_azn_stock_code. Add new prefixes here
+    # (no code changes needed) if the pricebook introduces one this table
+    # doesn't cover yet — an unrecognized prefix makes manpower matching
+    # refuse to guess and surface the row as unmatched instead.
+    "azn_shift_prefixes": {
+        "MS":  ["day",   "normal"],
+        "MSU": ["day",   "normal"],
+        "MF":  ["day",   "normal"],
+        "OV":  ["day",   "overtime"],
+        "SB":  ["day",   "standby"],
+        "NS":  ["night", "normal"],
+        "NOV": ["night", "overtime"],
+        "NSB": ["night", "standby"],
     },
     "sage_export": {
         "sheet_name": "SAGE",

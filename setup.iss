@@ -78,12 +78,10 @@ begin
   Result := True;   // always allow install to continue
   if not LibreOfficeInstalled then
     MsgBox(
-      'LibreOffice does not appear to be installed on this machine.' + #13#10 +
-      #13#10 +
+      'LibreOffice does not appear to be installed on this machine.' + #13#10 + #13#10 +
       'The app works fully without it — only automatic PDF export after CTR' + #13#10 +
       'generation requires LibreOffice. You can install it later from:' + #13#10 +
-      'https://www.libreoffice.org/download/download/' + #13#10 +
-      #13#10 +
+      'https://www.libreoffice.org/download/download/' + #13#10 + #13#10 +
       'Setup will now continue.',
       mbInformation, MB_OK
     );

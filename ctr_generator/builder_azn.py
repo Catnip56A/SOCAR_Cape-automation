@@ -9,17 +9,21 @@ file when a new template version shifts the layout.
 
 Default layout (217_AZN template):
   Row 3  : E3 = CTR ref string, O3 = job ref integer
-  Row 7  : "Project Support" section header
-  Row 8  : column headers for Project Support section
-  Rows 9–18 : onshore / project-support data rows
+  Row 7  : "Project Support" section header (fixed text)
+  Row 8  : column headers for the Project Support section
+  Rows 9–18 : "support" section data rows — any manpower row whose
+    description contains the keyword "support" (case-insensitive; see
+    is_support_manpower), regardless of its Onshore/Offshore type
   Row 20 : G20 = total project support
-  Row 21 : "Offshore Activities" section header
-  Row 22 : column headers for Offshore Activities section
-  Rows 23–62: offshore data rows
-  Row 64 : G64 = total offshore activities
+  Row 21 : section header for every other manpower row — text is
+    "Onshore Activities" or "Offshore Activities" depending on the CTR
+    request's project type (see activities_label), not fixed template text
+  Row 22 : column headers for that section
+  Rows 23–62: data rows for every manpower row NOT matched as "support"
+  Row 64 : G64 = total for that section
   Summary (rows 66–71):
     G67 = total project support
-    G68 = total offshore activities
+    G68 = total of the other section
     G71 = estimated CTR total
 
   Editable header fields (rows 3–6, shared layout with USD template):
@@ -32,10 +36,16 @@ section totals, summary cells — is written as an Excel formula referencing
 that cell, so editing an input in Excel recalculates its dependents. This
 only matters for the .xlsx output; the PDF export is a flat rendering, so
 formulas there simply show their last-calculated value.
+
+The "support" keyword itself (see is_support_manpower / strip_support_keyword)
+is an internal routing marker, not client-facing text — it's stripped from
+the Comment and Description cells of every written row before they reach
+the document, so "Painter Support" appears as plain "Painter".
 """
 
 from __future__ import annotations
 
+import re
 import shutil
 from copy import copy
 from datetime import datetime
@@ -49,15 +59,57 @@ from ctr_generator.config import CFG
 
 _azn = CFG["azn_template"]
 
-_ONSHORE_DATA_START  = _azn["onshore_data_start"]
-_ONSHORE_DATA_END    = _azn["onshore_data_end"]
-_ONSHORE_TOTAL_GAP   = _azn["onshore_total_gap"]   # blank rows between data end and total
+_SUPPORT_DATA_START = _azn["onshore_data_start"]
+_SUPPORT_DATA_END   = _azn["onshore_data_end"]
+_SUPPORT_TOTAL_GAP  = _azn["onshore_total_gap"]   # blank rows between data end and total
 
-_OFFSHORE_DATA_START = _azn["offshore_data_start"]
-_OFFSHORE_DATA_END   = _azn["offshore_data_end"]
-_OFFSHORE_TOTAL_GAP  = _azn["offshore_total_gap"]
+_OTHER_DATA_START = _azn["offshore_data_start"]
+_OTHER_DATA_END   = _azn["offshore_data_end"]
+_OTHER_TOTAL_GAP  = _azn["offshore_total_gap"]
 
 _DATE_FORMATS = ("%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y", "%d.%m.%Y")
+
+# Manpower rows whose description contains this keyword (any casing —
+# "Support", "SUPPORT", "Supporting", "Life Support", etc. all match as a
+# plain substring) go into the fixed "Project Support" rows (9–18); every
+# other manpower row goes into the section starting at row 23.
+_SUPPORT_KEYWORD = "support"
+_SUPPORT_RE = re.compile(re.escape(_SUPPORT_KEYWORD), re.IGNORECASE)
+
+
+def is_support_manpower(description: str) -> bool:
+    """True if a manpower description should be treated as "support" manpower."""
+    return _SUPPORT_KEYWORD in (description or "").lower()
+
+
+def strip_support_keyword(text: str) -> str:
+    """
+    Removes the "support" keyword from a manpower match string before it's
+    looked up in the pricebook — a role like "Scaffolder Support" should
+    match the base pricebook item "Scaffolder" rather than fail as an
+    unmatched exact string. Cleans up whitespace/punctuation left behind by
+    the removal (e.g. "Painter (Support)" → "Painter"); falls back to the
+    original text if stripping would leave nothing.
+    """
+    if not text:
+        return text
+    stripped = _SUPPORT_RE.sub("", text)
+    stripped = re.sub(r"\(\s*\)", "", stripped)
+    stripped = re.sub(r"\s{2,}", " ", stripped).strip(" -_/,()")
+    return stripped or text.strip()
+
+
+def activities_label(project_type: str) -> str:
+    """
+    Section header text for the non-"support" manpower section (row 21/H21):
+    "Onshore Activities" or "Offshore Activities", chosen from the CTR
+    request's project type. Falls back to "Offshore Activities" (the
+    template's original hardcoded text) when project_type is blank or
+    doesn't recognize either word.
+    """
+    if "onshore" in (project_type or "").lower():
+        return _azn.get("label_onshore_activities", "Onshore Activities")
+    return _azn.get("label_offshore_activities", "Offshore Activities")
 
 
 def _cell_row_col(addr: str) -> tuple[int, int]:
@@ -120,8 +172,8 @@ def _parse_date(value):
 
 
 def build_azn(
-    onshore_rows: list[dict],
-    offshore_rows: list[dict],
+    support_rows: list[dict],
+    other_rows: list[dict],
     template_path: str | Path,
     output_dir: str | Path,
     job_ref: str,
@@ -130,14 +182,21 @@ def build_azn(
     """
     Write labor rows into a copy of the AZN template.
 
-    onshore_rows / offshore_rows: list of dicts with keys:
+    support_rows: manpower rows whose description matched the "support"
+        keyword (see is_support_manpower) — written into rows 9–18.
+    other_rows: every other manpower row — written into rows 23+.
+
+    Each row is a dict with keys:
         comment, num_employees (int/float), description (str),
         quantity (float), uom (str), rate_azn (float), nationality (str)
 
     header: optional dict with keys client, sub_client, location, scope,
-        date, contract_no, revision. Only non-empty values overwrite the
-        corresponding template cell — leaving a field blank preserves
-        whatever the template already has.
+        date, contract_no, revision, project_type. Only non-empty values
+        overwrite the corresponding template cell — leaving a field blank
+        preserves whatever the template already has. project_type drives
+        the row-21 section header text (see activities_label) and, unlike
+        the other header fields, has no dedicated template cell to fall
+        back to — a blank/missing value defaults to "Offshore Activities".
 
     Returns the path to the saved xlsx file.
     """
@@ -190,30 +249,41 @@ def build_azn(
         if header.get("scope"):       ws[_azn["cell_scope"]]      = header["scope"]
 
     # ── Insert extra rows before writing so overflow doesn't clobber the
-    #    offshore section or the summary block ──────────────────────────────────
+    #    second section or the summary block ──────────────────────────────────
     _COLS = 9   # columns A–I used by data rows
 
-    onshore_capacity = _ONSHORE_DATA_END - _ONSHORE_DATA_START + 1
-    onshore_extra    = max(0, len(onshore_rows) - onshore_capacity)
-    if onshore_extra:
-        _insert_rows_preserving_merges(ws, _ONSHORE_DATA_END + 1, onshore_extra)
-        for i in range(onshore_extra):
-            _copy_row_format(ws, _ONSHORE_DATA_END, _ONSHORE_DATA_END + 1 + i, _COLS)
+    support_capacity = _SUPPORT_DATA_END - _SUPPORT_DATA_START + 1
+    support_extra    = max(0, len(support_rows) - support_capacity)
+    if support_extra:
+        _insert_rows_preserving_merges(ws, _SUPPORT_DATA_END + 1, support_extra)
+        for i in range(support_extra):
+            _copy_row_format(ws, _SUPPORT_DATA_END, _SUPPORT_DATA_END + 1 + i, _COLS)
 
-    # Offshore section has shifted down by onshore_extra
-    off_start = _OFFSHORE_DATA_START + onshore_extra
-    off_end   = _OFFSHORE_DATA_END   + onshore_extra
+    # Second section has shifted down by support_extra
+    other_start = _OTHER_DATA_START + support_extra
+    other_end   = _OTHER_DATA_END   + support_extra
 
-    offshore_capacity = off_end - off_start + 1
-    offshore_extra    = max(0, len(offshore_rows) - offshore_capacity)
-    if offshore_extra:
-        _insert_rows_preserving_merges(ws, off_end + 1, offshore_extra)
-        for i in range(offshore_extra):
-            _copy_row_format(ws, off_end, off_end + 1 + i, _COLS)
-    off_eff_end = off_end + offshore_extra
+    other_capacity = other_end - other_start + 1
+    other_extra    = max(0, len(other_rows) - other_capacity)
+    if other_extra:
+        _insert_rows_preserving_merges(ws, other_end + 1, other_extra)
+        for i in range(other_extra):
+            _copy_row_format(ws, other_end, other_end + 1 + i, _COLS)
+    other_eff_end = other_end + other_extra
 
     # Total row-shift to apply to summary cell addresses
-    _row_shift = onshore_extra + offshore_extra
+    _row_shift = support_extra + other_extra
+
+    # ── Section-2 header text ("Onshore Activities" / "Offshore Activities"),
+    #    driven by the CTR request's project type rather than fixed template
+    #    text — the template ships with "Offshore Activities" hardcoded at
+    #    A21/H21, which is wrong for an Onshore-only project. Written at the
+    #    section's shifted title row (2 rows above its data start), to both
+    #    the merged A-column cell and its standalone H-column mirror. ────────
+    other_title_row = other_start - 2
+    label = activities_label((header or {}).get("project_type", "") if header else "")
+    ws.cell(row=other_title_row, column=1).value = label
+    ws.cell(row=other_title_row, column=8).value = label
 
     # ── Write section helper (captures ws via closure) ─────────────────────────
     def _write_section(rows, start, eff_end, total_gap) -> int:
@@ -238,9 +308,9 @@ def build_azn(
             except (ValueError, TypeError):
                 rate = 0.0
 
-            ws.cell(row=r, column=1).value = str(lr.get("comment", ""))
+            ws.cell(row=r, column=1).value = strip_support_keyword(str(lr.get("comment", "")))
             ws.cell(row=r, column=2).value = num_emp
-            ws.cell(row=r, column=3).value = str(lr.get("description", ""))
+            ws.cell(row=r, column=3).value = strip_support_keyword(str(lr.get("description", "")))
             ws.cell(row=r, column=4).value = qty
             ws.cell(row=r, column=5).value = str(lr.get("uom", "Hours"))
             ws.cell(row=r, column=6).value = rate
@@ -259,22 +329,22 @@ def build_azn(
         ws.cell(row=total_row, column=7).value = f"=SUM(G{start}:G{eff_end})"
         return total_row
 
-    onshore_total_row  = _write_section(
-        onshore_rows,  _ONSHORE_DATA_START, _ONSHORE_DATA_END + onshore_extra,  _ONSHORE_TOTAL_GAP)
-    offshore_total_row = _write_section(
-        offshore_rows, off_start,           off_eff_end,                        _OFFSHORE_TOTAL_GAP)
+    support_total_row = _write_section(
+        support_rows, _SUPPORT_DATA_START, _SUPPORT_DATA_END + support_extra, _SUPPORT_TOTAL_GAP)
+    other_total_row = _write_section(
+        other_rows,   other_start,         other_eff_end,                   _OTHER_TOTAL_GAP)
 
     # ── Summary cells — addresses from config, shifted by any inserted rows ────
     _r, _c = _cell_row_col(_azn["cell_summary_onshore"])
-    onshore_summary_addr = f"{_col_letter(_c)}{_r + _row_shift}"
-    ws.cell(row=_r + _row_shift, column=_c).value = f"=G{onshore_total_row}"
+    support_summary_addr = f"{_col_letter(_c)}{_r + _row_shift}"
+    ws.cell(row=_r + _row_shift, column=_c).value = f"=G{support_total_row}"
 
     _r, _c = _cell_row_col(_azn["cell_summary_offshore"])
-    offshore_summary_addr = f"{_col_letter(_c)}{_r + _row_shift}"
-    ws.cell(row=_r + _row_shift, column=_c).value = f"=G{offshore_total_row}"
+    other_summary_addr = f"{_col_letter(_c)}{_r + _row_shift}"
+    ws.cell(row=_r + _row_shift, column=_c).value = f"=G{other_total_row}"
 
     _r, _c = _cell_row_col(_azn["cell_summary_combined"])
-    ws.cell(row=_r + _row_shift, column=_c).value = f"={onshore_summary_addr}+{offshore_summary_addr}"
+    ws.cell(row=_r + _row_shift, column=_c).value = f"={support_summary_addr}+{other_summary_addr}"
 
     try:
         wb.save(out_path)

@@ -48,8 +48,14 @@ from ctr_generator.aliases import (
     load_aliases, get_alias, set_alias, delete_alias,
     save_aliases, export_aliases, import_aliases,
 )
+from ctr_generator.config import CFG
 from ctr_generator.presets import load_presets, save_presets, _PRESET_FIELDS
-from ctr_generator.builder_azn import build_azn
+from ctr_generator.builder_azn import (
+    activities_label,
+    build_azn,
+    is_support_manpower,
+    strip_support_keyword,
+)
 from ctr_generator.builder_usd import build_usd
 from ctr_generator.parser import (
     parse_azn_pricebook, parse_sage,
@@ -140,8 +146,8 @@ class CTRWorker(QThread):
 
     def __init__(
         self,
-        onshore_rows:  list[dict],
-        offshore_rows: list[dict],
+        support_rows:  list[dict],
+        other_rows:    list[dict],
         equip_rows:    list[dict],
         consump_rows:  list[dict],
         azn_tpl:       str,
@@ -153,8 +159,8 @@ class CTRWorker(QThread):
         parent=None,
     ):
         super().__init__(parent)
-        self._onshore_rows  = onshore_rows
-        self._offshore_rows = offshore_rows
+        self._support_rows  = support_rows
+        self._other_rows    = other_rows
         self._equip_rows    = equip_rows
         self._consump_rows  = consump_rows
         self._azn_tpl       = azn_tpl
@@ -166,8 +172,8 @@ class CTRWorker(QThread):
 
     def run(self):
         log.info(
-            "CTRWorker: job_ref=%s onshore=%d offshore=%d equip=%d consumables=%d output_dir=%s",
-            self._job_ref, len(self._onshore_rows), len(self._offshore_rows),
+            "CTRWorker: job_ref=%s support=%d other=%d equip=%d consumables=%d output_dir=%s",
+            self._job_ref, len(self._support_rows), len(self._other_rows),
             len(self._equip_rows), len(self._consump_rows), self._output_dir,
         )
         try:
@@ -175,7 +181,7 @@ class CTRWorker(QThread):
 
             self.progress.emit("Writing AZN CTR spreadsheet…")
             azn_xlsx = build_azn(
-                self._onshore_rows, self._offshore_rows, self._azn_tpl, out, self._job_ref,
+                self._support_rows, self._other_rows, self._azn_tpl, out, self._job_ref,
                 header=self._header_azn,
             )
             log.info("CTRWorker: AZN spreadsheet written: %s", azn_xlsx)
@@ -416,23 +422,25 @@ def _match_lookup(df: pd.DataFrame, code_col: str, desc_col: str, price_col: str
 # Offshore. An optional "GE" prefix (e.g. "GENOV-...") marks a different
 # labor category (seen on industrial-cleaning roles) but uses the same
 # shift-type suffix scheme, so it's stripped before lookup.
-_AZN_SHIFT_PREFIXES = {
-    "MS":  ("day",   "normal"),
-    "MSU": ("day",   "normal"),
-    "OV":  ("day",   "overtime"),
-    "SB":  ("day",   "standby"),
-    "NS":  ("night", "normal"),
-    "NOV": ("night", "overtime"),
-    "NSB": ("night", "standby"),
+#
+# Configurable via the "azn_shift_prefixes" section of template_config.json
+# (see ctr_generator/config.py) — add a prefix there, no code change needed,
+# if the pricebook introduces one this doesn't cover yet. An unrecognized
+# prefix makes manpower matching refuse to guess (see
+# _decode_manpower_encoding_full / _match_azn_labor) rather than silently
+# picking a possibly-wrong rate.
+_AZN_SHIFT_PREFIXES: dict[str, tuple[str, str]] = {
+    prefix: tuple(value) for prefix, value in CFG["azn_shift_prefixes"].items()
 }
 
 
 def _decode_azn_stock_code(stock_code: str):
     """
-    Decodes an AZN labor stock code into (location, shift, shift_type), or
-    None if it doesn't match the <PREFIX>-NAT-<ON|OFF>-<hours> pattern.
+    Decodes an AZN labor stock code into (location, shift, shift_type, hours),
+    or None if it doesn't match the <PREFIX>-NAT-<ON|OFF>-<hours> pattern.
     location is "on"/"off"; shift is "day"/"night"; shift_type is
-    "normal"/"overtime"/"standby".
+    "normal"/"overtime"/"standby"; hours is the trailing shift-length digits
+    (e.g. "8", "10", "12") as a string, or None if absent.
     """
     parts = str(stock_code).strip().upper().split("-NAT-")
     if len(parts) != 2 or not parts[1]:
@@ -443,30 +451,75 @@ def _decode_azn_stock_code(stock_code: str):
     shift_info = _AZN_SHIFT_PREFIXES.get(prefix)
     if shift_info is None:
         return None
-    location = rest.split("-")[0].lower()
+    rest_parts = rest.split("-")
+    location = rest_parts[0].lower()
     if location not in ("on", "off"):
         return None
+    hours = rest_parts[1] if len(rest_parts) > 1 else None
     shift, shift_type = shift_info
-    return location, shift, shift_type
+    return location, shift, shift_type, hours
 
 
-def _decode_manpower_encoding(encoding: str) -> str | None:
+_SHIFT_DISPLAY      = {"day": "Day", "night": "Night"}
+_SHIFT_TYPE_DISPLAY = {"normal": "Normal", "overtime": "Overtime", "standby": "Standby"}
+
+
+def _decode_manpower_encoding_full(encoding: str):
     """
-    Decodes the CTR Request's "ENCODING" column (e.g. "NAT-ON-12",
-    "NAT-OFF-10") into "Onshore"/"Offshore". This is the same
-    NAT-<ON|OFF>-<hours> suffix used in AZN labor stock codes (see
-    _decode_azn_stock_code) with the shift-type prefix already stripped —
-    confirmed against the pricebook's own "Part Number Extension" codes
-    (e.g. "MSU-NAT-ON-12"). Returns None if the text doesn't match.
+    Fully decodes the CTR Request's "ENCODING" column, which requesters
+    populate inconsistently: sometimes just the bare "NAT-<ON|OFF>-<hours>"
+    suffix (e.g. "NAT-ON-10"), sometimes a full AZN stock code with its
+    shift-type prefix prepended (e.g. "MSU-NAT-OFF-12" = Day/Normal/
+    Offshore/12h — see _decode_azn_stock_code for the prefix table reused
+    here).
+
+    A prefix that isn't a recognized shift code (e.g. "MF-NAT-ON-8" — "MF"
+    is not one of _AZN_SHIFT_PREFIXES) means we can't tell what shift/
+    shift-type it actually encodes, and it may well disagree with the
+    row's own Shift/Status columns (as in that example: Night/Standby text
+    next to a code that turns out to mean Day/Normal). Guessing by falling
+    back to the Shift/Status columns risks silently matching a *different*,
+    wrong pricebook row — so this is reported back as `ambiguous=True` and
+    the caller should refuse to auto-match by description at all rather
+    than pick a side.
+
+    Returns (location, shift, shift_type, hours, ambiguous) using the same
+    "Onshore"/"Offshore", "Day"/"Night", "Normal"/"Overtime"/"Standby"
+    display strings used elsewhere in the manpower table (None for any
+    field the encoding doesn't determine), or None entirely if even the
+    NAT-<ON|OFF> location portion can't be parsed.
     """
-    parts = (encoding or "").strip().upper().split("-")
-    if len(parts) < 2:
+    text = (encoding or "").strip().upper()
+    if "-NAT-" in text:
+        prefix, _, rest = text.partition("-NAT-")
+    elif text.startswith("NAT-"):
+        prefix, rest = "", text[len("NAT-"):]
+    else:
         return None
-    if parts[1] == "ON":
-        return "Onshore"
-    if parts[1] == "OFF":
-        return "Offshore"
-    return None
+
+    rest_parts = rest.split("-")
+    location = rest_parts[0].lower() if rest_parts else ""
+    if location not in ("on", "off"):
+        return None
+    hours = rest_parts[1] if len(rest_parts) > 1 and rest_parts[1].isdigit() else None
+
+    shift = shift_type = None
+    ambiguous = False
+    if prefix:
+        p = prefix[2:] if prefix.startswith("GE") else prefix
+        info = _AZN_SHIFT_PREFIXES.get(p)
+        if info:
+            shift, shift_type = info
+        else:
+            ambiguous = True
+
+    return (
+        "Onshore" if location == "on" else "Offshore",
+        _SHIFT_DISPLAY.get(shift),
+        _SHIFT_TYPE_DISPLAY.get(shift_type),
+        hours,
+        ambiguous,
+    )
 
 
 def _recharge_mismatch(request_tag: str, db_non_recharge: bool) -> bool:
@@ -500,18 +553,34 @@ def _normalize_shift_type(raw: str) -> str:
     return "normal"   # covers "normal", "rotational", and empty/blank
 
 
-def _match_azn_labor(df: pd.DataFrame, work_name: str, location: str, shift: str, shift_type: str):
+def _match_azn_labor(df: pd.DataFrame, work_name: str, location: str, shift: str,
+                      shift_type: str, hours: str | None = None, ambiguous: bool = False):
     """
     Finds the AZN pricebook rate for a manpower line, picking the variant
-    that matches the requested location/shift/shift-type combination.
+    that matches the requested location/shift/shift-type (and shift-length
+    hours, when known) combination.
 
     work_name is tried first as a literal stock code — this lets "Match By"
     be overridden with an exact code, bypassing the Type/Shift/Shift Type
-    columns entirely. Otherwise work_name is matched as a description, and
-    narrowed down to the row whose stock code decodes (via
-    _decode_azn_stock_code) to the same location/shift/shift-type. If no
-    exact combination exists, falls back to any same-location variant, then
-    to any variant at all, rather than failing outright.
+    columns (and `ambiguous`) entirely. Otherwise work_name is matched as a
+    description, and narrowed down to the row whose stock code decodes
+    (via _decode_azn_stock_code) to the same location/shift/shift-type/hours.
+
+    Matching is exact, not "closest": when several pricebook rows share the
+    same description but differ only in shift-length hours (e.g.
+    "NSB-NAT-ON-8" vs "NSB-NAT-ON-12"), only the row whose decoded hours
+    equal `hours` is accepted — the wrong-but-similar row is never silently
+    substituted. If `hours` is None (no request-encoded hint, e.g. a
+    manually added row), hours is left unconstrained. If no row matches the
+    known dimensions, returns None so the row surfaces as unmatched instead
+    of picking a wrong rate.
+
+    `ambiguous` (see _decode_manpower_encoding_full) means the CTR
+    Request's own ENCODING carries a shift-type prefix we don't recognize,
+    which may contradict the Shift/Status columns — description matching
+    is skipped entirely in that case (rather than guessing which side is
+    right), so the row surfaces as unmatched until the request is
+    corrected or "Match By" is set to the exact intended stock code.
 
     Returns (matched_description, rate, stock_code) or None.
     """
@@ -525,6 +594,9 @@ def _match_azn_labor(df: pd.DataFrame, work_name: str, location: str, shift: str
         row = code_matches.iloc[0]
         return str(row["supplier_desc"]), float(row["unit_price"]), str(row["stock_code"])
 
+    if ambiguous:
+        return None
+
     candidates = df[df["supplier_desc"].astype(str).str.strip().str.lower() == key_norm]
     if candidates.empty:
         return None
@@ -533,24 +605,16 @@ def _match_azn_labor(df: pd.DataFrame, work_name: str, location: str, shift: str
     sh  = _normalize_shift(shift)
     st  = _normalize_shift_type(shift_type)
 
-    same_location_fallback = None
     for _, row in candidates.iterrows():
         decoded = _decode_azn_stock_code(row["stock_code"])
         if decoded is None:
             continue
-        c_loc, c_shift, c_shift_type = decoded
-        if c_loc == loc and c_shift == sh and c_shift_type == st:
+        c_loc, c_shift, c_shift_type, c_hours = decoded
+        if (c_loc == loc and c_shift == sh and c_shift_type == st
+                and (hours is None or c_hours == hours)):
             return str(row["supplier_desc"]), float(row["unit_price"]), str(row["stock_code"])
-        if same_location_fallback is None and c_loc == loc:
-            same_location_fallback = row
 
-    if same_location_fallback is not None:
-        return (str(same_location_fallback["supplier_desc"]),
-                float(same_location_fallback["unit_price"]),
-                str(same_location_fallback["stock_code"]))
-
-    row = candidates.iloc[0]
-    return str(row["supplier_desc"]), float(row["unit_price"]), str(row["stock_code"])
+    return None
 
 
 def _is_dir_writable(path: Path) -> bool:
@@ -1155,8 +1219,13 @@ class CTRGeneratorWidget(QWidget):
         row_cna, self._contract_no_azn_edit = _hdr_row("Contract No (AZN):")
         row_cnu, self._contract_no_usd_edit = _hdr_row("Contract No (USD):")
         row_rv,  self._revision_edit        = _hdr_row("Revision:", "0")
+        row_pt,  self._project_type_edit    = _hdr_row("Project Type:", "Offshore")
+        self._project_type_edit.setToolTip(
+            "Onshore or Offshore — sets the AZN CTR's non-support manpower "
+            "section header (\"Onshore Activities\" / \"Offshore Activities\")."
+        )
 
-        for row in (row_c, row_sc, row_l, row_s, row_d, row_cna, row_cnu, row_rv):
+        for row in (row_c, row_sc, row_l, row_s, row_d, row_cna, row_cnu, row_rv, row_pt):
             gl.addLayout(row)
 
         gl.addSpacing(6)
@@ -1282,6 +1351,7 @@ class CTRGeneratorWidget(QWidget):
             "location":        self._location_edit.text(),
             "scope":           self._scope_edit.text(),
             "revision":        self._revision_edit.text(),
+            "project_type":    self._project_type_edit.text(),
             "job_ref":         self._job_ref_edit.text(),
             "output_dir":      self._out_dir_edit.text(),
         }
@@ -1292,6 +1362,7 @@ class CTRGeneratorWidget(QWidget):
         self._location_edit.setText(data.get("location", ""))
         self._scope_edit.setText(data.get("scope", ""))
         self._revision_edit.setText(data.get("revision", ""))
+        self._project_type_edit.setText(data.get("project_type", "Offshore"))
         self._job_ref_edit.setText(data.get("job_ref", ""))
         if data.get("output_dir"):
             self._out_dir_edit.setText(data["output_dir"])
@@ -1456,6 +1527,8 @@ class CTRGeneratorWidget(QWidget):
             self._location_edit.setText(data["location"])
         if data.get("job_description"):
             self._scope_edit.setText(data["job_description"])
+        if data.get("project_type"):
+            self._project_type_edit.setText(data["project_type"])
         commencement = data.get("commencement_date")
         if commencement:
             try:
@@ -1587,11 +1660,18 @@ class CTRGeneratorWidget(QWidget):
 
         desc = request_item.get("description", "")
         default_key = get_alias(self._aliases, "manpower", desc) or desc
-        encoded_location = _decode_manpower_encoding(request_item.get("encoding") or "")
+        encoding = request_item.get("encoding") or ""
+        decoded = _decode_manpower_encoding_full(encoding)
+        (encoded_location, encoded_shift, encoded_shift_type,
+         encoded_hours, encoding_ambiguous) = decoded or (None, None, None, None, False)
         row_type = encoded_location or ("Onshore" if "(onshore)" in desc.lower() else "Offshore")
-        shift = "Night" if "night" in (request_item.get("shift") or "").lower() else "Day"
         shift_type_raw = (request_item.get("status") or "").strip()
-        shift_type = shift_type_raw.title() if shift_type_raw else "Normal"
+        # A recognized shift-type prefix in ENCODING (e.g. "MSU-NAT-OFF-12")
+        # is authoritative over the free-text Shift/Status columns, since
+        # requesters sometimes leave those stale/inconsistent with the code
+        # they actually intend (see _decode_manpower_encoding_full).
+        shift      = encoded_shift or ("Night" if "night" in (request_item.get("shift") or "").lower() else "Day")
+        shift_type = encoded_shift_type or (shift_type_raw.title() if shift_type_raw else "Normal")
         try:
             num_emp = float(request_item.get("quantity") or 1)
         except (TypeError, ValueError):
@@ -1605,6 +1685,7 @@ class CTRGeneratorWidget(QWidget):
         tbl.setItem(r, _MP_SHIFT,     QTableWidgetItem(shift))
         tbl.setItem(r, _MP_SHIFTTYPE, QTableWidgetItem(shift_type))
         tbl.setItem(r, _MP_DESC,      QTableWidgetItem(desc))
+        tbl.item(r, _MP_DESC).setData(Qt.UserRole, (encoded_hours or "", encoding_ambiguous))
         tbl.setItem(r, _MP_MATCH,     QTableWidgetItem(default_key))
         tbl.setItem(r, _MP_MDESC,     _ro_item(""))
         tbl.setItem(r, _MP_NUMEMP,    QTableWidgetItem(str(num_emp)))
@@ -1704,8 +1785,12 @@ class CTRGeneratorWidget(QWidget):
         location   = type_item.text()  if type_item  else ""
         shift      = shift_item.text() if shift_item else ""
         shift_type = stype_item.text() if stype_item else ""
+        hint = desc_item.data(Qt.UserRole)
+        hours, ambiguous = hint if isinstance(hint, tuple) else (hint, False)
+        hours = hours or None
         was_includable = bool(status_item) and status_item.text().startswith("✓")
-        match = _match_azn_labor(self._azn_df, key, location, shift, shift_type)
+        match = _match_azn_labor(self._azn_df, strip_support_keyword(key), location, shift,
+                                  shift_type, hours, ambiguous)
 
         tbl.blockSignals(True)
         if match:
@@ -1715,8 +1800,13 @@ class CTRGeneratorWidget(QWidget):
             tbl.setItem(row, _MP_STATUS, _ro_item("✓ Matched"))
         else:
             tbl.setItem(row, _MP_MDESC, _ro_item(""))
-            tbl.setItem(row, _MP_STATUS, _ro_item(
-                "✓ Manual" if was_includable else "✗ No match — edit Match By or Description"))
+            if was_includable:
+                status_text = "✓ Manual"
+            elif ambiguous:
+                status_text = "✗ No match — ENCODING prefix unrecognized/conflicts with Shift+Status; fix request or set Match By to the exact stock code"
+            else:
+                status_text = "✗ No match — edit Match By or Description"
+            tbl.setItem(row, _MP_STATUS, _ro_item(status_text))
         tbl.blockSignals(False)
         self._recalc_manpower_row(row)
         _highlight_row(tbl, row, bool(match))
@@ -2046,8 +2136,8 @@ class CTRGeneratorWidget(QWidget):
 
     def _recalc_azn_totals(self):
         tbl = self._req_manpower_tbl
-        onshore_total = 0.0
-        offshore_total = 0.0
+        support_total = 0.0
+        other_total = 0.0
         for r in range(tbl.rowCount()):
             status_item = tbl.item(r, _MP_STATUS)
             if not (status_item and status_item.text().startswith("✓")):
@@ -2057,16 +2147,16 @@ class CTRGeneratorWidget(QWidget):
                 total = float(total_item.text()) if total_item else 0.0
             except ValueError:
                 total = 0.0
-            type_item = tbl.item(r, _MP_TYPE)
-            row_type = type_item.text().strip().lower() if type_item else "offshore"
-            if "onshore" in row_type:
-                onshore_total += total
+            desc_item = tbl.item(r, _MP_DESC)
+            if is_support_manpower(desc_item.text() if desc_item else ""):
+                support_total += total
             else:
-                offshore_total += total
+                other_total += total
 
-        self._azn_onshore_lbl.setText(f"Project Support:  ₼ {onshore_total:,.2f}")
-        self._azn_offshore_lbl.setText(f"Total Offshore:  ₼ {offshore_total:,.2f}")
-        self._azn_total_lbl.setText(f"AZN CTR Total:  ₼ {onshore_total + offshore_total:,.2f}")
+        other_label = activities_label(self._project_type_edit.text())
+        self._azn_onshore_lbl.setText(f"Project Support:  ₼ {support_total:,.2f}")
+        self._azn_offshore_lbl.setText(f"Total {other_label}:  ₼ {other_total:,.2f}")
+        self._azn_total_lbl.setText(f"AZN CTR Total:  ₼ {support_total + other_total:,.2f}")
 
     def _recalc_usd_totals(self):
         equip_total = 0.0
@@ -2218,7 +2308,7 @@ class CTRGeneratorWidget(QWidget):
         # Only rows with a "✓" status (matched against pricebook/SAGE, or
         # manually added) are included — "✗ No match" rows are skipped so
         # unmatched requests never silently appear in the output at rate 0.
-        onshore_rows, offshore_rows = [], []
+        support_rows, other_rows = [], []
         mp_skipped = 0
         for r in range(self._req_manpower_tbl.rowCount()):
             status_item = self._req_manpower_tbl.item(r, _MP_STATUS)
@@ -2248,10 +2338,10 @@ class CTRGeneratorWidget(QWidget):
                 "rate_azn":      rate,
                 "nationality":   _txt(_MP_NAT) or "NAT",
             }
-            if "onshore" in _txt(_MP_TYPE).lower():
-                onshore_rows.append(row_dict)
+            if is_support_manpower(row_dict["description"]):
+                support_rows.append(row_dict)
             else:
-                offshore_rows.append(row_dict)
+                other_rows.append(row_dict)
 
         equip_rows = []
         eq_skipped = 0
@@ -2331,7 +2421,11 @@ class CTRGeneratorWidget(QWidget):
             "date":       self._date_edit.text().strip(),
             "revision":   self._revision_edit.text().strip(),
         }
-        header_azn = {**_base, "contract_no": self._contract_no_azn_edit.text().strip()}
+        header_azn = {
+            **_base,
+            "contract_no":  self._contract_no_azn_edit.text().strip(),
+            "project_type": self._project_type_edit.text().strip(),
+        }
         header_usd = {**_base, "contract_no": self._contract_no_usd_edit.text().strip()}
 
         # Progress dialog
@@ -2341,8 +2435,8 @@ class CTRGeneratorWidget(QWidget):
         dlg.show()
 
         worker = CTRWorker(
-            onshore_rows  = onshore_rows,
-            offshore_rows = offshore_rows,
+            support_rows  = support_rows,
+            other_rows    = other_rows,
             equip_rows    = equip_rows,
             consump_rows  = consump_rows,
             azn_tpl       = azn_tpl,

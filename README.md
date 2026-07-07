@@ -102,13 +102,3 @@ The parser expects the following named ranges defined in the Excel workbook:
 | `cons_end`    | CTR / MR | Consumables end         |
 
 Each named range points to a single cell: `_start` is the header row / first column; `_end` is the last data row / last column. All cells within that rectangle are read as the table.
-
----
-
-## Legacy Streamlit app
-
-`legacy_streamlit.py` is a browser-based version of the same tool, kept in the repository for reference. It is **not actively maintained**.
-
-```bash
-just legacy     # starts the Streamlit server at localhost:8501
-```
