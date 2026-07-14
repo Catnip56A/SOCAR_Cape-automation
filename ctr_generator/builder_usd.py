@@ -58,6 +58,9 @@ Default layout (217_USD template):
     Row 215      : consumables header
     Rows 216–365 : consumables data
       A=item#, B=desc, C=qty, D=unit, E=unit_price, F=total, H=counter, I=SC cost, J=product_code
+      E is either a numeric price or the literal "NONRECHARG" for
+      non-rechargeable items; F is guarded with IF(ISNUMBER(...)) so a
+      "NONRECHARG" row totals 0 instead of an Excel #VALUE! error.
     Row 366      : F366=total_consumables_raw
 
   Editable header fields (rows 3–6, shared layout with AZN template):
@@ -231,7 +234,7 @@ def build_usd(
         stock_code (str)
 
     consump_rows: list of dicts with keys:
-        long_description (str), local_expect_cost (float),
+        long_description (str), local_expect_cost (float or 'NONRECHARG'),
         unit_code (str), product (str)
 
     header: optional dict with keys client, sub_client, location, scope,
@@ -391,8 +394,15 @@ def build_usd(
         desc      = str(cr.get("long_description", ""))
         qty       = _safe_float(cr.get("quantity", 1), 1.0)
         unit      = str(cr.get("unit_code", "EA"))
-        price     = _safe_float(cr.get("local_expect_cost", 0), 0.0)
+        price_raw = cr.get("local_expect_cost", 0)
         product   = str(cr.get("product", ""))
+
+        # Same "NONRECHARG" sentinel handling as equipment above — preserved
+        # verbatim so it prints instead of a misleading 0.00.
+        try:
+            price: float | str = float(price_raw)
+        except (TypeError, ValueError):
+            price = _NONRECHARG if str(price_raw).strip().upper() == _NONRECHARG else 0.0
 
         if desc:
             cons_cost_list.append((desc, f"='{pricing_sheet}'!F{r}"))
@@ -402,7 +412,8 @@ def build_usd(
         _set_cell(ws_p, r, 3,  qty)
         _set_cell(ws_p, r, 4,  unit)
         _set_cell(ws_p, r, 5,  price)
-        _set_cell(ws_p, r, 6,  f"=C{r}*E{r}")
+        # Guarded so a "NONRECHARG" price totals 0 instead of erroring (#VALUE!).
+        _set_cell(ws_p, r, 6,  f"=IF(ISNUMBER(E{r}),C{r}*E{r},0)")
         _set_cell(ws_p, r, 8,  f"=A{r}")
         _set_cell(ws_p, r, 9,  f"=F{r}")
         _set_cell(ws_p, r, 10, product)

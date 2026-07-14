@@ -2,13 +2,13 @@
 ctr_generator/parser.py
 
 Reads the source files for CTR generation:
-  - AZN pricebook  (4410030127_*.xlsx)                        — manpower rates
-  - Combined DB    (CTR_NAMES_DB & CTR_REQUEST.xlsx)           — SAGE, equipment
-                                                                  names bridge,
-                                                                  and CTR Request,
-                                                                  all in one file
+  - AZN pricebook  (4410030127_*.xlsx)                — manpower rates
+  - USD pricebook  (4410030190_*.xlsx-style)           — equipment rental rates
+  - SAGE export    (dedicated file, e.g. "FROM SAGE *.xlsm") — consumables reference catalog
+  - Combined DB    (CTR_NAMES_DB & CTR_REQUEST.xlsx)   — Equipment Names DB bridge
+                                                          + CTR Request, in one file
 
-Pricebook layout (verified from 4410030127):
+AZN and USD pricebooks share one layout (verified from 4410030127):
   Rows 0–6 are header / guidance metadata.
   Data starts at row 7 (0-indexed).
   Column indices (0-based, matching Excel A=0):
@@ -17,21 +17,26 @@ Pricebook layout (verified from 4410030127):
     6  (G) = UOM                    → uom          e.g. "HUR" or "DAY"
     9  (J) = Supplier Description   → supplier_desc e.g. "ROPE ACCESS SUPERVISOR"
     14 (O) = Unit Price             → unit_price
+  On the USD pricebook, stock_code is NOT unique per equipment item — see
+  parse_usd_pricebook.
 
 These indices (and sheet names / skip rows) are configurable via
 ctr_generator/template_config.json — see the "pricebook", "sage_export",
 "names_db", and "ctr_request" sections.
 
-Combined DB layout:
-  Sheet "SAGE" — unchanged consumables/equipment rate export, columns
-    product | long_description | local_expect_cost | unit_code (+ extras).
-    Equipment rates now live here too (keyed by stock code), not in a
-    separate USD Pricebook file.
+SAGE export layout:
+  Sheet "FROM SAGE" (an .xlsm export; configurable via sage_export.sheet_name)
+    — consumables reference export, columns product | long_description |
+    local_expect_cost | unit_code (+ extras). Used only for consumables
+    matching — equipment now prices off the USD pricebook instead (see
+    above).
 
+Combined DB layout:
   Sheet "CTR_NAMES_DB_USD" — bridges a CTR Request equipment stock code to
-    the canonical name used to look it up in SAGE by description, for the
-    codes that aren't themselves present as a SAGE product code (e.g. fleet
-    items where several serials share one generic day rate):
+    the canonical name used to look it up in the USD pricebook by
+    description, for request-form codes that don't correspond 1:1 to a USD
+    pricebook item (e.g. fleet items where several serials share one
+    generic day rate):
       col A = product / stock code
       col B = legacy name (CTR_CREATOR_LEGACY naming)
       col C = canonical pricebook name, or the literal "NON-RECHARGEABLE"
@@ -67,16 +72,15 @@ import pandas as pd
 
 from ctr_generator.config import CFG
 
-_pb  = CFG["pricebook"]
-_sg  = CFG["sage_export"]
-_nm  = CFG["names_db"]
-_req = CFG["ctr_request"]
+_pb     = CFG["pricebook"]
+_usd_pb = CFG["usd_pricebook"]
+_sg     = CFG["sage_export"]
+_nm     = CFG["names_db"]
+_req    = CFG["ctr_request"]
 
-_PRICEBOOK_SHEET   = _pb["sheet_name"]
-_PRICEBOOK_SKIPROWS = _pb["skip_rows"]
-_SAGE_SHEET        = _sg["sheet_name"]
-_NAMES_DB_SHEET    = _nm["sheet_name"]
-_REQUEST_SHEET     = _req["sheet_name"]
+_SAGE_SHEET     = _sg["sheet_name"]
+_NAMES_DB_SHEET = _nm["sheet_name"]
+_REQUEST_SHEET  = _req["sheet_name"]
 
 
 def _open(src) -> BytesIO | Path:
@@ -124,43 +128,49 @@ def _friendly_open_error(exc: Exception, src, file_kind: str, expected_sheet: st
 # Pricebook helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _read_pricebook_raw(src, file_kind: str) -> pd.DataFrame:
+def _read_pricebook_raw(src, file_kind: str, cfg: dict) -> pd.DataFrame:
     """Return a DataFrame with integer column names, data only (header skipped)."""
+    sheet     = cfg["sheet_name"]
+    skip_rows = cfg["skip_rows"]
     try:
         df = pd.read_excel(
             _open(src),
-            sheet_name=_PRICEBOOK_SHEET,
+            sheet_name=sheet,
             header=None,
-            skiprows=_PRICEBOOK_SKIPROWS,
+            skiprows=skip_rows,
             dtype=str,
         )
     except Exception as e:
-        raise _friendly_open_error(e, src, file_kind, _PRICEBOOK_SHEET) from e
+        raise _friendly_open_error(e, src, file_kind, sheet) from e
 
-    min_cols = _pb["col_unit_price"] + 1
+    min_cols = cfg["col_unit_price"] + 1
     if df.shape[1] < min_cols:
         raise ValueError(
             f"{_display_name(src)} has only {df.shape[1]} column(s) on the "
-            f'"{_PRICEBOOK_SHEET}" sheet after the header rows — expected at '
+            f'"{sheet}" sheet after the header rows — expected at '
             f"least {min_cols} (Part Number Extension, Product Type, UOM, Supplier "
             f"Description, Unit Price). Is this the right {file_kind}?"
         )
     return df
 
 
-def parse_azn_pricebook(src) -> pd.DataFrame:
+def _parse_pricebook(src, file_kind: str, cfg: dict) -> pd.DataFrame:
     """
     Returns DataFrame with columns:
       stock_code | uom | supplier_desc | unit_price (float)
 
-    No filtering — caller decides which rows to use.
+    Sheet name, header skip rows, and column positions all come from `cfg`
+    (the "pricebook" or "usd_pricebook" section of template_config.json —
+    see ctr_generator/config.py), so a template layout change only needs a
+    config edit, not a code change. No filtering — caller decides which
+    rows to use.
     """
-    df = _read_pricebook_raw(src, "AZN Pricebook")
+    df = _read_pricebook_raw(src, file_kind, cfg)
     df = df.rename(columns={
-        _pb["col_stock_code"]:   "stock_code",
-        _pb["col_uom"]:          "uom",
-        _pb["col_supplier_desc"]: "supplier_desc",
-        _pb["col_unit_price"]:   "unit_price",
+        cfg["col_stock_code"]:    "stock_code",
+        cfg["col_uom"]:           "uom",
+        cfg["col_supplier_desc"]: "supplier_desc",
+        cfg["col_unit_price"]:    "unit_price",
     })
     df = df[["stock_code", "uom", "supplier_desc", "unit_price"]].copy()
     df["stock_code"]    = df["stock_code"].fillna("").str.strip()
@@ -171,10 +181,30 @@ def parse_azn_pricebook(src) -> pd.DataFrame:
     if df.empty:
         raise ValueError(
             f"{_display_name(src)} opened, but no rows had a stock code in the "
-            f"expected column after parsing. Is this the right AZN Pricebook "
-            f'(sheet "{_PRICEBOOK_SHEET}", standard {_PRICEBOOK_SKIPROWS}-row header)?'
+            f"expected column after parsing. Is this the right {file_kind} "
+            f'(sheet "{cfg["sheet_name"]}", standard {cfg["skip_rows"]}-row header)?'
         )
     return df.reset_index(drop=True)
+
+
+def parse_azn_pricebook(src) -> pd.DataFrame:
+    """Manpower rates — see _parse_pricebook. stock_code is unique per role/shift."""
+    return _parse_pricebook(src, "AZN Pricebook", _pb)
+
+
+def parse_usd_pricebook(src) -> pd.DataFrame:
+    """
+    Equipment rental rates — layout configured via the "usd_pricebook"
+    section of template_config.json (defaults to the same "Item Details
+    and Rates" layout as the AZN pricebook — see _parse_pricebook), but
+    stock_code is NOT unique per item here: every equipment line is tagged
+    with one of two generic rate-type codes (by convention ending "-NOR" /
+    "-STBY", e.g. "EQ-GEN-NOR" / "EQ-GEN-STBY" for normal vs. standby
+    rate). Callers must match equipment by supplier_desc instead,
+    preferring the "-NOR" row when both exist for the same description —
+    see _match_usd_equipment in window.py.
+    """
+    return _parse_pricebook(src, "USD Pricebook", _usd_pb)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -184,12 +214,21 @@ def parse_azn_pricebook(src) -> pd.DataFrame:
 def parse_sage(src) -> pd.DataFrame:
     """
     Reads the FROM SAGE sheet and returns consumable rows:
-      long_description | local_expect_cost (float) | unit_code | product
+      long_description | local_expect_cost (float) | unit_code | product |
+      non_recharge (bool, derived from analysis_b)
 
     Used as a reference catalog for matching against CTR Request consumable
-    line items by stock code or description — not filtered by analysis_b
-    (e.g. NONRECHARG), since a customer can reference any SAGE-classified
-    item (equipment rentals, misc charges, etc.) as a consumable line.
+    line items by stock code or description — rows are not excluded based
+    on analysis_b, since a customer can reference any SAGE-classified item
+    (equipment rentals, misc charges, etc.) as a consumable line; the flag
+    is instead surfaced via non_recharge so the caller can zero the price
+    (mirroring equipment's NONRECHARG treatment) rather than dropping the
+    row.
+
+    non_recharge is True when analysis_b (case-insensitive, exact match)
+    is one of sage_export.non_recharge_tags in template_config.json —
+    default ["NONRECHARG", "NONRECHAR"]; edit that list, not this code, if
+    a differently-worded tag shows up in a future export.
 
     Filters:
       - excludes the "S0000000000" placeholder code (generic
@@ -211,7 +250,7 @@ def parse_sage(src) -> pd.DataFrame:
     # Normalise column names (strip whitespace in case of minor variations)
     df.columns = [c.strip() for c in df.columns]
 
-    required = {"product", "local_expect_cost", "long_description", "unit_code"}
+    required = {"product", "local_expect_cost", "long_description", "unit_code", "analysis_b"}
     missing = required - set(df.columns)
     if missing:
         found = ", ".join(df.columns[:10]) + ("…" if len(df.columns) > 10 else "")
@@ -226,8 +265,11 @@ def parse_sage(src) -> pd.DataFrame:
     df["unit_code"]         = df["unit_code"].fillna("EA").str.strip()
     df["local_expect_cost"] = pd.to_numeric(df["local_expect_cost"], errors="coerce").fillna(0.0)
 
+    non_recharge_tags = {t.strip().upper() for t in _sg.get("non_recharge_tags", [])}
+    df["non_recharge"] = df["analysis_b"].fillna("").str.strip().str.upper().isin(non_recharge_tags)
+
     mask = df["product"].str.upper() != "S0000000000"
-    df = df[mask][["product", "long_description", "local_expect_cost", "unit_code"]].copy()
+    df = df[mask][["product", "long_description", "local_expect_cost", "unit_code", "non_recharge"]].copy()
     return df.reset_index(drop=True)
 
 
@@ -240,21 +282,20 @@ def parse_equip_names_db(src) -> pd.DataFrame:
     Reads the "CTR_NAMES_DB_USD" sheet of the Combined DB workbook.
 
     Columns are read by position (configurable via the "names_db" section of
-    template_config.json — col_product / col_legacy_name / col_canonical_name
-    / col_rate), since the header labels on this sheet aren't standardized:
+    template_config.json — col_product / col_legacy_name / col_canonical_name),
+    since the header labels on this sheet aren't standardized:
       product / stock code
       legacy name (CTR_CREATOR_LEGACY naming)
       canonical pricebook name, or the literal "NON-RECHARGEABLE"
-      USD rate — authoritative for this stock code, used directly instead
-        of looking the canonical name up in SAGE
 
     Returns DataFrame with columns:
-      product | legacy_name | canonical_name | non_recharge (bool) | rate
+      product | legacy_name | canonical_name | non_recharge (bool)
 
-    non_recharge rows always bill at 0 regardless of the rate column (some
-    NON-RECHARGEABLE rows carry a leftover nonzero rate that should be
-    ignored) — the caller should use legacy_name for display in that case.
-    Rechargeable rows use the rate column directly.
+    The canonical name is looked up in the USD Pricebook by description
+    (see _match_usd_equipment in window.py) — this sheet only resolves a
+    request stock code to that name, it doesn't carry the price itself.
+    non_recharge rows are shown using legacy_name instead, at a forced rate
+    of 0.
     """
     try:
         df = pd.read_excel(
@@ -263,24 +304,22 @@ def parse_equip_names_db(src) -> pd.DataFrame:
     except Exception as e:
         raise _friendly_open_error(e, src, "Equipment Names DB", _NAMES_DB_SHEET) from e
 
-    _cols = (_nm["col_product"], _nm["col_legacy_name"], _nm["col_canonical_name"], _nm["col_rate"])
+    _cols = (_nm["col_product"], _nm["col_legacy_name"], _nm["col_canonical_name"])
     if df.shape[1] < max(_cols):
         raise ValueError(
             f'{_display_name(src)} has only {df.shape[1]} column(s) on the '
             f'"{_NAMES_DB_SHEET}" sheet — expected at least {max(_cols)} (stock '
-            f"code, legacy name, canonical pricebook name, UOM, USD rate). Is "
-            f"this the right Combined DB file?"
+            f"code, legacy name, canonical pricebook name). Is this the right "
+            f"Combined DB file?"
         )
 
     df = df.iloc[:, [c - 1 for c in _cols]].copy()
-    df.columns = ["product", "legacy_name", "canonical_name", "rate"]
+    df.columns = ["product", "legacy_name", "canonical_name"]
     df["product"]         = df["product"].fillna("").str.strip()
     df["legacy_name"]     = df["legacy_name"].fillna("").str.strip()
     df["canonical_name"]  = df["canonical_name"].fillna("").str.strip()
     df["non_recharge"]    = df["canonical_name"].str.upper() == "NON-RECHARGEABLE"
     df.loc[df["non_recharge"], "canonical_name"] = ""
-    df["rate"] = pd.to_numeric(df["rate"], errors="coerce").fillna(0.0)
-    df.loc[df["non_recharge"], "rate"] = 0.0
     df = df[df["product"] != ""].reset_index(drop=True)
 
     if df.empty:

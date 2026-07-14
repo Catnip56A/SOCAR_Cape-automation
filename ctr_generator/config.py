@@ -83,6 +83,19 @@ _DEFAULTS: dict = {
         "col_supplier_desc": 9,
         "col_unit_price":    14,
     },
+    # USD Pricebook (equipment rental rates) — same template layout as
+    # "pricebook" above (AZN manpower) by default, kept as its own section
+    # so the sheet name / column positions can be adjusted independently if
+    # the equipment pricebook format ever diverges from the AZN one.
+    "usd_pricebook": {
+        "sheet_name": "Item Details and Rates",
+        "skip_rows": 7,
+        "col_stock_code":    4,
+        "col_product_type":  5,
+        "col_uom":           6,
+        "col_supplier_desc": 9,
+        "col_unit_price":    14,
+    },
     # Maps an AZN labor stock code's shift-type prefix (the segment before
     # "-NAT-", e.g. "MSU" in "MSU-NAT-OFF-12") to [shift, shift_type].
     # A "GE" prefix (e.g. "GENOV-...") is stripped before lookup — see
@@ -101,14 +114,18 @@ _DEFAULTS: dict = {
         "NSB": ["night", "standby"],
     },
     "sage_export": {
-        "sheet_name": "SAGE",
+        "sheet_name": "FROM SAGE",
+        # analysis_b values (case-insensitive exact match) that mark a SAGE
+        # row as non-rechargeable — "NONRECHAR" is a legacy typo variant
+        # seen alongside "NONRECHARG" in real exports. Add more here (no
+        # code change needed) if a differently-worded tag shows up.
+        "non_recharge_tags": ["NONRECHARG", "NONRECHAR"],
     },
     "names_db": {
         "sheet_name": "CTR_NAMES_DB_USD",
         "col_product":        1,
         "col_legacy_name":    2,
         "col_canonical_name": 3,
-        "col_rate":           5,
     },
     "ctr_request": {
         "sheet_name": "CTR_REQUEST",

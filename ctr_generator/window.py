@@ -6,10 +6,12 @@ CTR Generator dialog for the SOCAR Cape desktop app.
 Layout (top → bottom inside a QScrollArea):
   [Section 1] Source Files — AZN/USD templates + Combined DB (shared) + two
                 sub-tabs:
-                "Pricebook-Based"   — AZN pricebook picker; loads AZN
-                                       pricebook plus the SAGE and equipment
-                                       names sheets from the Combined DB as
-                                       reference data only
+                "Pricebook-Based"   — AZN Pricebook / SAGE Export / USD
+                                       Pricebook pickers, each its own file;
+                                       manpower matches AZN, consumables
+                                       match SAGE, equipment matches the USD
+                                       Pricebook (via the Equipment Names DB
+                                       bridge in Combined DB, when selected)
                 "CTR Request-Based" — reads the CTR Request sheet from the
                                        Combined DB, fills header fields and
                                        the three tables below
@@ -58,7 +60,7 @@ from ctr_generator.builder_azn import (
 )
 from ctr_generator.builder_usd import build_usd
 from ctr_generator.parser import (
-    parse_azn_pricebook, parse_sage,
+    parse_azn_pricebook, parse_usd_pricebook, parse_sage,
     parse_ctr_request, parse_equip_names_db,
 )
 from ctr_generator.pdf_exporter import export_to_pdf
@@ -417,6 +419,47 @@ def _match_lookup(df: pd.DataFrame, code_col: str, desc_col: str, price_col: str
             return str(row[desc_col]), float(row[price_col]), code_val
 
     return None
+
+
+def _match_usd_equipment(df: pd.DataFrame, desc: str) -> tuple[str, float] | None:
+    """
+    Look up an equipment description in the USD Pricebook (see
+    parse_usd_pricebook) by supplier_desc — case-insensitive exact match.
+    Equipment stock codes there aren't unique per item (every row is
+    generically tagged "*-NOR" or "*-STBY"), so description is the only
+    reliable key. When both a NOR (normal) and STBY (standby) row exist for
+    the same description, the NOR rate is used by default.
+
+    Returns (matched_description, unit_price) or None if no match.
+    """
+    if df is None or df.empty or not desc:
+        return None
+    desc_norm = desc.strip().lower()
+    hits = df[df["supplier_desc"].astype(str).str.strip().str.lower() == desc_norm]
+    if hits.empty:
+        return None
+    if len(hits) > 1:
+        nor = hits[~hits["stock_code"].astype(str).str.upper().str.contains("STBY")]
+        if not nor.empty:
+            hits = nor
+    row = hits.iloc[0]
+    return str(row["supplier_desc"]), float(row["unit_price"])
+
+
+def _sage_non_recharge(sage_df: pd.DataFrame, key: str) -> bool | None:
+    """
+    SAGE's own analysis_b-derived rechargeability flag for a stock code (see
+    parse_sage) — the rechargeability source for consumables, mirroring how
+    equipment shows the "NONRECHARG" sentinel. Returns None if the code
+    isn't in SAGE at all.
+    """
+    if sage_df is None or sage_df.empty or not key:
+        return None
+    key_norm = key.strip().lower()
+    hits = sage_df[sage_df["product"].astype(str).str.strip().str.lower() == key_norm]
+    if hits.empty:
+        return None
+    return bool(hits.iloc[0]["non_recharge"])
 
 
 # AZN labor stock codes encode shift + shift-type in their prefix, e.g.
@@ -797,6 +840,7 @@ class CTRGeneratorWidget(QWidget):
 
         self._azn_df:      pd.DataFrame = pd.DataFrame()
         self._sage_df:     pd.DataFrame = pd.DataFrame()
+        self._usd_pb_df:   pd.DataFrame = pd.DataFrame()
         self._names_db_df: pd.DataFrame = pd.DataFrame()
         self._workers:     list = []
         self._aliases:     dict = load_aliases()
@@ -854,7 +898,7 @@ class CTRGeneratorWidget(QWidget):
         row4, self._azn_tpl_edit = _file_picker_row("AZN Template", "Excel (*.xlsx *.xls)")
         row5, self._usd_tpl_edit = _file_picker_row("USD Template", "Excel (*.xlsx *.xls)")
         row6, self._combined_db_edit = _file_picker_row(
-            "Combined DB (SAGE + Names + Request)", "Excel (*.xlsx *.xls)")
+            "Combined DB (Names + Request)", "Excel (*.xlsx *.xls)")
         gl.addLayout(row4)
         gl.addLayout(row5)
         gl.addLayout(row6)
@@ -881,16 +925,22 @@ class CTRGeneratorWidget(QWidget):
             "Loads these as reference data for the \"Customer Request vs "
             "Pricebook/SAGE Match\" lookups below — no rows are added to "
             "the CTR generation tables here. Use \"+ Add Row\" in a CTR "
-            "table directly if you want to add an item by hand. SAGE and "
-            "the equipment names bridge are read from the Combined DB file "
-            "selected above."
+            "table directly if you want to add an item by hand. Manpower "
+            "matches against the AZN Pricebook, consumables against SAGE "
+            "Export, and equipment against the USD Pricebook (resolved via "
+            "the Equipment Names DB bridge in Combined DB above, when "
+            "selected)."
         )
         info.setWordWrap(True)
         info.setStyleSheet(f"color: {MUTED}; font-size: 11px;")
         tl.addWidget(info)
 
         row1, self._azn_pb_edit = _file_picker_row("AZN Pricebook", "Excel (*.xlsx *.xls)")
+        row2, self._sage_edit   = _file_picker_row("SAGE Export", "Excel (*.xlsx *.xlsm *.xls)")
+        row3, self._usd_pb_edit = _file_picker_row("USD Pricebook", "Excel (*.xlsx *.xls)")
         tl.addLayout(row1)
+        tl.addLayout(row2)
+        tl.addLayout(row3)
 
         load_btn = QPushButton("Load Files")
         load_btn.setFixedHeight(36)
@@ -1343,6 +1393,8 @@ class CTRGeneratorWidget(QWidget):
             "azn_template":   self._azn_tpl_edit,
             "usd_template":   self._usd_tpl_edit,
             "azn_pricebook":  self._azn_pb_edit,
+            "sage_export":    self._sage_edit,
+            "usd_pricebook":  self._usd_pb_edit,
             "combined_db":    self._combined_db_edit,
             "output_dir":     self._out_dir_edit,
         }
@@ -1357,6 +1409,8 @@ class CTRGeneratorWidget(QWidget):
         s.setValue("paths/azn_template",  self._azn_tpl_edit.text())
         s.setValue("paths/usd_template",  self._usd_tpl_edit.text())
         s.setValue("paths/azn_pricebook", self._azn_pb_edit.text())
+        s.setValue("paths/sage_export",   self._sage_edit.text())
+        s.setValue("paths/usd_pricebook", self._usd_pb_edit.text())
         s.setValue("paths/combined_db",   self._combined_db_edit.text())
         s.setValue("paths/output_dir",    self._out_dir_edit.text())
 
@@ -1444,26 +1498,35 @@ class CTRGeneratorWidget(QWidget):
 
     def _load_files(self):
         """
-        Submits AZN pricebook + SAGE + Equipment Names DB (both from the
-        Combined DB file) to the thread pool and returns immediately — the
-        UI stays responsive while Excel files are being parsed. Results
+        Submits AZN Pricebook + SAGE Export + USD Pricebook (each its own
+        file) to the thread pool, plus the Equipment Names DB bridge from
+        the Combined DB file if one is selected, and returns immediately —
+        the UI stays responsive while Excel files are being parsed. Results
         arrive via _on_file_loaded (queued connection).
         """
         azn_pb   = self._azn_pb_edit.text().strip()
+        sage     = self._sage_edit.text().strip()
+        usd_pb   = self._usd_pb_edit.text().strip()
         combined = self._combined_db_edit.text().strip()
 
         errors = []
-        if not azn_pb:  errors.append("AZN Pricebook not selected.")
-        if not combined: errors.append("Combined DB file not selected.")
+        if not azn_pb: errors.append("AZN Pricebook not selected.")
+        if not sage:   errors.append("SAGE Export not selected.")
+        if not usd_pb: errors.append("USD Pricebook not selected.")
         if errors:
             QMessageBox.warning(self, "Missing files", "\n".join(errors))
             return
 
         tasks = [
-            ("azn_pb",   lambda p=azn_pb:   parse_azn_pricebook(p)),
-            ("sage",     lambda p=combined: parse_sage(p)),
-            ("names_db", lambda p=combined: parse_equip_names_db(p)),
+            ("azn_pb", lambda p=azn_pb: parse_azn_pricebook(p)),
+            ("sage",   lambda p=sage:   parse_sage(p)),
+            ("usd_pb", lambda p=usd_pb: parse_usd_pricebook(p)),
         ]
+        # Optional — only needed to resolve a CTR Request equipment stock
+        # code to a USD Pricebook description; without it, equipment falls
+        # back to matching "Match By" directly against the USD Pricebook.
+        if combined:
+            tasks.append(("names_db", lambda p=combined: parse_equip_names_db(p)))
 
         self._pending_loads += len(tasks)
         self._load_errors.clear()
@@ -1471,7 +1534,10 @@ class CTRGeneratorWidget(QWidget):
         self._load_files_btn.setEnabled(False)
         self._pricebook_status.setText(f"Loading {len(tasks)} file(s)…")
 
-        log.info("Async loading pricebook/SAGE files: azn=%s combined_db=%s", azn_pb, combined)
+        log.info(
+            "Async loading pricebook files: azn=%s sage=%s usd_pb=%s combined_db=%s",
+            azn_pb, sage, usd_pb, combined,
+        )
         for name, fn in tasks:
             _LOAD_POOL.start(_LoadTask(name, fn, self._load_signals))
 
@@ -1488,6 +1554,9 @@ class CTRGeneratorWidget(QWidget):
             elif name == "sage":
                 self._sage_df = result
                 self._load_status.append(f"SAGE Export ({len(result)} rows)")
+            elif name == "usd_pb":
+                self._usd_pb_df = result
+                self._load_status.append(f"USD Pricebook ({len(result)} rows)")
             elif name == "names_db":
                 self._names_db_df = result
                 self._load_status.append(f"Equipment Names DB ({len(result)} rows)")
@@ -1503,11 +1572,14 @@ class CTRGeneratorWidget(QWidget):
         _label = {
             "azn_pb":   "AZN Pricebook",
             "sage":     "SAGE Export",
+            "usd_pb":   "USD Pricebook",
             "names_db": "Equipment Names DB",
         }
         _fallback = {
-            "names_db": ("Equipment matching will fall back to a direct "
-                         "SAGE lookup by stock code or description."),
+            "names_db": ("Equipment matching will fall back to matching "
+                         "\"Match By\" directly against the USD Pricebook "
+                         "by description, without the request stock code's "
+                         "canonical-name resolution."),
         }
         for name, msg, is_warning in self._load_errors:
             label = _label.get(name, name)
@@ -2000,15 +2072,15 @@ class CTRGeneratorWidget(QWidget):
         was_includable = bool(status_item) and status_item.text().startswith("✓")
 
         # Stage 1: Equipment Names DB bridge lookup by "Match By" as a stock
-        # code — this sheet's own "Rate" column (E) is authoritative once a
-        # code is found there, so no SAGE lookup is needed for it at all.
-        # non_recharge rows always bill at 0 (via legacy_name for display),
-        # overriding column E even on the handful of rows that still carry a
-        # leftover nonzero rate there.
-        matched_name: str | None = None
+        # code — resolves the request's internal stock code to the canonical
+        # description used to price it in the USD Pricebook (equipment
+        # stock codes there are generic rate-type codes, not unique per
+        # item — see _match_usd_equipment). non_recharge rows always bill
+        # at 0, shown via legacy_name, without a pricebook lookup at all.
+        lookup_desc: str | None = None    # description to search the USD Pricebook with
+        matched_name: str | None = None   # display name once resolved
         matched_rate: float = 0.0
         db_non_recharge: bool | None = None
-        bridge_hit = None
 
         if not self._names_db_df.empty:
             key_up = key.upper()
@@ -2022,19 +2094,23 @@ class CTRGeneratorWidget(QWidget):
                     matched_name = bridge_hit["legacy_name"]
                     matched_rate = 0.0
                 else:
-                    matched_name = bridge_hit["canonical_name"]
-                    matched_rate = float(bridge_hit["rate"])
+                    lookup_desc = bridge_hit["canonical_name"] or bridge_hit["legacy_name"]
 
-        # Stage 2: the stock code isn't in the bridge at all — fall back to a
-        # direct SAGE lookup by code, then by whatever "Match By" contains.
-        if matched_name is None:
-            fb = _match_lookup(self._sage_df, "product", "long_description", "local_expect_cost", key)
-            if fb:
-                matched_name, matched_rate, _ = fb
+        # Stage 2: the stock code isn't in the bridge at all — fall back to
+        # matching whatever "Match By" contains directly against the USD
+        # Pricebook by description.
+        if matched_name is None and lookup_desc is None:
+            lookup_desc = key
+
+        if matched_name is None and lookup_desc:
+            usd_match = _match_usd_equipment(self._usd_pb_df, lookup_desc)
+            if usd_match:
+                matched_name, matched_rate = usd_match
 
         # Cross-check the request sheet's own Rechargability tag against the
-        # DB bridge's determination — the tag is normally sourced from the
-        # same DB, so a mismatch usually means a stale/hand-edited request row.
+        # DB bridge's determination, purely as a data-quality warning — the
+        # tag never feeds into matched_rate/rate_text above; the bridge is
+        # always authoritative for equipment pricing.
         request_tag = desc_item.data(Qt.UserRole) or ""
         mismatch = db_non_recharge is not None and _recharge_mismatch(request_tag, db_non_recharge)
 
@@ -2045,7 +2121,7 @@ class CTRGeneratorWidget(QWidget):
             tbl.setItem(row, _EQ_RATE, QTableWidgetItem(rate_text))
             status = "✓ Matched"
             if mismatch:
-                status += "  ⚠ Rechargability mismatch vs. request sheet"
+                status += "  ⚠ Rechargability mismatch vs. request sheet — using Equipment Names DB"
             tbl.setItem(row, _EQ_STATUS, _ro_item(status))
         else:
             tbl.setItem(row, _EQ_MDESC, _ro_item(""))
@@ -2167,17 +2243,15 @@ class CTRGeneratorWidget(QWidget):
         was_includable = bool(status_item) and status_item.text().startswith("✓")
         match = _match_lookup(self._sage_df, "product", "long_description", "local_expect_cost", key)
 
-        # Cross-check the request sheet's own Rechargability tag against the
-        # CTR_NAMES_DB_USD bridge, purely as a data-quality warning — consumable
-        # pricing itself still comes straight from SAGE, unaffected by this.
-        db_non_recharge: bool | None = None
-        if not self._names_db_df.empty:
-            key_up = key.upper()
-            db_hits = self._names_db_df[
-                self._names_db_df["product"].str.strip().str.upper() == key_up
-            ]
-            if not db_hits.empty:
-                db_non_recharge = bool(db_hits.iloc[0]["non_recharge"])
+        # SAGE's own analysis_b flag is the rechargeability source for
+        # consumables — a non_recharge hit forces the price to 0 and shows
+        # "NONRECHARG", mirroring equipment's treatment (see
+        # _rematch_equip_row / _match_usd_equipment).
+        db_non_recharge = _sage_non_recharge(self._sage_df, key)
+
+        # Cross-check the request sheet's own Rechargability tag against
+        # SAGE's determination, purely as a data-quality warning — the tag
+        # never feeds into price_text above; SAGE is always authoritative.
         request_tag = desc_item.data(Qt.UserRole) or ""
         mismatch = db_non_recharge is not None and _recharge_mismatch(request_tag, db_non_recharge)
 
@@ -2185,10 +2259,11 @@ class CTRGeneratorWidget(QWidget):
         if match:
             mdesc, price, _code = match
             tbl.setItem(row, _CS_MDESC, _ro_item(mdesc))
-            tbl.setItem(row, _CS_PRICE, QTableWidgetItem(f"{price:.2f}"))
+            price_text = "NONRECHARG" if db_non_recharge else f"{price:.2f}"
+            tbl.setItem(row, _CS_PRICE, QTableWidgetItem(price_text))
             status = "✓ Matched"
             if mismatch:
-                status += "  ⚠ Rechargability mismatch vs. request sheet"
+                status += "  ⚠ Rechargability mismatch vs. request sheet — using SAGE"
             tbl.setItem(row, _CS_STATUS, _ro_item(status))
         else:
             tbl.setItem(row, _CS_MDESC, _ro_item(""))
@@ -2465,10 +2540,13 @@ class CTRGeneratorWidget(QWidget):
                 qty = float(_ctxt(_CS_QTY) or 1)
             except ValueError:
                 qty = 1.0
+            price_txt = _ctxt(_CS_PRICE)
             try:
-                price = float(_ctxt(_CS_PRICE) or 0)
+                price = float(price_txt or 0)
             except ValueError:
-                price = 0.0
+                # Non-numeric — e.g. "NONRECHARG" — passed through as-is so
+                # build_usd can print it instead of a misleading 0.00.
+                price = price_txt
             # Same reasoning as equipment above — prefer the matched name.
             consump_rows.append({
                 "long_description":  _ctxt(_CS_MDESC) or _ctxt(_CS_DESC),
