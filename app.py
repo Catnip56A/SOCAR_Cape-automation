@@ -31,6 +31,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from sheet_parser import parse_workbook
 from ctr_generator import __version__ as _CTR_VERSION
 from ctr_generator.window import CTRGeneratorWidget
+from ctr_generator.tracker_window import CTRTrackerWidget
 
 log = logging.getLogger(__name__)
 
@@ -409,7 +410,7 @@ class ParseWorker(QThread):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle(f"MR vs CTR Comparator — SOCAR Cape  v{_CTR_VERSION}")
+        self.setWindowTitle(f"SOCAR Cape automation  v{_CTR_VERSION}")
         self.resize(1440, 920)
 
         self._mr_tables:  list = []
@@ -434,6 +435,7 @@ class MainWindow(QMainWindow):
         s = QSettings("SOCAR", "CTRGenerator")
         s.setValue("window/geometry", self.saveGeometry())
         self._ctr_gen.save_settings()
+        self._ctr_tracker.save_settings()
         super().closeEvent(event)
 
     # ── UI construction ───────────────────────────────────────────────────────
@@ -702,6 +704,11 @@ class MainWindow(QMainWindow):
         self._ctr_gen = CTRGeneratorWidget(parent=self)
         self._main_tabs.addTab(self._ctr_gen, "CTR Generator")
         self._ctr_gen.restore_settings()
+
+        # ── Tab 2: CTR Tracker ───────────────────────────────────────────────
+        self._ctr_tracker = CTRTrackerWidget(parent=self)
+        self._main_tabs.addTab(self._ctr_tracker, "CTR Tracker")
+        self._ctr_tracker.restore_settings()
 
     def _app_settings(self) -> QSettings:
         return QSettings("SOCAR", "CTRGenerator")

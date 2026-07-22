@@ -1,0 +1,537 @@
+"""
+ctr_generator/tracker_window.py
+
+CTR Tracker tab for the SOCAR Cape desktop app.
+
+Workflow:
+  1. Pick the CTR Tracker workbook (.xlsm) once — remembered across runs.
+  2. For each CTR (up to 10): browse to its generated output file, "Load
+     Fields" reads client / CTR number / date / revision / description /
+     value / currency straight off it (see ctr_generator.tracker). The
+     Location dropdown auto-selects when the file's site text (cell B4)
+     matches a configured site name, filling Project Code and the
+     tracker's Onshore/Offshore/Georgia bucket — otherwise it's picked by
+     hand. Every field stays editable before "Add to Batch".
+  3. "Write to Tracker" writes each CTR into the existing tracker row
+     whose CTR number column already contains its base number (currency
+     suffix stripped — a human pre-creates that row by hand; this never
+     creates or shifts rows). A CTR with no matching, still-empty row is
+     skipped with a warning shown after the write. Optionally writes a
+     timestamped backup of the workbook next to it first. The write runs
+     on a background thread (see _WriteWorker) using the fast raw-XML
+     patch in ctr_generator.tracker_fast — only the target sheet is
+     touched, everything else in the .xlsm is copied byte-for-byte.
+"""
+
+from __future__ import annotations
+
+import logging
+from dataclasses import replace
+from datetime import date as _date
+
+from PySide6.QtCore import QSettings, QThread, Qt, Signal
+from PySide6.QtWidgets import (
+    QCheckBox, QComboBox, QGroupBox, QHBoxLayout, QLabel, QLineEdit,
+    QMessageBox, QProgressDialog, QPushButton, QScrollArea, QTableWidgetItem,
+    QVBoxLayout, QWidget,
+)
+
+from ctr_generator.tracker import CTREntry, extract_ctr_data, location_options, match_site
+from ctr_generator.tracker_fast import write_entries_fast
+from ctr_generator.window import _file_picker_row, _group_css, _highlight_row, _make_table, _ro_item
+
+log = logging.getLogger(__name__)
+
+PRIMARY = "#1976D2"
+MUTED   = "#757575"
+BORDER  = "#E0E0E0"
+
+_MAX_BATCH = 10
+
+_BATCH_HEADERS = [
+    "Client", "CTR Number", "Date", "Location", "Project Code",
+    "Description", "Value", "Currency", "Revision", "",
+]
+_BC_CLIENT, _BC_CTR_NO, _BC_DATE, _BC_LOCATION, _BC_PROJECT, \
+    _BC_DESC, _BC_VALUE, _BC_CURRENCY, _BC_REVISION, _BC_REMOVE = range(10)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Background write worker
+# ─────────────────────────────────────────────────────────────────────────────
+
+class _WriteWorker(QThread):
+    """Runs write_entries_fast() off the UI thread. It patches only the
+    target sheet's raw XML and copies every other part of the .xlsm
+    untouched (see tracker_fast.py), instead of round-tripping the whole
+    workbook through openpyxl — ~3s instead of ~11s on the real tracker
+    file, and it also stops openpyxl's data-validation/drawing/print-
+    settings/calc-chain stripping on every save."""
+    finished_ok = Signal(list, list, object)   # written[(ctr_number, row)], skipped[(ctr_number, reason)], backup_path | None
+    error       = Signal(str)
+
+    def __init__(self, tracker_path: str, entries: list[CTREntry], make_backup: bool,
+                 allow_overwrite: bool, parent=None):
+        super().__init__(parent)
+        self._tracker_path = tracker_path
+        self._entries = entries
+        self._make_backup = make_backup
+        self._allow_overwrite = allow_overwrite
+
+    def run(self):
+        try:
+            written, skipped, backup_path = write_entries_fast(
+                self._tracker_path, self._entries,
+                make_backup=self._make_backup, allow_overwrite=self._allow_overwrite,
+            )
+            self.finished_ok.emit(written, skipped, backup_path)
+        except Exception as exc:
+            log.exception("CTR Tracker write failed")
+            self.error.emit(str(exc))
+
+
+def _hdr_row(label: str, widget: QWidget) -> QHBoxLayout:
+    row = QHBoxLayout()
+    row.setSpacing(6)
+    lbl = QLabel(label)
+    lbl.setFixedWidth(110)
+    lbl.setStyleSheet(f"color: {MUTED}; font-size: 11px;")
+    row.addWidget(lbl)
+    row.addWidget(widget)
+    return row
+
+
+class CTRTrackerWidget(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._batch: list[CTREntry] = []
+        self._current_entry: CTREntry | None = None
+        self._locations = location_options()
+        self._workers: list[_WriteWorker] = []
+        self._build_ui()
+
+    # ── UI construction ─────────────────────────────────────────────────────
+
+    def _build_ui(self):
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(10, 8, 10, 8)
+        outer.setSpacing(0)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(scroll.Shape.NoFrame)
+        content = QWidget()
+        cl = QVBoxLayout(content)
+        cl.setSpacing(12)
+        cl.setContentsMargins(4, 4, 4, 4)
+        scroll.setWidget(content)
+        outer.addWidget(scroll)
+
+        self._build_workbook_section(cl)
+        self._build_add_section(cl)
+        self._build_batch_section(cl)
+
+        cl.addStretch()
+
+    def _build_workbook_section(self, parent_layout: QVBoxLayout):
+        grp = QGroupBox("Tracker Workbook")
+        grp.setStyleSheet(_group_css(PRIMARY))
+        gl = QVBoxLayout(grp)
+        row, self._tracker_edit = _file_picker_row(
+            "CTR Tracker File", "Excel Macro-Enabled (*.xlsm);;Excel (*.xlsx)"
+        )
+        self._tracker_edit.textChanged.connect(self._refresh_batch_state)
+        gl.addLayout(row)
+        info = QLabel(
+            "Each CTR is written into the existing row whose CTR number "
+            "column already contains its number (e.g. \"CTR-26-217\", "
+            "currency suffix not included — pre-create that row by hand "
+            "first; Client/Location/Project Code may already be filled "
+            "in, that's fine). A CTR with no matching row still empty in "
+            "Date/Description/Value/Currency/Revision is skipped with a "
+            "warning instead of guessing where it goes. Also skipped if the "
+            "CTR's own Onshore/Offshore labor section doesn't match the "
+            "selected Location — nothing is written until that's resolved. "
+            "Where available, cost-breakdown totals (Labor, Equipment, "
+            "Consumables, Customs & Transportation, 3rd Party) are also "
+            "filled in from the CTR's summary section."
+        )
+        info.setWordWrap(True)
+        info.setStyleSheet(f"color: {MUTED}; font-size: 11px;")
+        gl.addWidget(info)
+
+        self._backup_check = QCheckBox("Save a timestamped backup copy before writing")
+        self._backup_check.setChecked(False)
+        self._backup_check.setStyleSheet("font-size: 11px;")
+        gl.addWidget(self._backup_check)
+
+        self._overwrite_check = QCheckBox(
+            "Overwrite rows that already have data (Date/Description/Value/Currency/Revision)"
+        )
+        self._overwrite_check.setChecked(False)
+        self._overwrite_check.setToolTip(
+            "Off (default): a matching row with any of those fields already filled in is "
+            "skipped, not overwritten.\n"
+            "On: the first matching row is used regardless of its current contents — "
+            "existing data in it will be replaced with no undo besides the backup above."
+        )
+        self._overwrite_check.setStyleSheet("font-size: 11px; color: #C62828;")
+        gl.addWidget(self._overwrite_check)
+
+        parent_layout.addWidget(grp)
+
+    def _build_add_section(self, parent_layout: QVBoxLayout):
+        grp = QGroupBox("Add a CTR")
+        grp.setStyleSheet(_group_css(PRIMARY))
+        gl = QVBoxLayout(grp)
+        gl.setSpacing(6)
+
+        row, self._ctr_file_edit = _file_picker_row("CTR File", "Excel (*.xlsx *.xls)")
+        gl.addLayout(row)
+
+        load_btn = QPushButton("Load Fields From File")
+        load_btn.setFixedHeight(32)
+        load_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {PRIMARY}; color: white;
+                border: none; border-radius: 6px; font-size: 12px; font-weight: bold;
+            }}
+            QPushButton:hover {{ background-color: #1565C0; }}
+        """)
+        load_btn.clicked.connect(self._load_fields)
+        gl.addWidget(load_btn)
+
+        self._client_edit      = QLineEdit()
+        self._ctr_no_edit      = QLineEdit()
+        self._date_edit        = QLineEdit()
+        self._date_edit.setPlaceholderText("YYYY-MM-DD")
+        self._revision_edit    = QLineEdit()
+        self._revision_edit.setPlaceholderText("(blank = none)")
+        self._desc_edit        = QLineEdit()
+        self._value_edit       = QLineEdit()
+        self._value_warning    = QLabel()
+        self._value_warning.setStyleSheet("color: #C62828; font-size: 10px;")
+        self._value_warning.setVisible(False)
+        self._currency_combo   = QComboBox()
+        self._currency_combo.addItems(["AZN", "USD"])
+
+        self._site_combo = QComboBox()
+        self._site_combo.addItem("(select a location)")
+        self._site_combo.addItems(sorted(self._locations.keys()))
+        self._site_combo.currentTextChanged.connect(self._on_site_changed)
+
+        self._project_code_edit = QLineEdit()
+        self._tracker_location_combo = QComboBox()
+        self._tracker_location_combo.addItems(["Onshore", "Offshore", "Georgia"])
+
+        gl.addLayout(_hdr_row("Client:", self._client_edit))
+        gl.addLayout(_hdr_row("CTR Number:", self._ctr_no_edit))
+        gl.addLayout(_hdr_row("Date:", self._date_edit))
+        gl.addLayout(_hdr_row("Revision:", self._revision_edit))
+        gl.addLayout(_hdr_row("Description:", self._desc_edit))
+        vrow = _hdr_row("Value:", self._value_edit)
+        gl.addLayout(vrow)
+        gl.addWidget(self._value_warning)
+        gl.addLayout(_hdr_row("Currency:", self._currency_combo))
+        gl.addLayout(_hdr_row("Location:", self._site_combo))
+        gl.addLayout(_hdr_row("Project Code:", self._project_code_edit))
+        gl.addLayout(_hdr_row("Tracker Location:", self._tracker_location_combo))
+
+        self._add_batch_btn = QPushButton("+ Add to Batch")
+        self._add_batch_btn.setFixedHeight(34)
+        self._add_batch_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: white; color: {PRIMARY};
+                border: 1.5px solid {PRIMARY}; border-radius: 6px;
+                font-size: 12px; font-weight: bold;
+            }}
+            QPushButton:hover    {{ background: #E3F2FD; }}
+            QPushButton:disabled {{ color: {BORDER}; border-color: {BORDER}; }}
+        """)
+        self._add_batch_btn.clicked.connect(self._add_to_batch)
+        gl.addWidget(self._add_batch_btn)
+
+        parent_layout.addWidget(grp)
+
+    def _build_batch_section(self, parent_layout: QVBoxLayout):
+        grp = QGroupBox(f"Batch  (0 / {_MAX_BATCH})")
+        grp.setStyleSheet(_group_css(PRIMARY))
+        self._batch_group = grp
+        gl = QVBoxLayout(grp)
+        gl.setSpacing(6)
+
+        self._batch_tbl = _make_table(_BATCH_HEADERS, stretch_col=_BC_DESC)
+        self._batch_tbl.setFixedHeight(220)
+        gl.addWidget(self._batch_tbl)
+
+        self._write_btn = QPushButton("Write Batch to Tracker…")
+        self._write_btn.setFixedHeight(40)
+        self._write_btn.setEnabled(False)
+        self._write_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {PRIMARY}; color: white;
+                border: none; border-radius: 6px; font-size: 13px; font-weight: bold;
+            }}
+            QPushButton:hover    {{ background-color: #1565C0; }}
+            QPushButton:disabled {{ background-color: {BORDER}; color: #9E9E9E; }}
+        """)
+        self._write_btn.clicked.connect(self._write_batch)
+        gl.addWidget(self._write_btn)
+
+        parent_layout.addWidget(grp)
+
+    # ── Load / Add flow ─────────────────────────────────────────────────────
+
+    def _load_fields(self):
+        path = self._ctr_file_edit.text().strip()
+        if not path:
+            QMessageBox.warning(self, "No file selected", "Choose a CTR file first.")
+            return
+        try:
+            entry = extract_ctr_data(path)
+        except Exception as exc:
+            log.exception("Failed to read CTR file %s", path)
+            QMessageBox.critical(self, "Could not read file", str(exc))
+            return
+
+        self._current_entry = entry
+        self._client_edit.setText(entry.client)
+        self._ctr_no_edit.setText(entry.ctr_number)
+        self._date_edit.setText(entry.ctr_date.isoformat() if entry.ctr_date else "")
+        self._revision_edit.setText(entry.revision)
+        self._desc_edit.setText(entry.description)
+        self._value_edit.setText("" if entry.value is None else f"{entry.value:g}")
+        if entry.currency in ("AZN", "USD"):
+            self._currency_combo.setCurrentText(entry.currency)
+
+        matched_site = match_site(entry.site_hint)
+        self._site_combo.setCurrentText(matched_site or "(select a location)")
+
+        if entry.value_is_estimate:
+            self._value_warning.setText(
+                "Couldn't read a computed total from this file (it may need to be "
+                "opened and saved in Excel first) — enter the value manually."
+            )
+            self._value_warning.setVisible(True)
+        else:
+            self._value_warning.setVisible(False)
+
+    def _on_site_changed(self, name: str):
+        loc = self._locations.get(name)
+        if loc:
+            self._project_code_edit.setText(loc["project_code"])
+            self._tracker_location_combo.setCurrentText(loc["tracker_location"])
+
+    def _add_to_batch(self):
+        if len(self._batch) >= _MAX_BATCH:
+            QMessageBox.warning(
+                self, "Batch full", f"At most {_MAX_BATCH} CTRs can be queued at once."
+            )
+            return
+
+        ctr_no = self._ctr_no_edit.text().strip()
+        if not ctr_no:
+            QMessageBox.warning(self, "Missing CTR number", "Enter or load a CTR number first.")
+            return
+        if self._site_combo.currentIndex() == 0:
+            QMessageBox.warning(self, "Missing location", "Select a Location for this CTR.")
+            return
+
+        date_val = None
+        date_txt = self._date_edit.text().strip()
+        if date_txt:
+            try:
+                date_val = _date.fromisoformat(date_txt)
+            except ValueError:
+                QMessageBox.warning(self, "Invalid date", "Date must be in YYYY-MM-DD format.")
+                return
+
+        value_val = None
+        value_txt = self._value_edit.text().strip()
+        if value_txt:
+            try:
+                value_val = float(value_txt)
+            except ValueError:
+                QMessageBox.warning(self, "Invalid value", "Value must be a number.")
+                return
+
+        base = self._current_entry or CTREntry()
+        entry = replace(
+            base,
+            client=self._client_edit.text().strip(),
+            ctr_number=ctr_no,
+            ctr_date=date_val,
+            revision=self._revision_edit.text().strip(),
+            description=self._desc_edit.text().strip(),
+            value=value_val,
+            currency=self._currency_combo.currentText(),
+            site=self._site_combo.currentText(),
+            project_code=self._project_code_edit.text().strip(),
+            tracker_location=self._tracker_location_combo.currentText(),
+        )
+        self._batch.append(entry)
+        self._append_batch_row(entry)
+        self._refresh_batch_state()
+
+        # Reset the add form for the next CTR, keeping Location/Currency —
+        # most batches come from the same site/currency run.
+        self._ctr_file_edit.setText("")
+        self._client_edit.setText("")
+        self._ctr_no_edit.setText("")
+        self._date_edit.setText("")
+        self._revision_edit.setText("")
+        self._desc_edit.setText("")
+        self._value_edit.setText("")
+        self._value_warning.setVisible(False)
+        self._current_entry = None
+
+    # ── Batch table ──────────────────────────────────────────────────────────
+
+    def _append_batch_row(self, entry: CTREntry):
+        tbl = self._batch_tbl
+        r = tbl.rowCount()
+        tbl.insertRow(r)
+        tbl.setItem(r, _BC_CLIENT,   QTableWidgetItem(entry.client))
+        tbl.setItem(r, _BC_CTR_NO,   QTableWidgetItem(entry.ctr_number))
+        tbl.setItem(r, _BC_DATE,     QTableWidgetItem(entry.ctr_date.isoformat() if entry.ctr_date else ""))
+        tbl.setItem(r, _BC_LOCATION, QTableWidgetItem(entry.tracker_location))
+        tbl.setItem(r, _BC_PROJECT,  QTableWidgetItem(entry.project_code))
+        tbl.setItem(r, _BC_DESC,     QTableWidgetItem(entry.description))
+        tbl.setItem(r, _BC_VALUE,    QTableWidgetItem("" if entry.value is None else f"{entry.value:g}"))
+        tbl.setItem(r, _BC_CURRENCY, QTableWidgetItem(entry.currency))
+        tbl.setItem(r, _BC_REVISION, QTableWidgetItem(entry.revision))
+        tbl.setItem(r, _BC_REMOVE,   _ro_item(""))
+
+        rm_btn = QPushButton("✕")
+        rm_btn.setFixedSize(24, 24)
+        rm_btn.setToolTip("Remove this CTR from the batch")
+        rm_btn.clicked.connect(lambda: self._remove_batch_row(rm_btn))
+        tbl.setCellWidget(r, _BC_REMOVE, rm_btn)
+
+        if entry.value_is_estimate:
+            _highlight_row(tbl, r, matched=False)
+
+    def _remove_batch_row(self, button: QPushButton):
+        tbl = self._batch_tbl
+        for r in range(tbl.rowCount()):
+            if tbl.cellWidget(r, _BC_REMOVE) is button:
+                tbl.removeRow(r)
+                del self._batch[r]
+                break
+        self._refresh_batch_state()
+
+    def _remove_written_from_batch(self, written: list[tuple[str, int]]) -> None:
+        """Drops only the entries that were actually written, by CTR
+        number — anything skipped stays in the batch so it's easy to fix
+        and retry (e.g. once a human adds the missing row)."""
+        remaining_ctr_numbers = [ctr_number for ctr_number, _row in written]
+        for r in reversed(range(len(self._batch))):
+            ctr_number = self._batch[r].ctr_number
+            if ctr_number in remaining_ctr_numbers:
+                remaining_ctr_numbers.remove(ctr_number)
+                del self._batch[r]
+                self._batch_tbl.removeRow(r)
+
+    def _refresh_batch_state(self):
+        n = len(self._batch)
+        self._batch_group.setTitle(f"Batch  ({n} / {_MAX_BATCH})")
+        self._add_batch_btn.setEnabled(n < _MAX_BATCH)
+        self._write_btn.setEnabled(n > 0 and bool(self._tracker_edit.text().strip()))
+
+    # ── Write ────────────────────────────────────────────────────────────────
+
+    def _write_batch(self):
+        tracker_path = self._tracker_edit.text().strip()
+        if not tracker_path:
+            QMessageBox.warning(self, "No tracker selected", "Choose the CTR Tracker workbook first.")
+            return
+        if not self._batch:
+            return
+
+        n = len(self._batch)
+        make_backup = self._backup_check.isChecked()
+        allow_overwrite = self._overwrite_check.isChecked()
+        backup_note = (
+            "A timestamped backup will be saved next to the file first."
+            if make_backup else
+            "No backup copy will be made (enable the checkbox above to save one)."
+        )
+        overwrite_note = (
+            "\n\n⚠ Overwrite mode is ON — a matching row's existing data will be replaced."
+            if allow_overwrite else ""
+        )
+        reply = QMessageBox.question(
+            self, "Write to Tracker",
+            f"Write {n} CTR{'s' if n != 1 else ''} to:\n{tracker_path}\n\n{backup_note}"
+            f"{overwrite_note}\n\nContinue?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        dlg = QProgressDialog(
+            "Writing to the tracker workbook…",
+            None, 0, 0, self,
+        )
+        dlg.setWindowModality(Qt.WindowModality.WindowModal)
+        dlg.setWindowTitle("Writing…")
+        dlg.setMinimumDuration(0)
+        dlg.show()
+
+        self._write_btn.setEnabled(False)
+        self._add_batch_btn.setEnabled(False)
+
+        worker = _WriteWorker(tracker_path, list(self._batch), make_backup, allow_overwrite, parent=self)
+        self._workers.append(worker)
+
+        def _done(written: list, skipped: list, backup_path):
+            dlg.close()
+            self._workers.remove(worker)
+
+            n_written, n_total = len(written), len(written) + len(skipped)
+            lines = [f"Wrote {n_written} of {n_total} CTR{'s' if n_total != 1 else ''}."]
+            for ctr_number, row in written:
+                lines.append(f"  • {ctr_number} → row {row}")
+            if skipped:
+                lines.append("")
+                lines.append("Skipped (still in the batch — fix and retry):")
+                for ctr_number, reason in skipped:
+                    lines.append(f"  • {ctr_number}: {reason}")
+            if backup_path is not None:
+                lines.append("")
+                lines.append(f"Backup saved to:\n{backup_path.name}")
+            QMessageBox.information(self, "Written", "\n".join(lines))
+
+            self._remove_written_from_batch(written)
+            self._refresh_batch_state()
+
+        def _err(message: str):
+            dlg.close()
+            self._workers.remove(worker)
+            QMessageBox.critical(self, "Write failed", message)
+            self._refresh_batch_state()
+
+        worker.finished_ok.connect(_done)
+        worker.error.connect(_err)
+        worker.start()
+
+    # ── Settings persistence ────────────────────────────────────────────────
+
+    @staticmethod
+    def _settings() -> QSettings:
+        return QSettings("SOCAR", "CTRGenerator")
+
+    def restore_settings(self) -> None:
+        s = self._settings()
+        val = s.value("paths/ctr_tracker_workbook", "")
+        if val:
+            self._tracker_edit.setText(val)
+        self._backup_check.setChecked(s.value("ctr_tracker/make_backup", False, type=bool))
+        # Overwrite mode is deliberately NOT remembered across restarts — it should
+        # always come up off, so it can never be silently left on from a prior session.
+        self._refresh_batch_state()
+
+    def save_settings(self) -> None:
+        s = self._settings()
+        s.setValue("paths/ctr_tracker_workbook", self._tracker_edit.text())
+        s.setValue("ctr_tracker/make_backup", self._backup_check.isChecked())

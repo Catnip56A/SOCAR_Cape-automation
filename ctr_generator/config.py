@@ -127,6 +127,134 @@ _DEFAULTS: dict = {
         "col_legacy_name":    2,
         "col_canonical_name": 3,
     },
+    # Cell layout for READING a generated CTR output file (AZN or USD —
+    # both templates share the same header cell positions, see azn_template
+    # / usd_template above). Used by the CTR Tracker tab to pull client,
+    # CTR number, date, revision, description and currency straight off a
+    # finished CTR so they don't have to be retyped.
+    "ctr_extract": {
+        "cell_client":     "B3",
+        "cell_ctr_ref":    "E3",
+        "cell_location":   "B4",
+        "cell_date":       "E4",
+        "cell_revision":   "E5",
+        "cell_currency":   "G5",
+        "cell_scope":      "A6",
+        # None of the totals below sit at a fixed row — the summary section
+        # shifts down depending on how many manpower/equipment/consumable
+        # line items a CTR has, so each is found by searching for its label
+        # text instead of a hardcoded cell (e.g. "Estimated CTR Total" is
+        # row 71 in a short CTR, row 130 in a longer one). A label can
+        # appear twice (once as its own section's subtotal, again in the
+        # final Summary rollup with the same figure) — the search takes the
+        # last match found, which lands on the Summary rollup when there is
+        # one and the section subtotal otherwise (e.g. "Total Third Party
+        # Activities" has no separate Summary line).
+        "value_label":      "Estimated CTR Total",
+        "value_label_col":  "A",
+        "value_result_col": "G",
+        "search_max_row":   400,
+        # Labels searched across columns A/B/C (A: unlabelled totals like
+        # "Estimated CTR Total"; B: numbered Summary rollup lines; C: the
+        # Materials/Consumables breakdown) — same value_result_col (G).
+        "label_cols": ["A", "B", "C"],
+        "label_total_project_support":  "Total Project Support",
+        "label_total_third_party":      "Total Third Party Activities",
+        "label_total_equipment":        "Total Plant & Equipment",
+        "label_general_consumables":    "General Consumables",
+        "label_consumables_markup":     "Mark up (For Consumables)",
+        "label_transportation_customs": "Transportation and Customs Clearance",
+        "label_transportation_markup":  "Mark up (for services)",
+        # The manpower section is labelled "Onshore Activities" or
+        # "Offshore Activities" depending on the CTR's own project type —
+        # read here (and combined with label_total_project_support to make
+        # the tracker's Labor figure) and also used to sanity-check against
+        # the tracker Location chosen in the UI before writing anything.
+        "activity_labels":    ["Onshore Activities", "Offshore Activities"],
+        "activity_label_col": "A",
+    },
+
+    # CTR Tracker tab — a CTR is written into the existing tracker row whose
+    # "CTR number" column already contains its base number (currency suffix
+    # stripped — see value_usd_formula note below on why AZN/USD share one
+    # base number). Rows are pre-created by hand; this never creates a new
+    # row or shifts existing ones. If no matching, still-empty row exists,
+    # the CTR is skipped with a warning rather than guessing where to put
+    # it. Column letters here match the header row of that sheet; update
+    # them here (not in code) if the tracker's layout changes.
+    "ctr_tracker": {
+        "sheet_name":      "CTR Tracker",
+        "header_row":      4,
+        "col_client":        "C",
+        "col_ctr_number":    "D",
+        "col_location":      "L",
+        "col_date":          "N",
+        "col_project_code":  "O",
+        "col_description":   "P",
+        "col_value":         "S",
+        "col_currency":      "AC",
+        "col_revision":      "AI",
+        # Total CTR value converted to USD — always rewritten with this
+        "col_value_usd":     "AJ",
+        # formula (AC/S are that row's own currency/value columns) using
+        # the row actually being written, e.g. row 8903 becomes:
+        #   =IF(AC8903="USD", S8903, IF(AC8903="AZN", S8903/1.7, ""))
+        "value_usd_formula": 'IF(AC{row}="USD", S{row}, IF(AC{row}="AZN", S{row}/{rate}, ""))',
+        # Column S's number format shows the currency's own symbol instead
+        # of tracking whatever style the placeholder row happened to have.
+        # Style ids come from this tracker's own styles.xml — AZN uses
+        # "#,##0.00 [$₼-42C]" (id 72), USD uses "$#,##0.00" (id 159).
+        "value_style_by_currency": {"AZN": 72, "USD": 159},
+
+        # Cost-breakdown columns (AL:AX in the tracker header). Populated
+        # best-effort from whatever totals a CTR's own summary section has
+        # — "not all are applicable" to every CTR, so a column with no
+        # matching source in the file is simply left blank. AZN CTRs (pure
+        # labor documents) only ever contribute Labor; USD CTRs (equipment/
+        # consumables/third-party documents) contribute the rest. Matches
+        # the convention already used throughout the tracker's real
+        # historical rows: Labor and the AZN->USD conversion embed a
+        # computed literal (not a cross-workbook cell reference — Excel
+        # formulas can't reach into another file's cells here), while
+        # Consumables markup and the row Total are formulas over the
+        # tracker's own row (safe — that row number is only known once
+        # placement is decided, not assumed up front).
+        "col_labor":               "AM",
+        "col_equipment":           "AN",
+        "col_third_party":         "AV",
+        "col_customs_transport":   "AR",
+        "col_consumables_recharge": "AT",
+        "col_consumables_markup":  "AU",
+        "col_total_usd":           "AX",
+        "azn_to_usd_rate":         1.7,
+        "consumables_markup_rate": 0.065,
+        "labor_formula":             "({support}+{activities})/{rate}",
+        "consumables_markup_formula": "AT{row}*{rate}",
+        "total_usd_formula":          "SUM(AL{row}:AW{row})-AS{row}",
+    },
+
+    # Site name -> (Project Code, tracker Location bucket) lookup offered
+    # in the CTR Tracker "Location" dropdown. Selecting a site fills both
+    # the Project Code and Location (Onshore/Offshore/Georgia) fields.
+    # Edit/add entries here — no code changes needed.
+    "ctr_tracker_locations": {
+        "Company Shared Costs":  {"project_code": "FMA-SHARE",       "tracker_location": "Offshore"},
+        "Central Azeri":         {"project_code": "FMA0026-CAP",     "tracker_location": "Offshore"},
+        "West Azeri":            {"project_code": "FMA0027-WAP",     "tracker_location": "Offshore"},
+        "East Azeri":            {"project_code": "FMA0028-EA",      "tracker_location": "Offshore"},
+        "Deep Water Gunashli":   {"project_code": "FMA0029-DWGP",    "tracker_location": "Offshore"},
+        "Shah Deniz":            {"project_code": "FMA0030-SD",      "tracker_location": "Offshore"},
+        "Chirag 1":              {"project_code": "FMA0031-CHG1",    "tracker_location": "Offshore"},
+        "West Chirag":           {"project_code": "FMA0032-WCH",     "tracker_location": "Offshore"},
+        "Sangachal Terminal":    {"project_code": "FMA0033-ST",      "tracker_location": "Onshore"},
+        "Azerbaijan Pipelines":  {"project_code": "FMA0034-AZPL",    "tracker_location": "Onshore"},
+        "Georgia Pipelines":     {"project_code": "FMA0035-GEOPL",   "tracker_location": "Georgia"},
+        "Offshore Projects":     {"project_code": "FMA0036-OFFSHPRJ", "tracker_location": "Offshore"},
+        "Onshore Projects":      {"project_code": "FMA0037-SHDPRJ",  "tracker_location": "Onshore"},
+        "Shah Deniz Bravo":      {"project_code": "FMA0062-SDB",     "tracker_location": "Offshore"},
+        "ACE (Azeri-Central-East) Project": {"project_code": "FMA0119-ACE", "tracker_location": "Offshore"},
+    },
+
     "ctr_request": {
         "sheet_name": "CTR_REQUEST",
         "data_start_row": 13,
