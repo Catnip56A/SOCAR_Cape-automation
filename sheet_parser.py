@@ -160,7 +160,7 @@ def _filter_mr_stock_codes(df: pd.DataFrame) -> pd.DataFrame:
     if "Stock Code" not in df.columns:
         return df
     df = df.copy()
-    df["Stock Code"] = df["Stock Code"].astype(str).str.strip()
+    df["Stock Code"] = df["Stock Code"].apply(_norm)
     df = df[~df["Stock Code"].str.upper().isin(_MR_PLACEHOLDER)]
     df = df[~df["Stock Code"].str.match(r"^\d{1,3}$")]
     df = df[~df["Stock Code"].str.contains(":", na=False)]
