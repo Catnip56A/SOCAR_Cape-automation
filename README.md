@@ -86,6 +86,31 @@ The resulting installer is written wherever `setup.iss` configures its output (s
 
 ---
 
+## Logs (installed .exe)
+
+The app writes two log files to a `logs` folder next to the installed `.exe` (`app_logging.py`):
+
+- **`app.log`** — rotating log (max 5 MB, 5 backups) with startup info, warnings, errors, and Qt-level messages.
+- **`crash.log`** — native crash traces (`faulthandler`) plus any uncaught Python exception that would otherwise make the app silently close.
+
+Default install location is under Program Files (via `setup.iss`'s `DefaultDirName={autopf}\SOCAR Cape automation\Commercial-automation`), so the logs would normally be at:
+
+```
+C:\Program Files (x86)\SOCAR Cape automation\Commercial-automation\logs\
+```
+
+**In practice, that folder often isn't writable** without elevated rights (Program Files is protected), so the app falls back to a temp directory instead — check there first if `logs\` is missing or empty next to the `.exe`:
+
+```
+%TEMP%\socar_cape_automation_logs\
+```
+
+(Press `Win+R`, paste that path, press Enter — resolves to `C:\Users\<username>\AppData\Local\Temp\socar_cape_automation_logs`.)
+
+This is separate from the app's **data** folder (saved presets/renames), which always lives at `%APPDATA%\SOCAR\CTRGenerator` (`ctr_generator/paths.py`) regardless of install location.
+
+---
+
 ## Project structure
 
 ```

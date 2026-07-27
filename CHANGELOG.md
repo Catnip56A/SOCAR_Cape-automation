@@ -5,6 +5,10 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and version numbers come from the [VERSION](VERSION) file.
 
+## [1.0.6] - 2026-07-27
+### Changed
+- CTR Tracker: raised the row-search ceiling for locating a CTR's summary totals (Estimated CTR Total, section subtotals, Onshore/Offshore activity label) from 400 to 800 rows. The search already follows the summary section wherever it lands rather than assuming a fixed cell, but a CTR with enough line items to push that section past row 400 would have silently returned "not found" instead of the real total. `search_max_row` in `ctr_extract` (`template_config.json`).
+
 ## [1.0.5] - 2026-07-24
 ### Fixed
 - MR vs CTR Comparator: on sheets parsed via the fallback (keyword-based) reader — i.e. sheets without `cons_start`/`cons_end` named ranges — a blank Stock Code no longer slips past the placeholder filter. `_filter_mr_stock_codes` relied on `Series.astype(str)` to stringify `NaN`/blank cells before checking them against the placeholder list, but that conversion doesn't happen for `NaN` in the pandas version this app uses, so blank-Stock-Code rows were silently kept. In practice this let footer/signature rows (e.g. "Checked By Onshore/Offshore Coordinator", "Manager Approval", "Commercial Rep Approval" — text spilled into other columns from merged cells below the item table) appear in the comparison as if they were real line items. Now uses the existing NaN-safe `_norm()` helper instead.

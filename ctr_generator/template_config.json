@@ -111,7 +111,7 @@
     "value_label":      "Estimated CTR Total",
     "value_label_col":  "A",
     "value_result_col": "G",
-    "search_max_row":   400,
+    "search_max_row":   800,
     "label_cols": ["A", "B", "C"],
     "label_total_project_support":  "Total Project Support",
     "label_total_third_party":      "Total Third Party Activities",
