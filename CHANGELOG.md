@@ -5,6 +5,18 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and version numbers come from the [VERSION](VERSION) file.
 
+## [1.0.7] - 2026-07-29
+### Added
+- Description renames: editing an already-matched row's Description in Manpower, Equipment, or Consumables now teaches a persistent rename, remembered separately from the existing Match By aliases and auto-applied the next time a CTR Request has the same original description (`ctr_generator/desc_renames.py`, its own `desc_renames.json`). The "Manage \_\_\_ Renames…" dialog now lists both kinds of learned rename together with a Type column ("Match By" / "Description"); Import/Export writes one combined JSON file (`{"match_by": ..., "description": ...}`), and still reads a file exported before this change as Match By renames only.
+- "Re-match All" and "Manage \_\_\_ Renames…" buttons, previously only present in the Manpower section, now also appear in Equipment and Consumables, each scoped to its own table.
+- Generate now warns if Contract No (AZN) or Contract No (USD) is left blank.
+
+### Changed
+- Equipment and Consumables CTR output now always shows the requested Description text, matching what Manpower already did — the matched pricebook/SAGE item name is used only internally for pricing lookup, never as the client-facing description.
+- Contract No is now always written from the header field, even when blank — previously a blank field silently kept whatever contract number was already sitting in the copied template file, which could carry a stale number from an unrelated job into a new CTR.
+- PDF export: unused rows inside the AZN/USD templates' fixed-capacity manpower/equipment/consumables blocks are now hidden instead of left blank, so a request with far fewer line items than the template's capacity no longer prints dozens of empty rows.
+- PDF export: AZN's "Main AZN" sheet and USD's "Main"/"Pricing" sheets now print fit to exactly one page wide instead of a fixed scale percentage, which — depending on the exact LibreOffice/font rendering — could overflow onto a second page and split every row's right-hand columns onto an unreadable separate page. Added a small left/right print margin too, since fitting to one page's width otherwise left content running edge to edge.
+
 ## [1.0.6] - 2026-07-27
 ### Changed
 - CTR Tracker: raised the row-search ceiling for locating a CTR's summary totals (Estimated CTR Total, section subtotals, Onshore/Offshore activity label) from 400 to 800 rows. The search already follows the summary section wherever it lands rather than assuming a fixed cell, but a CTR with enough line items to push that section past row 400 would have silently returned "not found" instead of the real total. `search_max_row` in `ctr_extract` (`template_config.json`).

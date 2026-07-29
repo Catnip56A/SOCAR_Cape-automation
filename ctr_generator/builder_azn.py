@@ -54,6 +54,7 @@ from pathlib import Path
 import openpyxl
 from openpyxl.utils import column_index_from_string as _col_idx
 from openpyxl.utils import get_column_letter as _col_letter
+from openpyxl.worksheet.properties import PageSetupProperties
 
 from ctr_generator.config import CFG
 from ctr_generator.naming import ctr_output_filename
@@ -161,6 +162,31 @@ def _copy_row_format(ws, src_row: int, dst_row: int, col_count: int) -> None:
             dst.alignment    = copy(src.alignment)
 
 
+def _fit_to_page_width(ws) -> None:
+    """
+    Forces the sheet to print at exactly one page wide (any number of pages
+    tall), overriding the template's fixed print scale — a fixed scale
+    percentage can fit every column on one page width when rendered by one
+    Excel/LibreOffice install but overflow onto a second page in another,
+    splitting every row's right-hand columns off onto an unreadable
+    separate page. "Fit to 1 page wide" is computed by the renderer at
+    export time instead, so it's correct regardless of font metrics.
+    """
+    ws.page_setup.fitToWidth = 1
+    ws.page_setup.fitToHeight = 0
+    if ws.sheet_properties.pageSetUpPr is None:
+        ws.sheet_properties.pageSetUpPr = PageSetupProperties()
+    ws.sheet_properties.pageSetUpPr.fitToPage = True
+
+    # The template's right margin is 0" (left barely 0.15-0.24") — with
+    # content already forced to fill exactly one page's width, that leaves
+    # no breathing room at all on the sides. A small fixed margin here
+    # still fits on one page (fitToWidth shrinks to whatever's left inside
+    # the margins) while giving the page visible whitespace on both edges.
+    ws.page_margins.left = 0.3
+    ws.page_margins.right = 0.3
+
+
 def _parse_date(value):
     """Best-effort string → datetime conversion; returns value unchanged if unparseable."""
     if isinstance(value, str):
@@ -247,7 +273,12 @@ def build_azn(
         if header.get("sub_client"):  ws[_azn["cell_sub_client"]] = header["sub_client"]
         if header.get("location"):    ws[_azn["cell_location"]]   = header["location"]
         if header.get("date"):        ws[_azn["cell_date"]]       = _parse_date(header["date"])
-        if header.get("contract_no"): ws[_azn["cell_contract_no"]] = header["contract_no"]
+        # Contract No is always written from the UI field, even blank —
+        # unlike the other header fields here, a stale contract number left
+        # over from the template file is actively wrong for this job rather
+        # than a harmless default, so a blank UI field must blank the cell
+        # instead of silently preserving whatever the template had.
+        ws[_azn["cell_contract_no"]] = header.get("contract_no", "")
         if header.get("revision") not in (None, ""):
             ws[_azn["cell_revision"]] = header["revision"]
         if header.get("scope"):       ws[_azn["cell_scope"]]      = header["scope"]
@@ -358,6 +389,8 @@ def build_azn(
 
     _r, _c = _cell_row_col(_azn["cell_summary_combined"])
     ws.cell(row=_r + _row_shift, column=_c).value = f"={support_summary_addr}+{other_summary_addr}"
+
+    _fit_to_page_width(ws)
 
     try:
         wb.save(out_path)

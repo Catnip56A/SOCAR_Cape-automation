@@ -31,6 +31,7 @@ Worker thread follows the same ParseWorker pattern used in app.py.
 
 from __future__ import annotations
 
+import json
 import logging
 from datetime import date as _date
 from pathlib import Path
@@ -47,8 +48,11 @@ from PySide6.QtWidgets import (
 )
 
 from ctr_generator.aliases import (
-    load_aliases, get_alias, set_alias, delete_alias,
-    save_aliases, export_aliases, import_aliases,
+    load_aliases, get_alias, set_alias, delete_alias, save_aliases,
+)
+from ctr_generator.desc_renames import (
+    load_desc_renames, get_desc_rename, set_desc_rename, delete_desc_rename,
+    save_desc_renames,
 )
 from ctr_generator.config import CFG
 from ctr_generator.presets import load_presets, save_presets, _PRESET_FIELDS
@@ -310,6 +314,7 @@ def _ro_item(text: str) -> QTableWidgetItem:
 
 
 _ROW_TINT_ROLE = Qt.UserRole + 1   # stores a row's warning colour key ("red"/"yellow"/None)
+_DESC_ANCHOR_ROLE = Qt.UserRole + 2   # stores a row's original (un-renamed) requested Description
 
 # (background, font) colours per warning key. A row's background tint is
 # swapped for a font colour while the row is selected — Qt's selection
@@ -689,47 +694,83 @@ def _btn_style(color: str = PRIMARY, light: str = MR_LIGHT) -> str:
 # Saved renames manager
 # ─────────────────────────────────────────────────────────────────────────────
 
-class AliasManagerDialog(QDialog):
-    """Lists every learned request→pricebook rename, lets the user delete one."""
+def _coerce_rename_dict(data: dict) -> dict:
+    """
+    Validates/normalizes an already JSON-parsed {category: {requested:
+    renamed}} dict into the standard three-category shape shared by
+    aliases.py and desc_renames.py. Raises ValueError on a malformed
+    category value.
+    """
+    result = {}
+    for cat in ("manpower", "equipment", "consumable"):
+        mapping = data.get(cat) or {}
+        if not isinstance(mapping, dict):
+            raise ValueError(f'"{cat}" should be an object of {{requested name: renamed-to}} pairs.')
+        result[cat] = {str(k): str(v) for k, v in mapping.items()}
+    return result
 
-    def __init__(self, aliases: dict, parent=None, applied_count: int = 0):
+
+class AliasManagerDialog(QDialog):
+    """Lists learned renames — for one category, or all three — and lets
+    the user delete one. Two kinds of rename share this list, distinguished
+    by a "Type" column: "Match By" (teaches the pricebook/SAGE lookup key,
+    from aliases.py) and "Description" (teaches the CTR display text, from
+    desc_renames.py) — independently learned and persisted, but shown
+    together since both answer "what did I rename this requested item to?"."""
+
+    def __init__(self, aliases: dict, desc_renames: dict, parent=None, applied_count: int = 0,
+                 category: str | None = None):
         super().__init__(parent)
-        self.setWindowTitle("Manage Saved Renames")
-        self.resize(640, 420)
+        self._category = category
+        cat_title = category.capitalize() if category else None
+        self.setWindowTitle(f"Manage {cat_title} Renames" if cat_title else "Manage Saved Renames")
+        self.resize(700, 420)
         self._aliases = aliases
+        self._desc_renames = desc_renames
         self._applied_count = applied_count
         self._build_ui()
 
     def _build_ui(self):
         layout = QVBoxLayout(self)
 
+        scope = f"a {self._category.capitalize()} row" if self._category \
+            else "a Manpower, Equipment or Consumables row"
         info = QLabel(
-            "These renames were learned automatically when you fixed a "
-            "\"No match\" row by editing \"Match By\". They are applied "
-            "automatically the next time the same requested description "
-            "appears in a future CTR Request. Select a row and click "
-            "Delete to forget a rename."
+            f"These renames were learned automatically when you fixed "
+            f"\"No match\" on {scope} by editing \"Match By\" (teaches the "
+            f"pricebook lookup key), or by editing \"Description\" on an "
+            f"already-loaded row (teaches what to display in the CTR). Both "
+            "are applied automatically the next time the same requested "
+            "description appears in a future CTR Request. Select a row and "
+            "click Delete to forget a rename."
         )
         info.setWordWrap(True)
         info.setStyleSheet(f"color: {MUTED}; font-size: 11px;")
         layout.addWidget(info)
 
         if self._applied_count:
+            table_scope = f"{self._category.capitalize()} table" if self._category \
+                else "Manpower/Equipment/Consumables tables"
             applied_lbl = QLabel(
                 f"✓ Just applied {self._applied_count} of these rename(s) to "
-                f"matching rows already in the Manpower/Equipment/Consumables "
-                f"tables below the Generate section."
+                f"matching rows already in the {table_scope} below the "
+                f"Generate section."
             )
             applied_lbl.setWordWrap(True)
             applied_lbl.setStyleSheet(f"color: {CTR_COLOR}; font-weight: bold; font-size: 11px;")
             layout.addWidget(applied_lbl)
 
-        self._tbl = QTableWidget(0, 3)
-        self._tbl.setHorizontalHeaderLabels(["Category", "Requested Name", "Matched As"])
+        self._tbl = QTableWidget(0, 4)
+        self._tbl.setHorizontalHeaderLabels(["Category", "Type", "Requested Name", "New Value"])
         self._tbl.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self._tbl.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self._tbl.verticalHeader().setVisible(False)
         self._tbl.horizontalHeader().setStretchLastSection(True)
+        # The Category column is redundant once the dialog is already scoped
+        # to one category via its title — keep the data (still used by
+        # _delete_selected) but hide the column itself.
+        if self._category:
+            self._tbl.setColumnHidden(0, True)
         layout.addWidget(self._tbl)
         self._reload_table()
 
@@ -770,21 +811,32 @@ class AliasManagerDialog(QDialog):
         # Fixed category order (not dict insertion order) so Manpower,
         # Equipment and Consumable renames each show up in a stable, expected
         # place regardless of which category was edited most recently.
-        for category in ("manpower", "equipment", "consumable"):
-            mapping = self._aliases.get(category, {})
-            for req_desc, match_key in sorted(mapping.items()):
-                r = self._tbl.rowCount()
-                self._tbl.insertRow(r)
-                self._tbl.setItem(r, 0, QTableWidgetItem(category.capitalize()))
-                self._tbl.setItem(r, 1, QTableWidgetItem(req_desc))
-                self._tbl.setItem(r, 2, QTableWidgetItem(match_key))
+        categories = (self._category,) if self._category else ("manpower", "equipment", "consumable")
+
+        def _add_rows(store, type_label):
+            for category in categories:
+                mapping = store.get(category, {})
+                for req_desc, renamed in sorted(mapping.items()):
+                    r = self._tbl.rowCount()
+                    self._tbl.insertRow(r)
+                    self._tbl.setItem(r, 0, QTableWidgetItem(category.capitalize()))
+                    self._tbl.setItem(r, 1, QTableWidgetItem(type_label))
+                    self._tbl.setItem(r, 2, QTableWidgetItem(req_desc))
+                    self._tbl.setItem(r, 3, QTableWidgetItem(renamed))
+
+        _add_rows(self._aliases, "Match By")
+        _add_rows(self._desc_renames, "Description")
 
     def _delete_selected(self):
         rows = sorted({i.row() for i in self._tbl.selectedItems()}, reverse=True)
         for r in rows:
             category = self._tbl.item(r, 0).text().lower()
-            req_desc  = self._tbl.item(r, 1).text()
-            delete_alias(self._aliases, category, req_desc)
+            rtype    = self._tbl.item(r, 1).text()
+            req_desc = self._tbl.item(r, 2).text()
+            if rtype == "Description":
+                delete_desc_rename(self._desc_renames, category, req_desc)
+            else:
+                delete_alias(self._aliases, category, req_desc)
         self._reload_table()
 
     def _export_aliases(self):
@@ -794,7 +846,11 @@ class AliasManagerDialog(QDialog):
         if not path:
             return
         try:
-            export_aliases(self._aliases, path)
+            Path(path).write_text(
+                json.dumps({"match_by": self._aliases, "description": self._desc_renames},
+                           indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
         except OSError as e:
             QMessageBox.critical(self, "Export failed", str(e))
             return
@@ -807,26 +863,51 @@ class AliasManagerDialog(QDialog):
         if not path:
             return
         try:
-            imported = import_aliases(path)
+            raw = json.loads(Path(path).read_text(encoding="utf-8"))
         except (ValueError, OSError) as e:
             QMessageBox.critical(self, "Import failed", str(e))
             return
+        if not isinstance(raw, dict):
+            QMessageBox.critical(self, "Import failed",
+                                  "File does not contain a renames dictionary (expected a JSON object).")
+            return
 
-        added = updated = 0
-        for category, mapping in imported.items():
-            existing = self._aliases.setdefault(category, {})
-            for key, value in mapping.items():
-                if key not in existing:
-                    added += 1
-                elif existing[key] != value:
-                    updated += 1
-                existing[key] = value
+        # New combined format has "match_by"/"description" wrapper keys; a
+        # file exported before this dialog merged the two kinds is just the
+        # flat {category: {...}} shape and is treated as Match By renames
+        # only, so previously-exported files keep working.
+        try:
+            if "match_by" in raw or "description" in raw:
+                imported_aliases = _coerce_rename_dict(raw.get("match_by") or {})
+                imported_desc    = _coerce_rename_dict(raw.get("description") or {})
+            else:
+                imported_aliases = _coerce_rename_dict(raw)
+                imported_desc    = {}
+        except ValueError as e:
+            QMessageBox.critical(self, "Import failed", str(e))
+            return
 
+        def _merge(existing_store, imported):
+            added = updated = 0
+            for category, mapping in imported.items():
+                existing = existing_store.setdefault(category, {})
+                for key, value in mapping.items():
+                    if key not in existing:
+                        added += 1
+                    elif existing[key] != value:
+                        updated += 1
+                    existing[key] = value
+            return added, updated
+
+        a_added, a_updated = _merge(self._aliases, imported_aliases)
+        d_added, d_updated = _merge(self._desc_renames, imported_desc)
         save_aliases(self._aliases)
+        save_desc_renames(self._desc_renames)
         self._reload_table()
         QMessageBox.information(
             self, "Imported",
-            f"Imported {added} new and {updated} updated rename(s) from:\n{path}"
+            f"Imported {a_added + d_added} new and {a_updated + d_updated} updated "
+            f"rename(s) from:\n{path}"
         )
 
 
@@ -844,6 +925,7 @@ class CTRGeneratorWidget(QWidget):
         self._names_db_df: pd.DataFrame = pd.DataFrame()
         self._workers:     list = []
         self._aliases:     dict = load_aliases()
+        self._desc_renames: dict = load_desc_renames()
         self._presets:     dict = load_presets()
 
         # Async file-loading state
@@ -1029,23 +1111,22 @@ class CTRGeneratorWidget(QWidget):
         gl.addWidget(info)
 
         top_btn_row = QHBoxLayout()
-        rematch_btn = QPushButton("Re-match All")
+        rematch_btn = QPushButton("Re-match All Manpower")
         rematch_btn.setToolTip(
-            "Re-run matching for every row against the currently loaded "
-            "AZN pricebook. Use this if you load the CTR Request before "
-            "loading the Pricebook-Based files."
+            "Re-run matching for every Manpower row against the currently "
+            "loaded AZN pricebook. Use this if you load the CTR Request "
+            "before loading the Pricebook-Based files."
         )
         rematch_btn.setStyleSheet(_btn_style(MR_COLOR, MR_LIGHT))
-        rematch_btn.clicked.connect(self._rematch_all_requests)
+        rematch_btn.clicked.connect(self._rematch_all_manpower)
         top_btn_row.addWidget(rematch_btn)
 
-        manage_btn = QPushButton("Manage Saved Renames…")
+        manage_btn = QPushButton("Manage Manpower Renames…")
         manage_btn.setToolTip(
-            "View or delete renames learned from your \"Match By\" edits "
-            "across Manpower, Equipment and Consumables."
+            "View or delete Manpower renames learned from your \"Match By\" edits."
         )
         manage_btn.setStyleSheet(_btn_style(MUTED, "#F5F5F5"))
-        manage_btn.clicked.connect(self._open_alias_manager)
+        manage_btn.clicked.connect(lambda: self._open_alias_manager("manpower"))
         top_btn_row.addWidget(manage_btn)
         top_btn_row.addStretch()
         gl.addLayout(top_btn_row)
@@ -1120,6 +1201,27 @@ class CTRGeneratorWidget(QWidget):
         gl = QVBoxLayout(grp)
         gl.setSpacing(6)
 
+        top_btn_row = QHBoxLayout()
+        rematch_btn = QPushButton("Re-match All Equipment")
+        rematch_btn.setToolTip(
+            "Re-run matching for every Equipment row against the currently "
+            "loaded USD pricebook / Equipment Names DB. Use this if you "
+            "load the CTR Request before loading the Pricebook-Based files."
+        )
+        rematch_btn.setStyleSheet(_btn_style(CTR_COLOR, CTR_LIGHT))
+        rematch_btn.clicked.connect(self._rematch_all_equip)
+        top_btn_row.addWidget(rematch_btn)
+
+        manage_btn = QPushButton("Manage Equipment Renames…")
+        manage_btn.setToolTip(
+            "View or delete Equipment renames learned from your \"Match By\" edits."
+        )
+        manage_btn.setStyleSheet(_btn_style(MUTED, "#F5F5F5"))
+        manage_btn.clicked.connect(lambda: self._open_alias_manager("equipment"))
+        top_btn_row.addWidget(manage_btn)
+        top_btn_row.addStretch()
+        gl.addLayout(top_btn_row)
+
         search_row = QHBoxLayout()
         search_lbl = QLabel("Search:")
         search_lbl.setFixedWidth(50)
@@ -1179,6 +1281,27 @@ class CTRGeneratorWidget(QWidget):
         grp.setStyleSheet(_group_css(MUTED))
         gl = QVBoxLayout(grp)
         gl.setSpacing(4)
+
+        top_btn_row = QHBoxLayout()
+        rematch_btn = QPushButton("Re-match All Consumables")
+        rematch_btn.setToolTip(
+            "Re-run matching for every Consumables row against the currently "
+            "loaded SAGE export. Use this if you load the CTR Request before "
+            "loading the Pricebook-Based files."
+        )
+        rematch_btn.setStyleSheet(_btn_style(MUTED, "#F5F5F5"))
+        rematch_btn.clicked.connect(self._rematch_all_cons)
+        top_btn_row.addWidget(rematch_btn)
+
+        manage_btn = QPushButton("Manage Consumables Renames…")
+        manage_btn.setToolTip(
+            "View or delete Consumables renames learned from your \"Match By\" edits."
+        )
+        manage_btn.setStyleSheet(_btn_style(MUTED, "#F5F5F5"))
+        manage_btn.clicked.connect(lambda: self._open_alias_manager("consumable"))
+        top_btn_row.addWidget(manage_btn)
+        top_btn_row.addStretch()
+        gl.addLayout(top_btn_row)
 
         search_row = QHBoxLayout()
         search_lbl = QLabel("Search:")
@@ -1677,47 +1800,71 @@ class CTRGeneratorWidget(QWidget):
 
     # ── Matching against pricebook/SAGE ─────────────────────────────────────────
 
-    def _rematch_all_requests(self):
+    def _rematch_all_manpower(self):
         for r in range(self._req_manpower_tbl.rowCount()):
             self._rematch_manpower_row(r)
+        self._recalc_azn_totals()
+
+    def _rematch_all_equip(self):
         for r in range(self._req_equip_tbl.rowCount()):
             self._rematch_equip_row(r)
-        for r in range(self._req_cons_tbl.rowCount()):
-            self._rematch_cons_row(r)
-        # Each _rematch_*_row call refreshes its own row's Total cell but not
-        # the summary labels at the bottom of each table — refresh those too,
-        # otherwise a bulk re-match looks like it did nothing.
-        self._recalc_azn_totals()
         self._recalc_usd_totals()
 
-    def _open_alias_manager(self):
-        # Sweep every saved rename across the rows already on screen first —
-        # a rename learned from fixing one row otherwise only applies to
-        # *future* rows (the next CTR Request load), leaving sibling rows
-        # with the same description still sitting unmatched.
-        applied = self._apply_aliases_to_all_rows()
-        if applied:
-            self._recalc_azn_totals()
-            self._recalc_usd_totals()
+    def _rematch_all_cons(self):
+        for r in range(self._req_cons_tbl.rowCount()):
+            self._rematch_cons_row(r)
+        self._recalc_usd_totals()
+
+    def _rematch_all_requests(self):
+        self._rematch_all_manpower()
+        self._rematch_all_equip()
+        self._rematch_all_cons()
+
+    def _open_alias_manager(self, category: str | None = None):
+        # Sweep every saved rename (both Match By and Description) across
+        # the rows already on screen first — a rename learned from fixing
+        # one row otherwise only applies to *future* rows (the next CTR
+        # Request load), leaving sibling rows with the same description
+        # still sitting unmatched/unrenamed. Scoped to just this category's
+        # table when the dialog itself is category-specific.
+        if category == "manpower":
+            applied = (self._apply_aliases_to_manpower_rows()
+                       + self._apply_desc_renames_to_manpower_rows())
+            if applied:
+                self._recalc_azn_totals()
+        elif category == "equipment":
+            applied = (self._apply_aliases_to_equip_rows()
+                       + self._apply_desc_renames_to_equip_rows())
+            if applied:
+                self._recalc_usd_totals()
+        elif category == "consumable":
+            applied = (self._apply_aliases_to_cons_rows()
+                       + self._apply_desc_renames_to_cons_rows())
+            if applied:
+                self._recalc_usd_totals()
+        else:
+            applied = self._apply_aliases_to_all_rows() + self._apply_desc_renames_to_all_rows()
+            if applied:
+                self._recalc_azn_totals()
+                self._recalc_usd_totals()
 
         # Note: deleting a rename here only stops it being applied as the
         # default for *future* request rows — it deliberately does not
-        # touch "Match By" text already sitting in the tables below, since
-        # re-matching would just re-learn the same rename from that text.
-        dlg = AliasManagerDialog(self._aliases, parent=self, applied_count=applied)
+        # touch text already sitting in the tables below, since re-matching
+        # would just re-learn the same rename from that text.
+        dlg = AliasManagerDialog(self._aliases, self._desc_renames, parent=self,
+                                  applied_count=applied, category=category)
         dlg.exec()
 
-    def _apply_aliases_to_all_rows(self) -> int:
+    def _apply_aliases_to_manpower_rows(self) -> int:
         """
-        Overwrites "Match By" with the saved rename for every row whose
-        Description (Manpower) or Description/Stock Code (Equipment,
-        Consumables) has a known alias — even if Match By currently holds
-        something else — since a saved rename represents the best known
-        correct search term. Each change fires cellChanged, which re-runs
-        matching for that row. Returns how many rows were updated.
+        Overwrites "Match By" with the saved rename for every Manpower row
+        whose Description has a known alias — even if Match By currently
+        holds something else — since a saved rename represents the best
+        known correct search term. Each change fires cellChanged, which
+        re-runs matching for that row. Returns how many rows were updated.
         """
         applied = 0
-
         tbl = self._req_manpower_tbl
         for r in range(tbl.rowCount()):
             desc_item  = tbl.item(r, _MP_DESC)
@@ -1728,7 +1875,11 @@ class CTRGeneratorWidget(QWidget):
             if alias and match_item.text().strip() != alias:
                 match_item.setText(alias)
                 applied += 1
+        return applied
 
+    def _apply_aliases_to_equip_rows(self) -> int:
+        """Same idea as _apply_aliases_to_manpower_rows, for Equipment."""
+        applied = 0
         tbl = self._req_equip_tbl
         for r in range(tbl.rowCount()):
             desc_item  = tbl.item(r, _EQ_DESC)
@@ -1739,7 +1890,11 @@ class CTRGeneratorWidget(QWidget):
             if alias and match_item.text().strip() != alias:
                 match_item.setText(alias)
                 applied += 1
+        return applied
 
+    def _apply_aliases_to_cons_rows(self) -> int:
+        """Same idea as _apply_aliases_to_manpower_rows, for Consumables."""
+        applied = 0
         tbl = self._req_cons_tbl
         for r in range(tbl.rowCount()):
             desc_item  = tbl.item(r, _CS_DESC)
@@ -1750,8 +1905,68 @@ class CTRGeneratorWidget(QWidget):
             if alias and match_item.text().strip() != alias:
                 match_item.setText(alias)
                 applied += 1
-
         return applied
+
+    def _apply_aliases_to_all_rows(self) -> int:
+        return (self._apply_aliases_to_manpower_rows()
+                + self._apply_aliases_to_equip_rows()
+                + self._apply_aliases_to_cons_rows())
+
+    def _apply_desc_renames_to_manpower_rows(self) -> int:
+        """
+        Overwrites Description with the saved rename for every Manpower row
+        whose original requested description has a known Description
+        rename — looked up by the row's stashed original text (Qt.UserRole
+        + 1), not its current (possibly already-renamed) text, since that's
+        what a future CTR Request load will actually match against.
+        """
+        applied = 0
+        tbl = self._req_manpower_tbl
+        for r in range(tbl.rowCount()):
+            desc_item = tbl.item(r, _MP_DESC)
+            if desc_item is None:
+                continue
+            anchor = desc_item.data(_DESC_ANCHOR_ROLE) or desc_item.text().strip()
+            renamed = get_desc_rename(self._desc_renames, "manpower", anchor)
+            if renamed and desc_item.text().strip() != renamed:
+                desc_item.setText(renamed)
+                applied += 1
+        return applied
+
+    def _apply_desc_renames_to_equip_rows(self) -> int:
+        """Same idea as _apply_desc_renames_to_manpower_rows, for Equipment."""
+        applied = 0
+        tbl = self._req_equip_tbl
+        for r in range(tbl.rowCount()):
+            desc_item = tbl.item(r, _EQ_DESC)
+            if desc_item is None:
+                continue
+            anchor = desc_item.data(_DESC_ANCHOR_ROLE) or desc_item.text().strip()
+            renamed = get_desc_rename(self._desc_renames, "equipment", anchor)
+            if renamed and desc_item.text().strip() != renamed:
+                desc_item.setText(renamed)
+                applied += 1
+        return applied
+
+    def _apply_desc_renames_to_cons_rows(self) -> int:
+        """Same idea as _apply_desc_renames_to_manpower_rows, for Consumables."""
+        applied = 0
+        tbl = self._req_cons_tbl
+        for r in range(tbl.rowCount()):
+            desc_item = tbl.item(r, _CS_DESC)
+            if desc_item is None:
+                continue
+            anchor = desc_item.data(_DESC_ANCHOR_ROLE) or desc_item.text().strip()
+            renamed = get_desc_rename(self._desc_renames, "consumable", anchor)
+            if renamed and desc_item.text().strip() != renamed:
+                desc_item.setText(renamed)
+                applied += 1
+        return applied
+
+    def _apply_desc_renames_to_all_rows(self) -> int:
+        return (self._apply_desc_renames_to_manpower_rows()
+                + self._apply_desc_renames_to_equip_rows()
+                + self._apply_desc_renames_to_cons_rows())
 
     # -- manpower --
 
@@ -1761,6 +1976,12 @@ class CTRGeneratorWidget(QWidget):
         tbl.insertRow(r)
 
         desc = request_item.get("description", "")
+        # Display text may differ from the raw requested description if the
+        # user previously taught a Description rename for it — but every
+        # other lookup below (Match By alias, Onshore/Offshore detection,
+        # support-row classification) stays keyed on the raw text, since
+        # that's what will actually recur across future CTR Requests.
+        desc_display = get_desc_rename(self._desc_renames, "manpower", desc) or desc
         default_key = get_alias(self._aliases, "manpower", desc) or desc
         encoding = request_item.get("encoding") or ""
         decoded = _decode_manpower_encoding_full(encoding)
@@ -1798,8 +2019,12 @@ class CTRGeneratorWidget(QWidget):
         tbl.setItem(r, _MP_TYPE,      QTableWidgetItem(row_type))
         tbl.setItem(r, _MP_SHIFT,     QTableWidgetItem(shift))
         tbl.setItem(r, _MP_SHIFTTYPE, QTableWidgetItem(shift_type))
-        tbl.setItem(r, _MP_DESC,      QTableWidgetItem(desc))
+        tbl.setItem(r, _MP_DESC,      QTableWidgetItem(desc_display))
         tbl.item(r, _MP_DESC).setData(Qt.UserRole, (encoded_hours or "", encoding_ambiguous))
+        # Stashed so a later Description edit can learn/re-apply a rename
+        # keyed by the true original requested text, not whatever text
+        # (possibly already renamed) currently sits in the cell.
+        tbl.item(r, _MP_DESC).setData(_DESC_ANCHOR_ROLE, desc)
         tbl.setItem(r, _MP_MATCH,     QTableWidgetItem(default_key))
         tbl.setItem(r, _MP_MDESC,     _ro_item(""))
         tbl.setItem(r, _MP_NUMEMP,    QTableWidgetItem(str(num_emp)))
@@ -1843,6 +2068,7 @@ class CTRGeneratorWidget(QWidget):
     def _on_manpower_changed(self, row: int, col: int):
         if col == _MP_DESC:
             self._apply_desc_alias_manpower(row)
+            self._learn_desc_rename_manpower(row)
         if col in (_MP_TYPE, _MP_SHIFT, _MP_SHIFTTYPE, _MP_MATCH):
             self._rematch_manpower_row(row)
         elif col in (_MP_NUMEMP, _MP_QTY, _MP_RATE):
@@ -1870,6 +2096,31 @@ class CTRGeneratorWidget(QWidget):
                 match_item.setText(alias)   # cascades: rematch + totals
         elif not match_item.text().strip() and desc:
             match_item.setText(desc)        # cascades: rematch + totals
+
+    def _learn_desc_rename_manpower(self, row: int):
+        """
+        Fires when a row's Description changes. The item's _DESC_ANCHOR_ROLE
+        holds the row's original requested description — a fixed anchor set
+        once (at load time from the CTR Request, or on this cell's first
+        edit for a hand-typed "+ Add Row"). Comparing the new text against
+        that anchor (rather than whatever the previous edit left behind)
+        means a rename is always learned as "original → latest", so a
+        future CTR Request with the same original description picks up the
+        final intended rename, not an intermediate one.
+        """
+        tbl = self._req_manpower_tbl
+        desc_item = tbl.item(row, _MP_DESC)
+        if desc_item is None:
+            return
+        current = desc_item.text().strip()
+        anchor = desc_item.data(_DESC_ANCHOR_ROLE)
+        if not anchor:
+            if current:
+                desc_item.setData(_DESC_ANCHOR_ROLE, current)
+            return
+        anchor = str(anchor).strip()
+        if current and current.lower() != anchor.lower():
+            set_desc_rename(self._desc_renames, "manpower", anchor, current)
 
     def _recalc_manpower_row(self, row: int):
         tbl = self._req_manpower_tbl
@@ -1964,6 +2215,11 @@ class CTRGeneratorWidget(QWidget):
         tbl.insertRow(r)
 
         desc = request_item.get("description", "")
+        # Display text may differ from the raw requested description if the
+        # user previously taught a Description rename for it — matching
+        # (Match By alias, below) stays keyed on the raw text, since that's
+        # what will actually recur across future CTR Requests.
+        desc_display = get_desc_rename(self._desc_renames, "equipment", desc) or desc
         code = request_item.get("stock_code", "")
         default_key = get_alias(self._aliases, "equipment", desc) or code or desc
         try:
@@ -1975,7 +2231,7 @@ class CTRGeneratorWidget(QWidget):
         except (TypeError, ValueError):
             days = 30.0
 
-        tbl.setItem(r, _EQ_DESC,   QTableWidgetItem(desc))
+        tbl.setItem(r, _EQ_DESC,   QTableWidgetItem(desc_display))
         tbl.setItem(r, _EQ_CODE,   QTableWidgetItem(code))
         tbl.setItem(r, _EQ_MATCH,  QTableWidgetItem(default_key))
         tbl.setItem(r, _EQ_MDESC,  _ro_item(""))
@@ -1988,6 +2244,10 @@ class CTRGeneratorWidget(QWidget):
         # Stash the request sheet's own Rechargability tag so _rematch_equip_row
         # can cross-check it against the CTR_NAMES_DB_USD bridge result.
         tbl.item(r, _EQ_DESC).setData(Qt.UserRole, request_item.get("rechargability") or "")
+        # Stashed so a later Description edit can learn/re-apply a rename
+        # keyed by the true original requested text, not whatever text
+        # (possibly already renamed) currently sits in the cell.
+        tbl.item(r, _EQ_DESC).setData(_DESC_ANCHOR_ROLE, desc)
 
         self._rematch_equip_row(r, learn_alias=False)
 
@@ -2018,6 +2278,8 @@ class CTRGeneratorWidget(QWidget):
     def _on_equip_changed(self, row: int, col: int):
         if col in (_EQ_DESC, _EQ_CODE):
             self._apply_desc_alias_equip(row)
+        if col == _EQ_DESC:
+            self._learn_desc_rename_equip(row)
         if col == _EQ_MATCH:
             self._rematch_equip_row(row)
         elif col in (_EQ_QTY, _EQ_RATE, _EQ_DAYS):
@@ -2042,6 +2304,22 @@ class CTRGeneratorWidget(QWidget):
         elif not match_item.text().strip():
             # Default to stock code, then description (mirrors append-from-request logic)
             match_item.setText(code or desc)
+
+    def _learn_desc_rename_equip(self, row: int):
+        """See _learn_desc_rename_manpower — same idea, for Equipment."""
+        tbl = self._req_equip_tbl
+        desc_item = tbl.item(row, _EQ_DESC)
+        if desc_item is None:
+            return
+        current = desc_item.text().strip()
+        anchor = desc_item.data(_DESC_ANCHOR_ROLE)
+        if not anchor:
+            if current:
+                desc_item.setData(_DESC_ANCHOR_ROLE, current)
+            return
+        anchor = str(anchor).strip()
+        if current and current.lower() != anchor.lower():
+            set_desc_rename(self._desc_renames, "equipment", anchor, current)
 
     def _recalc_equip_row(self, row: int):
         tbl = self._req_equip_tbl
@@ -2142,6 +2420,11 @@ class CTRGeneratorWidget(QWidget):
         tbl.insertRow(r)
 
         desc = request_item.get("description", "")
+        # Display text may differ from the raw requested description if the
+        # user previously taught a Description rename for it — matching
+        # (Match By alias, below) stays keyed on the raw text, since that's
+        # what will actually recur across future CTR Requests.
+        desc_display = get_desc_rename(self._desc_renames, "consumable", desc) or desc
         code = request_item.get("stock_code", "")
         default_key = get_alias(self._aliases, "consumable", desc) or code or desc
         try:
@@ -2149,7 +2432,7 @@ class CTRGeneratorWidget(QWidget):
         except (TypeError, ValueError):
             qty = 1.0
 
-        tbl.setItem(r, _CS_DESC,   QTableWidgetItem(desc))
+        tbl.setItem(r, _CS_DESC,   QTableWidgetItem(desc_display))
         tbl.setItem(r, _CS_CODE,   QTableWidgetItem(code))
         tbl.setItem(r, _CS_MATCH,  QTableWidgetItem(default_key))
         tbl.setItem(r, _CS_MDESC,  _ro_item(""))
@@ -2161,6 +2444,10 @@ class CTRGeneratorWidget(QWidget):
         # Stash the request sheet's own Rechargability tag so _rematch_cons_row
         # can cross-check it against the CTR_NAMES_DB_USD bridge result.
         tbl.item(r, _CS_DESC).setData(Qt.UserRole, request_item.get("rechargability") or "")
+        # Stashed so a later Description edit can learn/re-apply a rename
+        # keyed by the true original requested text, not whatever text
+        # (possibly already renamed) currently sits in the cell.
+        tbl.item(r, _CS_DESC).setData(_DESC_ANCHOR_ROLE, desc)
 
         self._rematch_cons_row(r, learn_alias=False)
 
@@ -2190,6 +2477,8 @@ class CTRGeneratorWidget(QWidget):
     def _on_cons_changed(self, row: int, col: int):
         if col in (_CS_DESC, _CS_CODE):
             self._apply_desc_alias_cons(row)
+        if col == _CS_DESC:
+            self._learn_desc_rename_cons(row)
         if col == _CS_MATCH:
             self._rematch_cons_row(row)
         elif col in (_CS_QTY, _CS_PRICE):
@@ -2213,6 +2502,22 @@ class CTRGeneratorWidget(QWidget):
                 match_item.setText(alias)
         elif not match_item.text().strip() and (code or desc):
             match_item.setText(code or desc)
+
+    def _learn_desc_rename_cons(self, row: int):
+        """See _learn_desc_rename_manpower — same idea, for Consumables."""
+        tbl = self._req_cons_tbl
+        desc_item = tbl.item(row, _CS_DESC)
+        if desc_item is None:
+            return
+        current = desc_item.text().strip()
+        anchor = desc_item.data(_DESC_ANCHOR_ROLE)
+        if not anchor:
+            if current:
+                desc_item.setData(_DESC_ANCHOR_ROLE, current)
+            return
+        anchor = str(anchor).strip()
+        if current and current.lower() != anchor.lower():
+            set_desc_rename(self._desc_renames, "consumable", anchor, current)
 
     def _recalc_cons_row(self, row: int):
         tbl = self._req_cons_tbl
@@ -2424,6 +2729,11 @@ class CTRGeneratorWidget(QWidget):
         if not self._client_edit.text().strip():
             warnings.append("Client is empty — the template cell will be left blank.")
 
+        if not self._contract_no_azn_edit.text().strip():
+            warnings.append("Contract No (AZN) is empty — the AZN CTR's Contract No will be left blank.")
+        if not self._contract_no_usd_edit.text().strip():
+            warnings.append("Contract No (USD) is empty — the USD CTR's Contract No will be left blank.")
+
         # Count includable rows to warn if everything is unmatched
         mp_includable = sum(
             1 for r in range(self._req_manpower_tbl.rowCount())
@@ -2513,12 +2823,12 @@ class CTRGeneratorWidget(QWidget):
                 days = float(_etxt(_EQ_DAYS) or 30)
             except ValueError:
                 days = 30.0
-            # Prefer the matched/corrected name over the raw requested
-            # description — the customer's request form sometimes has a
-            # placeholder like "NON-RECHARGEABLE" typed as the item name,
-            # which the match lookup already resolved to the real name.
+            # Always show the requested description as typed in the CTR
+            # Request, not the matched pricebook name — "Matched Item" is
+            # only an internal lookup key used to find the rate, and isn't
+            # client-facing text.
             equip_rows.append({
-                "description":  _etxt(_EQ_MDESC) or _etxt(_EQ_DESC),
+                "description":  _etxt(_EQ_DESC),
                 "quantity":     qty,
                 "unit":         _etxt(_EQ_UNIT) or "DAY",
                 "rate_per_day": rate,
@@ -2547,9 +2857,10 @@ class CTRGeneratorWidget(QWidget):
                 # Non-numeric — e.g. "NONRECHARG" — passed through as-is so
                 # build_usd can print it instead of a misleading 0.00.
                 price = price_txt
-            # Same reasoning as equipment above — prefer the matched name.
+            # Same reasoning as equipment above — always show the requested
+            # description, not the internal matched-item name.
             consump_rows.append({
-                "long_description":  _ctxt(_CS_MDESC) or _ctxt(_CS_DESC),
+                "long_description":  _ctxt(_CS_DESC),
                 "local_expect_cost": price,
                 "unit_code":         _ctxt(_CS_UNIT) or "EA",
                 "product":           _ctxt(_CS_CODE),

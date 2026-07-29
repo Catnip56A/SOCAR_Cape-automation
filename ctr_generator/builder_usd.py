@@ -87,6 +87,7 @@ from pathlib import Path
 import openpyxl
 from openpyxl.utils import column_index_from_string as _col_idx
 from openpyxl.utils import get_column_letter as _col_letter
+from openpyxl.worksheet.properties import PageSetupProperties
 
 from ctr_generator.config import CFG
 from ctr_generator.naming import ctr_output_filename
@@ -187,6 +188,19 @@ def _copy_row_format(ws, src_row: int, dst_row: int, col_count: int) -> None:
             dst.fill          = copy(src.fill)
             dst.number_format = src.number_format
             dst.alignment     = copy(src.alignment)
+
+
+def _fit_to_page_width(ws) -> None:
+    """See builder_azn._fit_to_page_width — same fix, forces one page wide
+    instead of relying on the template's fixed print scale, plus a small
+    side margin so the fitted content doesn't run edge-to-edge."""
+    ws.page_setup.fitToWidth = 1
+    ws.page_setup.fitToHeight = 0
+    if ws.sheet_properties.pageSetUpPr is None:
+        ws.sheet_properties.pageSetUpPr = PageSetupProperties()
+    ws.sheet_properties.pageSetUpPr.fitToPage = True
+    ws.page_margins.left = 0.3
+    ws.page_margins.right = 0.3
 
 
 def _parse_date(value):
@@ -297,7 +311,12 @@ def build_usd(
         if header.get("sub_client"):  ws_m[_usd["cell_sub_client"]] = header["sub_client"]
         if header.get("location"):    ws_m[_usd["cell_location"]]   = header["location"]
         if header.get("date"):        ws_m[_usd["cell_date"]]       = _parse_date(header["date"])
-        if header.get("contract_no"): ws_m[_usd["cell_contract_no"]] = header["contract_no"]
+        # Contract No is always written from the UI field, even blank —
+        # unlike the other header fields here, a stale contract number left
+        # over from the template file is actively wrong for this job rather
+        # than a harmless default, so a blank UI field must blank the cell
+        # instead of silently preserving whatever the template had.
+        ws_m[_usd["cell_contract_no"]] = header.get("contract_no", "")
         if header.get("revision") not in (None, ""):
             ws_m[_usd["cell_revision"]] = header["revision"]
         if header.get("scope"):       ws_m[_usd["cell_scope"]]      = header["scope"]
@@ -499,6 +518,9 @@ def build_usd(
 
     summary_grand_addr = _shift_cell(_usd["cell_summary_grand"], total_shift)
     ws_m[summary_grand_addr] = f"={summary_equip_addr}+{cons_total_addr}"
+
+    _fit_to_page_width(ws_m)
+    _fit_to_page_width(ws_p)
 
     try:
         wb.save(out_path)
