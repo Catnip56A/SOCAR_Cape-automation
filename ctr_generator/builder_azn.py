@@ -322,6 +322,15 @@ def build_azn(
             ws.cell(row=r, column=8).value = f"=G{r}"
             ws.cell(row=r, column=9).value = str(lr.get("nationality", "NAT"))
 
+        # Rows left blank because there were fewer items than the section's
+        # fixed capacity are hidden rather than deleted — deleting would
+        # desync the SUM formula's row references below, while hiding is
+        # purely cosmetic and both Excel and LibreOffice's PDF export skip
+        # hidden rows when printing, so the exported PDF shows only the
+        # rows that actually have data.
+        for row in range(start + len(rows), eff_end + 1):
+            ws.row_dimensions[row].hidden = True
+
         # The total always sits total_gap rows after the section's full
         # capacity block (eff_end), not after however many rows were
         # actually written — otherwise a request with fewer rows than the

@@ -370,6 +370,15 @@ def build_usd(
         _set_cell(ws_p, r, 9,  f"=G{r}")
         _set_cell(ws_p, r, 10, stock)
 
+    # Rows left blank because there were fewer items than the section's
+    # fixed capacity are hidden rather than deleted — deleting would desync
+    # the SUM formula's row references below, while hiding is purely
+    # cosmetic and both Excel and LibreOffice's PDF export skip hidden rows
+    # when printing, so the exported PDF shows only the rows that actually
+    # have data.
+    for row in range(_EQUIP_START + len(equip_rows), equip_eff_end + 1):
+        ws_p.row_dimensions[row].hidden = True
+
     # The total always sits immediately after the section's full capacity
     # block (equip_eff_end), not after however many rows were actually
     # written — otherwise a request with fewer rows than the template's
@@ -417,6 +426,10 @@ def build_usd(
         _set_cell(ws_p, r, 8,  f"=A{r}")
         _set_cell(ws_p, r, 9,  f"=F{r}")
         _set_cell(ws_p, r, 10, product)
+
+    # Same padding-hide as the equipment section above.
+    for row in range(cons_start + len(consump_rows), cons_eff_end + 1):
+        ws_p.row_dimensions[row].hidden = True
 
     # Same fixed-position rule as equip_total_row above.
     cons_total_row = cons_eff_end + 1
