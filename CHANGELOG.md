@@ -5,6 +5,13 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and version numbers come from the [VERSION](VERSION) file.
 
+## [1.0.8] - 2026-07-29
+### Fixed
+- Equipment/Consumables renames (both Match By aliases and Description renames) are now keyed by description **and** stock code together, not description alone — two items sharing the same name but different stock codes (e.g. two rate variants of the same-named item) previously shared one rename, so fixing one silently applied to the other too. A rename saved before this change still applies as a fallback if no stock-code-specific entry exists yet for that description.
+
+### Changed
+- The "Manage \_\_\_ Renames…" dialog now shows Stock Code in its own column instead of embedded in "Requested Name" (e.g. `paint inspection kit [EQ1500124000]` is now two cells: `paint inspection kit` and `EQ1500124000`) — display only, the underlying storage key is unchanged.
+
 ## [1.0.7] - 2026-07-29
 ### Added
 - Description renames: editing an already-matched row's Description in Manpower, Equipment, or Consumables now teaches a persistent rename, remembered separately from the existing Match By aliases and auto-applied the next time a CTR Request has the same original description (`ctr_generator/desc_renames.py`, its own `desc_renames.json`). The "Manage \_\_\_ Renames…" dialog now lists both kinds of learned rename together with a Type column ("Match By" / "Description"); Import/Export writes one combined JSON file (`{"match_by": ..., "description": ...}`), and still reads a file exported before this change as Match By renames only.

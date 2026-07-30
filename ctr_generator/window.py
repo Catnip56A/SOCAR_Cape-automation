@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from datetime import date as _date
 from pathlib import Path
 
@@ -694,6 +695,58 @@ def _btn_style(color: str = PRIMARY, light: str = MR_LIGHT) -> str:
 # Saved renames manager
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _stock_rename_key(desc: str, code: str) -> str:
+    """
+    Composite lookup/storage key for Equipment/Consumables renames (both
+    Match By aliases and Description renames) — the same description text
+    can legitimately belong to two different stock codes (e.g. two rate
+    variants of the same-named item), and a rename made for one must not
+    silently apply to the other. Falls back to description alone when
+    there's no stock code to disambiguate with, e.g. a manually typed row
+    that never had one. Manpower has no stock-code concept and isn't
+    affected — it keys on description alone, same as before.
+    """
+    desc = (desc or "").strip()
+    code = (code or "").strip()
+    return f"{desc} [{code}]" if code else desc
+
+
+_STOCK_KEY_RE = re.compile(r"^(.*) \[([^\[\]]*)\]$")
+
+
+def _split_stock_rename_key(key: str) -> tuple[str, str]:
+    """
+    Reverses _stock_rename_key for display purposes only (the Manage
+    Renames dialog's separate Stock Code column) — splits a stored
+    Equipment/Consumables rename key back into (description, stock code).
+    A key saved before the stock-code composite existed, or one that never
+    had a code to begin with, has no bracket suffix and splits to
+    (key, "").
+    """
+    m = _STOCK_KEY_RE.match(key)
+    return (m.group(1), m.group(2)) if m else (key, "")
+
+
+def _get_alias_by_stock(aliases: dict, category: str, desc: str, code: str) -> str | None:
+    """
+    get_alias() keyed by (description, stock code) — falls back to a bare
+    description-only lookup for renames saved before this composite key
+    existed, so those don't silently stop applying.
+    """
+    val = get_alias(aliases, category, _stock_rename_key(desc, code))
+    if val is None and code:
+        val = get_alias(aliases, category, desc)
+    return val
+
+
+def _get_desc_rename_by_stock(desc_renames: dict, category: str, desc: str, code: str) -> str | None:
+    """See _get_alias_by_stock — same idea, for desc_renames.py."""
+    val = get_desc_rename(desc_renames, category, _stock_rename_key(desc, code))
+    if val is None and code:
+        val = get_desc_rename(desc_renames, category, desc)
+    return val
+
+
 def _coerce_rename_dict(data: dict) -> dict:
     """
     Validates/normalizes an already JSON-parsed {category: {requested:
@@ -760,8 +813,9 @@ class AliasManagerDialog(QDialog):
             applied_lbl.setStyleSheet(f"color: {CTR_COLOR}; font-weight: bold; font-size: 11px;")
             layout.addWidget(applied_lbl)
 
-        self._tbl = QTableWidget(0, 4)
-        self._tbl.setHorizontalHeaderLabels(["Category", "Type", "Requested Name", "New Value"])
+        self._tbl = QTableWidget(0, 5)
+        self._tbl.setHorizontalHeaderLabels(
+            ["Category", "Type", "Requested Name", "Stock Code", "New Value"])
         self._tbl.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self._tbl.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self._tbl.verticalHeader().setVisible(False)
@@ -816,13 +870,28 @@ class AliasManagerDialog(QDialog):
         def _add_rows(store, type_label):
             for category in categories:
                 mapping = store.get(category, {})
-                for req_desc, renamed in sorted(mapping.items()):
+                for req_key, renamed in sorted(mapping.items()):
+                    # Equipment/Consumables keys are the composite
+                    # "description [stock code]" from _stock_rename_key —
+                    # split back apart so Stock Code gets its own column
+                    # instead of showing up embedded in Requested Name.
+                    # Manpower has no stock-code concept, so it's blank.
+                    if category == "manpower":
+                        desc, code = req_key, ""
+                    else:
+                        desc, code = _split_stock_rename_key(req_key)
                     r = self._tbl.rowCount()
                     self._tbl.insertRow(r)
                     self._tbl.setItem(r, 0, QTableWidgetItem(category.capitalize()))
                     self._tbl.setItem(r, 1, QTableWidgetItem(type_label))
-                    self._tbl.setItem(r, 2, QTableWidgetItem(req_desc))
-                    self._tbl.setItem(r, 3, QTableWidgetItem(renamed))
+                    desc_item = QTableWidgetItem(desc)
+                    # Stash the raw storage key (not just the split
+                    # description) so _delete_selected can delete the exact
+                    # entry without having to reconstruct it.
+                    desc_item.setData(Qt.UserRole, req_key)
+                    self._tbl.setItem(r, 2, desc_item)
+                    self._tbl.setItem(r, 3, QTableWidgetItem(code))
+                    self._tbl.setItem(r, 4, QTableWidgetItem(renamed))
 
         _add_rows(self._aliases, "Match By")
         _add_rows(self._desc_renames, "Description")
@@ -832,11 +901,11 @@ class AliasManagerDialog(QDialog):
         for r in rows:
             category = self._tbl.item(r, 0).text().lower()
             rtype    = self._tbl.item(r, 1).text()
-            req_desc = self._tbl.item(r, 2).text()
+            req_key  = self._tbl.item(r, 2).data(Qt.UserRole)
             if rtype == "Description":
-                delete_desc_rename(self._desc_renames, category, req_desc)
+                delete_desc_rename(self._desc_renames, category, req_key)
             else:
-                delete_alias(self._aliases, category, req_desc)
+                delete_alias(self._aliases, category, req_key)
         self._reload_table()
 
     def _export_aliases(self):
@@ -1878,30 +1947,36 @@ class CTRGeneratorWidget(QWidget):
         return applied
 
     def _apply_aliases_to_equip_rows(self) -> int:
-        """Same idea as _apply_aliases_to_manpower_rows, for Equipment."""
+        """Same idea as _apply_aliases_to_manpower_rows, for Equipment —
+        keyed by (Description, Stock Code), see _stock_rename_key."""
         applied = 0
         tbl = self._req_equip_tbl
         for r in range(tbl.rowCount()):
             desc_item  = tbl.item(r, _EQ_DESC)
+            code_item  = tbl.item(r, _EQ_CODE)
             match_item = tbl.item(r, _EQ_MATCH)
             if desc_item is None or match_item is None:
                 continue
-            alias = get_alias(self._aliases, "equipment", desc_item.text().strip())
+            code  = code_item.text().strip() if code_item else ""
+            alias = _get_alias_by_stock(self._aliases, "equipment", desc_item.text().strip(), code)
             if alias and match_item.text().strip() != alias:
                 match_item.setText(alias)
                 applied += 1
         return applied
 
     def _apply_aliases_to_cons_rows(self) -> int:
-        """Same idea as _apply_aliases_to_manpower_rows, for Consumables."""
+        """Same idea as _apply_aliases_to_manpower_rows, for Consumables —
+        keyed by (Description, Stock Code), see _stock_rename_key."""
         applied = 0
         tbl = self._req_cons_tbl
         for r in range(tbl.rowCount()):
             desc_item  = tbl.item(r, _CS_DESC)
+            code_item  = tbl.item(r, _CS_CODE)
             match_item = tbl.item(r, _CS_MATCH)
             if desc_item is None or match_item is None:
                 continue
-            alias = get_alias(self._aliases, "consumable", desc_item.text().strip())
+            code  = code_item.text().strip() if code_item else ""
+            alias = _get_alias_by_stock(self._aliases, "consumable", desc_item.text().strip(), code)
             if alias and match_item.text().strip() != alias:
                 match_item.setText(alias)
                 applied += 1
@@ -1934,30 +2009,36 @@ class CTRGeneratorWidget(QWidget):
         return applied
 
     def _apply_desc_renames_to_equip_rows(self) -> int:
-        """Same idea as _apply_desc_renames_to_manpower_rows, for Equipment."""
+        """Same idea as _apply_desc_renames_to_manpower_rows, for Equipment —
+        keyed by (original Description, Stock Code), see _stock_rename_key."""
         applied = 0
         tbl = self._req_equip_tbl
         for r in range(tbl.rowCount()):
             desc_item = tbl.item(r, _EQ_DESC)
+            code_item = tbl.item(r, _EQ_CODE)
             if desc_item is None:
                 continue
-            anchor = desc_item.data(_DESC_ANCHOR_ROLE) or desc_item.text().strip()
-            renamed = get_desc_rename(self._desc_renames, "equipment", anchor)
+            code    = code_item.text().strip() if code_item else ""
+            anchor  = desc_item.data(_DESC_ANCHOR_ROLE) or desc_item.text().strip()
+            renamed = _get_desc_rename_by_stock(self._desc_renames, "equipment", anchor, code)
             if renamed and desc_item.text().strip() != renamed:
                 desc_item.setText(renamed)
                 applied += 1
         return applied
 
     def _apply_desc_renames_to_cons_rows(self) -> int:
-        """Same idea as _apply_desc_renames_to_manpower_rows, for Consumables."""
+        """Same idea as _apply_desc_renames_to_manpower_rows, for Consumables —
+        keyed by (original Description, Stock Code), see _stock_rename_key."""
         applied = 0
         tbl = self._req_cons_tbl
         for r in range(tbl.rowCount()):
             desc_item = tbl.item(r, _CS_DESC)
+            code_item = tbl.item(r, _CS_CODE)
             if desc_item is None:
                 continue
-            anchor = desc_item.data(_DESC_ANCHOR_ROLE) or desc_item.text().strip()
-            renamed = get_desc_rename(self._desc_renames, "consumable", anchor)
+            code    = code_item.text().strip() if code_item else ""
+            anchor  = desc_item.data(_DESC_ANCHOR_ROLE) or desc_item.text().strip()
+            renamed = _get_desc_rename_by_stock(self._desc_renames, "consumable", anchor, code)
             if renamed and desc_item.text().strip() != renamed:
                 desc_item.setText(renamed)
                 applied += 1
@@ -2215,13 +2296,14 @@ class CTRGeneratorWidget(QWidget):
         tbl.insertRow(r)
 
         desc = request_item.get("description", "")
-        # Display text may differ from the raw requested description if the
-        # user previously taught a Description rename for it — matching
-        # (Match By alias, below) stays keyed on the raw text, since that's
-        # what will actually recur across future CTR Requests.
-        desc_display = get_desc_rename(self._desc_renames, "equipment", desc) or desc
         code = request_item.get("stock_code", "")
-        default_key = get_alias(self._aliases, "equipment", desc) or code or desc
+        # Display text may differ from the raw requested description if the
+        # user previously taught a Description rename for it — keyed by
+        # (description, stock code) since the same description can belong
+        # to different stock codes with different intended renames. Match
+        # By alias lookup below uses the same composite key.
+        desc_display = _get_desc_rename_by_stock(self._desc_renames, "equipment", desc, code) or desc
+        default_key = _get_alias_by_stock(self._aliases, "equipment", desc, code) or code or desc
         try:
             qty = float(request_item.get("quantity") or 1)
         except (TypeError, ValueError):
@@ -2288,7 +2370,8 @@ class CTRGeneratorWidget(QWidget):
             self._recalc_usd_totals()
 
     def _apply_desc_alias_equip(self, row: int):
-        """See _apply_desc_alias_manpower — same idea, keyed by Description."""
+        """See _apply_desc_alias_manpower — same idea, keyed by (Description,
+        Stock Code), see _stock_rename_key."""
         tbl = self._req_equip_tbl
         desc_item  = tbl.item(row, _EQ_DESC)
         code_item  = tbl.item(row, _EQ_CODE)
@@ -2297,7 +2380,7 @@ class CTRGeneratorWidget(QWidget):
             return
         desc  = desc_item.text().strip()
         code  = code_item.text().strip() if code_item else ""
-        alias = get_alias(self._aliases, "equipment", desc)
+        alias = _get_alias_by_stock(self._aliases, "equipment", desc, code)
         if alias:
             if match_item.text().strip() != alias:
                 match_item.setText(alias)
@@ -2306,9 +2389,11 @@ class CTRGeneratorWidget(QWidget):
             match_item.setText(code or desc)
 
     def _learn_desc_rename_equip(self, row: int):
-        """See _learn_desc_rename_manpower — same idea, for Equipment."""
+        """See _learn_desc_rename_manpower — same idea, for Equipment, keyed
+        by (original Description, Stock Code), see _stock_rename_key."""
         tbl = self._req_equip_tbl
         desc_item = tbl.item(row, _EQ_DESC)
+        code_item = tbl.item(row, _EQ_CODE)
         if desc_item is None:
             return
         current = desc_item.text().strip()
@@ -2318,8 +2403,9 @@ class CTRGeneratorWidget(QWidget):
                 desc_item.setData(_DESC_ANCHOR_ROLE, current)
             return
         anchor = str(anchor).strip()
+        code = code_item.text().strip() if code_item else ""
         if current and current.lower() != anchor.lower():
-            set_desc_rename(self._desc_renames, "equipment", anchor, current)
+            set_desc_rename(self._desc_renames, "equipment", _stock_rename_key(anchor, code), current)
 
     def _recalc_equip_row(self, row: int):
         tbl = self._req_equip_tbl
@@ -2410,7 +2496,7 @@ class CTRGeneratorWidget(QWidget):
         _highlight_row(tbl, row, matched_name is not None)
 
         if learn_alias and matched_name is not None and key and key.lower() != identity:
-            set_alias(self._aliases, "equipment", desc, key)
+            set_alias(self._aliases, "equipment", _stock_rename_key(desc, code), key)
 
     # -- consumables --
 
@@ -2420,13 +2506,14 @@ class CTRGeneratorWidget(QWidget):
         tbl.insertRow(r)
 
         desc = request_item.get("description", "")
-        # Display text may differ from the raw requested description if the
-        # user previously taught a Description rename for it — matching
-        # (Match By alias, below) stays keyed on the raw text, since that's
-        # what will actually recur across future CTR Requests.
-        desc_display = get_desc_rename(self._desc_renames, "consumable", desc) or desc
         code = request_item.get("stock_code", "")
-        default_key = get_alias(self._aliases, "consumable", desc) or code or desc
+        # Display text may differ from the raw requested description if the
+        # user previously taught a Description rename for it — keyed by
+        # (description, stock code) since the same description can belong
+        # to different stock codes with different intended renames. Match
+        # By alias lookup below uses the same composite key.
+        desc_display = _get_desc_rename_by_stock(self._desc_renames, "consumable", desc, code) or desc
+        default_key = _get_alias_by_stock(self._aliases, "consumable", desc, code) or code or desc
         try:
             qty = float(request_item.get("quantity") or 1)
         except (TypeError, ValueError):
@@ -2487,7 +2574,8 @@ class CTRGeneratorWidget(QWidget):
             self._recalc_usd_totals()
 
     def _apply_desc_alias_cons(self, row: int):
-        """See _apply_desc_alias_manpower — same idea, keyed by Description."""
+        """See _apply_desc_alias_manpower — same idea, keyed by (Description,
+        Stock Code), see _stock_rename_key."""
         tbl = self._req_cons_tbl
         desc_item  = tbl.item(row, _CS_DESC)
         code_item  = tbl.item(row, _CS_CODE)
@@ -2496,7 +2584,7 @@ class CTRGeneratorWidget(QWidget):
             return
         desc  = desc_item.text().strip()
         code  = code_item.text().strip() if code_item else ""
-        alias = get_alias(self._aliases, "consumable", desc)
+        alias = _get_alias_by_stock(self._aliases, "consumable", desc, code)
         if alias:
             if match_item.text().strip() != alias:
                 match_item.setText(alias)
@@ -2504,9 +2592,11 @@ class CTRGeneratorWidget(QWidget):
             match_item.setText(code or desc)
 
     def _learn_desc_rename_cons(self, row: int):
-        """See _learn_desc_rename_manpower — same idea, for Consumables."""
+        """See _learn_desc_rename_manpower — same idea, for Consumables,
+        keyed by (original Description, Stock Code), see _stock_rename_key."""
         tbl = self._req_cons_tbl
         desc_item = tbl.item(row, _CS_DESC)
+        code_item = tbl.item(row, _CS_CODE)
         if desc_item is None:
             return
         current = desc_item.text().strip()
@@ -2516,8 +2606,9 @@ class CTRGeneratorWidget(QWidget):
                 desc_item.setData(_DESC_ANCHOR_ROLE, current)
             return
         anchor = str(anchor).strip()
+        code = code_item.text().strip() if code_item else ""
         if current and current.lower() != anchor.lower():
-            set_desc_rename(self._desc_renames, "consumable", anchor, current)
+            set_desc_rename(self._desc_renames, "consumable", _stock_rename_key(anchor, code), current)
 
     def _recalc_cons_row(self, row: int):
         tbl = self._req_cons_tbl
@@ -2579,7 +2670,7 @@ class CTRGeneratorWidget(QWidget):
         _highlight_row(tbl, row, bool(match))
 
         if learn_alias and match and key and key.lower() != identity:
-            set_alias(self._aliases, "consumable", desc, key)
+            set_alias(self._aliases, "consumable", _stock_rename_key(desc, code), key)
 
     # ── Totals ────────────────────────────────────────────────────────────────
 
