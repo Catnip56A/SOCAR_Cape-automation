@@ -83,6 +83,30 @@ CTR_LIGHT = "#E0F2F1"
 
 _DEFAULT_MARKUP_PCT = CFG["usd_template"]["markup_rate"] * 100   # spinbox default, e.g. 6.5
 
+# What a preset stores, named as the fields are labelled in this UI. Built
+# from presets._PRESET_FIELDS rather than hardcoded, so adding a field to a
+# preset updates what the Presets label claims it saves instead of letting
+# the two drift apart. An unmapped key falls back to its raw name, which is
+# ugly enough to notice.
+_PRESET_FIELD_LABELS = {
+    "client":          "Client",
+    "sub_client":      "Sub-Client",
+    "location":        "Location",
+    "scope":           "Scope",
+    "revision":        "Revision",
+    "project_type":    "Project Type",
+    "job_ref":         "Job Ref",
+    "output_dir":      "Output folder",
+    "markup_rate_pct": "Markup Rate",
+}
+_PRESET_SAVES = ", ".join(_PRESET_FIELD_LABELS.get(f, f) for f in _PRESET_FIELDS)
+_PRESET_OMITS = (
+    "Date, Contract No (AZN/USD) and Comments are not saved — they belong to "
+    "one specific document, so loading a preset never overwrites them. Line "
+    "items (manpower, equipment, consumables, transport, scaffold) aren't "
+    "saved either."
+)
+
 # ── unified manpower table column indices ─────────────────────────────────────
 # One table does double duty: shows the CTR Request match AND is the direct
 # source for CTR generation — there is no separate "add to CTR" copy step.
@@ -141,6 +165,21 @@ _CONSUMABLES_HEADERS = [
     "Quantity", "Unit", "Unit Price USD", "Total USD", "Status",
 ]
 
+# ── transport table column indices (AZN "Third Party Activities") ────────────
+_TR_TYPE   = 0   # transport type exactly as the CTR Request asked for it
+_TR_DESC   = 1   # description written into the CTR — editable
+_TR_QTY    = 2
+_TR_DUR    = 3
+_TR_UOM    = 4   # what the duration counts: "Days", "Trips", …
+_TR_RATE   = 5
+_TR_MARKUP = 6   # per-line mark-up, shown as a percentage
+_TR_TOTAL  = 7   # read-only, computed
+
+_TRANSPORT_HEADERS = [
+    "Requested Type", "Description", "Quantity", "Duration", "Duration UOM",
+    "Rate AZN", "Mark Up %", "Total AZN",
+]
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Worker thread
@@ -161,6 +200,7 @@ class CTRWorker(QThread):
         usd_tpl:       str,
         output_dir:    str,
         job_ref:       str,
+        third_party_rows: list[dict] | None = None,
         header_azn:    dict | None = None,
         header_usd:    dict | None = None,
         markup_rate:   float | None = None,
@@ -171,6 +211,7 @@ class CTRWorker(QThread):
         self._other_rows    = other_rows
         self._equip_rows    = equip_rows
         self._consump_rows  = consump_rows
+        self._third_party_rows = list(third_party_rows or [])
         self._azn_tpl       = azn_tpl
         self._usd_tpl       = usd_tpl
         self._output_dir    = output_dir
@@ -181,9 +222,11 @@ class CTRWorker(QThread):
 
     def run(self):
         log.info(
-            "CTRWorker: job_ref=%s support=%d other=%d equip=%d consumables=%d output_dir=%s",
+            "CTRWorker: job_ref=%s support=%d other=%d equip=%d consumables=%d "
+            "third_party=%d output_dir=%s",
             self._job_ref, len(self._support_rows), len(self._other_rows),
-            len(self._equip_rows), len(self._consump_rows), self._output_dir,
+            len(self._equip_rows), len(self._consump_rows),
+            len(self._third_party_rows), self._output_dir,
         )
         try:
             out = Path(self._output_dir)
@@ -191,7 +234,7 @@ class CTRWorker(QThread):
             self.progress.emit("Writing AZN CTR spreadsheet…")
             azn_xlsx = build_azn(
                 self._support_rows, self._other_rows, self._azn_tpl, out, self._job_ref,
-                header=self._header_azn,
+                header=self._header_azn, third_party_rows=self._third_party_rows,
             )
             log.info("CTRWorker: AZN spreadsheet written: %s", azn_xlsx)
 
@@ -450,6 +493,65 @@ def _match_usd_equipment(df: pd.DataFrame, desc: str) -> tuple[str, float] | Non
             hits = nor
     row = hits.iloc[0]
     return str(row["supplier_desc"]), float(row["unit_price"])
+
+
+def _transport_lines(transport_type: str, quantity: str, duration: str) -> list[dict]:
+    """
+    Expand one requested transport line into the CTR lines that bill it.
+
+    The CTR Request only states the vehicle, how many, and for how long —
+    the rate, the mark-up, and what the duration counts ("6 Days" vs "2
+    Trips") are commercial figures, so they come from the transport_rates
+    table in template_config.json. One requested vehicle can bill as
+    several lines (a minibus charges vehicle+driver and its fuel
+    separately, only the former marked up). A type that isn't in the table
+    still produces one line — its requested wording, "_default"'s mark-up
+    and a 0.00 rate — so it shows up in the table to be priced by hand
+    instead of silently disappearing.
+    """
+    rates = CFG.get("transport_rates", {})
+    wanted = transport_type.strip().lower()
+    specs = next(
+        (v for k, v in rates.items() if not k.startswith("_") and k.strip().lower() == wanted),
+        rates.get("_default", [{}]),
+    )
+    return [
+        {
+            "transport_type": transport_type,
+            "description":    spec.get("description") or transport_type,
+            "quantity":       quantity,
+            "duration":       duration,
+            "uom":            spec.get("uom", "Days"),
+            "rate_azn":       spec.get("rate_azn", 0.0),
+            "markup":         spec.get("markup", 0.0),
+        }
+        for spec in specs
+    ]
+
+
+def _scaffold_request_item(scaffold: dict) -> dict:
+    """
+    A scaffold tonnage from the request's extras block, shaped like an
+    ordinary equipment request row — scaffold is equipment, and a
+    hand-priced scaffold CTR shows it as one more Plant & Equipment line:
+
+        Conventional Scaffold | 66.95867 | TON | rate/day | days
+
+    The block states three things and only three — the system's name, how
+    much of it, and that it's measured in tonnes — so that is all this
+    carries over. Rate and duration are left to the pricebook match and the
+    user, exactly as for any other equipment line whose rate the request
+    doesn't state; the row lands in the table as "✗ No match" until its
+    Match By is set, and that correction is then remembered like any other
+    rename.
+    """
+    return {
+        "stock_code":     "",
+        "description":    str(scaffold.get("system", "") or "").strip(),
+        "uom":            scaffold.get("uom") or CFG.get("scaffold", {}).get("default_uom", "TON"),
+        "quantity":       scaffold.get("tonnage", 0),
+        "rechargability": "",
+    }
 
 
 def _sage_non_recharge(sage_df: pd.DataFrame, key: str) -> bool | None:
@@ -996,6 +1098,9 @@ class CTRGeneratorWidget(QWidget):
         self._aliases:     dict = load_aliases()
         self._desc_renames: dict = load_desc_renames()
         self._presets:     dict = load_presets()
+        # Additional Information items the loaded CTR Request marked
+        # "Required" — appended to the AZN CTR's activities section header.
+        self._required_info: list[str] = []
 
         # Async file-loading state
         self._load_signals = _LoadSignals()
@@ -1031,6 +1136,7 @@ class CTRGeneratorWidget(QWidget):
         self._build_manpower_section(cl)
         self._build_equipment_section(cl)
         self._build_consumables_section(cl)
+        self._build_extras_section(cl)
 
         # ─── Section 3: Generate ─────────────────────────────────────────────
         self._build_generate_section(cl)
@@ -1428,6 +1534,133 @@ class CTRGeneratorWidget(QWidget):
 
         parent_layout.addWidget(grp)
 
+    # ── Section 2d: Additional Info / Transport / Scaffold ────────────────────
+
+    def _build_extras_section(self, parent_layout: QVBoxLayout):
+        grp = QGroupBox("Additional Info & Transport — AZN")
+        grp.setStyleSheet(_group_css(CTR_COLOR))
+        gl = QVBoxLayout(grp)
+        gl.setSpacing(4)
+
+        info = QLabel(
+            "Read from the CTR Request's \"Additional Information / Type of "
+            "Scaffold System / TRANSPORT\" block. Transport lines become the "
+            "AZN CTR's \"Third Party Activities\" section — the request only "
+            "says which vehicle, how many and for how long, so the rate, "
+            "mark-up and duration unit start from the transport rate table "
+            "in template_config.json and are editable here. A requested "
+            "scaffold tonnage is added to the Equipment table above instead, "
+            "as an ordinary USD Plant & Equipment line — name, quantity and "
+            "TON, with the rate and days set there like any other line."
+        )
+        info.setWordWrap(True)
+        info.setStyleSheet(f"color: {MUTED}; font-size: 11px;")
+        gl.addWidget(info)
+
+        self._required_info_lbl = QLabel("Additional Information required:  (none)")
+        self._required_info_lbl.setWordWrap(True)
+        self._required_info_lbl.setStyleSheet(f"color: {MUTED}; font-size: 11px;")
+        self._required_info_lbl.setToolTip(
+            "Items the CTR Request marked \"Required\". Appended to the AZN "
+            "CTR's Onshore/Offshore Activities section header."
+        )
+        gl.addWidget(self._required_info_lbl)
+
+        self._transport_tbl = _make_table(_TRANSPORT_HEADERS, stretch_col=_TR_DESC)
+        self._transport_tbl.setMinimumHeight(120)
+        self._transport_tbl.setMaximumHeight(220)
+        self._transport_tbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        self._transport_tbl.cellChanged.connect(self._on_transport_changed)
+        gl.addWidget(self._transport_tbl)
+
+        btn_row = QHBoxLayout()
+        add_btn = QPushButton("+ Add Row")
+        add_btn.setStyleSheet(_btn_style(MUTED, "#F5F5F5"))
+        add_btn.clicked.connect(self._add_transport_row)
+        del_btn = QPushButton("Remove Selected Row")
+        del_btn.setStyleSheet(_btn_style(MUTED, "#F5F5F5"))
+        del_btn.clicked.connect(self._del_transport_row)
+        btn_row.addWidget(add_btn)
+        btn_row.addWidget(del_btn)
+        btn_row.addStretch()
+        gl.addLayout(btn_row)
+
+        self._azn_third_party_lbl = QLabel("Total Third Party Activities:  ₼ 0.00")
+        self._azn_third_party_lbl.setStyleSheet(
+            f"color: {MUTED}; font-weight: bold; font-size: 12px;")
+        gl.addWidget(self._azn_third_party_lbl)
+
+        parent_layout.addWidget(grp)
+
+    def _transport_row_values(self, row: int) -> dict:
+        """One transport table row as the dict build_azn expects (mark-up as
+        a fraction, not the percentage the table shows)."""
+        def _txt(col: int) -> str:
+            item = self._transport_tbl.item(row, col)
+            return item.text().strip() if item else ""
+
+        def _num(col: int, default: float) -> float:
+            try:
+                return float(_txt(col) or default)
+            except ValueError:
+                return default
+
+        return {
+            "comment":     "",
+            "transport_type": _txt(_TR_TYPE),
+            "description": _txt(_TR_DESC) or _txt(_TR_TYPE),
+            "quantity":    _num(_TR_QTY, 1.0),
+            "duration":    _num(_TR_DUR, 1.0),
+            "uom":         _txt(_TR_UOM),
+            "rate_azn":    _num(_TR_RATE, 0.0),
+            "markup":      _num(_TR_MARKUP, 0.0) / 100.0,
+        }
+
+    def _append_transport_row(self, line: dict):
+        tbl = self._transport_tbl
+        r = tbl.rowCount()
+        tbl.blockSignals(True)
+        tbl.insertRow(r)
+        tbl.setItem(r, _TR_TYPE,   _ro_item(str(line.get("transport_type", ""))))
+        tbl.setItem(r, _TR_DESC,   QTableWidgetItem(str(line.get("description", ""))))
+        tbl.setItem(r, _TR_QTY,    QTableWidgetItem(str(line.get("quantity", "") or 1)))
+        tbl.setItem(r, _TR_DUR,    QTableWidgetItem(str(line.get("duration", "") or 1)))
+        tbl.setItem(r, _TR_UOM,    QTableWidgetItem(str(line.get("uom", "Days"))))
+        tbl.setItem(r, _TR_RATE,   QTableWidgetItem(f"{float(line.get('rate_azn', 0) or 0):.2f}"))
+        # Trailing zeros trimmed so a plain rate reads "6.5", not "6.50",
+        # while an odd one (6.25) keeps its precision.
+        _pct = float(line.get("markup", 0) or 0) * 100
+        tbl.setItem(r, _TR_MARKUP, QTableWidgetItem(f"{_pct:g}"))
+        tbl.setItem(r, _TR_TOTAL,  _ro_item("0.00"))
+        tbl.blockSignals(False)
+        self._recalc_transport_row(r)
+
+    def _add_transport_row(self):
+        self._append_transport_row({
+            "transport_type": "", "description": "", "quantity": 1, "duration": 1,
+            "uom": "Days", "rate_azn": 0.0, "markup": self._markup_rate(),
+        })
+        self._recalc_azn_totals()
+
+    def _del_transport_row(self):
+        rows = sorted({i.row() for i in self._transport_tbl.selectedItems()}, reverse=True)
+        for r in rows:
+            self._transport_tbl.removeRow(r)
+        self._recalc_azn_totals()
+
+    def _on_transport_changed(self, row: int, col: int):
+        if col == _TR_TOTAL:
+            return
+        self._recalc_transport_row(row)
+        self._recalc_azn_totals()
+
+    def _recalc_transport_row(self, row: int):
+        vals = self._transport_row_values(row)
+        total = vals["quantity"] * vals["rate_azn"] * vals["duration"] * (1 + vals["markup"])
+        self._transport_tbl.blockSignals(True)
+        self._transport_tbl.setItem(row, _TR_TOTAL, _ro_item(f"{total:.2f}"))
+        self._transport_tbl.blockSignals(False)
+
     # ── Section 3: Generate ──────────────────────────────────────────────────
 
     def _build_generate_section(self, parent_layout: QVBoxLayout):
@@ -1464,12 +1697,17 @@ class CTRGeneratorWidget(QWidget):
         row_cnu, self._contract_no_usd_edit = _hdr_row("Contract No (USD):")
         row_rv,  self._revision_edit        = _hdr_row("Revision:", "0")
         row_pt,  self._project_type_edit    = _hdr_row("Project Type:", "Offshore")
+        row_cm,  self._comments_edit        = _hdr_row("Comments:")
+        self._comments_edit.setToolTip(
+            "Free text from the CTR Request's own Comments box (O6). "
+            "Written to C1 of both the AZN and USD CTR."
+        )
         self._project_type_edit.setToolTip(
             "Onshore or Offshore — sets the AZN CTR's non-support manpower "
             "section header (\"Onshore Activities\" / \"Offshore Activities\")."
         )
 
-        for row in (row_c, row_sc, row_l, row_s, row_d, row_cna, row_cnu, row_rv, row_pt):
+        for row in (row_c, row_sc, row_l, row_s, row_d, row_cna, row_cnu, row_rv, row_pt, row_cm):
             gl.addLayout(row)
 
         gl.addSpacing(6)
@@ -1505,11 +1743,10 @@ class CTRGeneratorWidget(QWidget):
         gl.addLayout(markup_row)
 
         # ── Presets ────────────────────────────────────────────────────────────
-        preset_lbl = QLabel("Presets:")
-        pf = preset_lbl.font()
-        pf.setBold(True)
-        preset_lbl.setFont(pf)
+        preset_lbl = QLabel(f"<b>Presets:</b>  (saves {_PRESET_SAVES})")
+        preset_lbl.setWordWrap(True)
         preset_lbl.setStyleSheet(f"color: {MUTED}; font-size: 11px;")
+        preset_lbl.setToolTip(_PRESET_OMITS)
         gl.addWidget(preset_lbl)
 
         preset_row = QHBoxLayout()
@@ -1823,6 +2060,10 @@ class CTRGeneratorWidget(QWidget):
             self._scope_edit.setText(data["job_description"])
         if data.get("project_type"):
             self._project_type_edit.setText(data["project_type"])
+        # Written even when the request's Comments box is empty, so loading
+        # a second request clears the previous one's comments rather than
+        # carrying them into an unrelated CTR.
+        self._comments_edit.setText(data.get("comments", ""))
         commencement = data.get("commencement_date")
         if commencement:
             try:
@@ -1842,14 +2083,70 @@ class CTRGeneratorWidget(QWidget):
         for cs in data.get("consumable_rows", []):
             self._append_cons_row_from_request(cs)
 
+        # A requested scaffold tonnage is one more Plant & Equipment line.
+        # It carries no rate, so the pricebook lookup can't match it and it
+        # would be dropped from the output as an unmatched row — but the
+        # request did ask for scaffold, and the line has to appear whether
+        # or not anyone gets round to pricing it. Marked includable up
+        # front so it's written with its name, tonnage and TON; setting a
+        # rate later is what turns it into a non-zero cost.
+        scaffold = data.get("scaffold")
+        if scaffold:
+            self._append_equip_row_from_request(_scaffold_request_item(scaffold))
+            row = self._req_equip_tbl.rowCount() - 1
+            self._req_equip_tbl.blockSignals(True)
+            # Days is left empty rather than taking the usual 30-day default:
+            # the request block states no duration for scaffold, and a number
+            # nobody chose is worse than a blank cell asking to be filled in.
+            self._req_equip_tbl.setItem(row, _EQ_DAYS, QTableWidgetItem(""))
+            status = self._req_equip_tbl.item(row, _EQ_STATUS)
+            if status and not status.text().startswith("✓"):
+                self._req_equip_tbl.setItem(
+                    row, _EQ_STATUS, _ro_item("✓ Manual — set Rate/Day and Days to price it"))
+            self._req_equip_tbl.blockSignals(False)
+            _highlight_row(self._req_equip_tbl, row, True)
+            self._recalc_equip_row(row)
+
+        self._transport_tbl.setRowCount(0)
+        for tr in data.get("transport_rows", []):
+            for line in _transport_lines(
+                tr.get("transport_type", ""), tr.get("quantity", ""), tr.get("duration", "")
+            ):
+                self._append_transport_row(line)
+
+        self._required_info = [
+            item["label"] for item in data.get("additional_info", []) if item.get("required")
+        ]
+        self._required_info_lbl.setText(
+            "Additional Information required:  "
+            + (", ".join(self._required_info) if self._required_info else "(none)")
+        )
+
         self._recalc_azn_totals()
         self._recalc_usd_totals()
 
         n_mp = len(data.get("manpower_rows", []))
         n_eq = len(data.get("equipment_rows", []))
         n_cs = len(data.get("consumable_rows", []))
-        log.info("CTR Request loaded: manpower=%d equipment=%d consumable=%d",
-                 n_mp, n_eq, n_cs)
+        n_tr = self._transport_tbl.rowCount()
+        log.info(
+            "CTR Request loaded: manpower=%d equipment=%d consumable=%d "
+            "transport=%d scaffold=%s required_info=%s",
+            n_mp, n_eq, n_cs, n_tr, bool(scaffold), self._required_info,
+        )
+        extras = []
+        if scaffold:
+            extras.append(
+                f"scaffold ({scaffold.get('tonnage')} {scaffold.get('uom')}) added to "
+                f"the Equipment table — set its Match By and Days to price it"
+            )
+        if n_tr:
+            extras.append(f"{n_tr} transport line(s) — check their rates")
+        if self._required_info:
+            extras.append(
+                f"\"{', '.join(self._required_info)}\" marked Required, appended "
+                f"to the AZN activities header"
+            )
         self._ctr_req_status.setText(
             f"Loaded {n_mp} manpower, {n_eq} equipment, {n_cs} consumable "
             f"request(s) into the tables below. Exact matches on stock code "
@@ -1858,6 +2155,7 @@ class CTRGeneratorWidget(QWidget):
             f"\"✗ No match\", or load the Pricebook-Based files and click "
             f"\"Re-match All\". CTR Header Info fields in the Generate "
             f"section are pre-filled."
+            + (("  Also read: " + "; ".join(extras) + ".") if extras else "")
         )
 
     def _on_ctr_error(self, msg: str) -> None:
@@ -2693,10 +2991,21 @@ class CTRGeneratorWidget(QWidget):
             else:
                 other_total += total
 
+        third_party_total = 0.0
+        for r in range(self._transport_tbl.rowCount()):
+            total_item = self._transport_tbl.item(r, _TR_TOTAL)
+            try:
+                third_party_total += float(total_item.text()) if total_item else 0.0
+            except ValueError:
+                pass
+
         other_label = activities_label(self._project_type_edit.text())
         self._azn_onshore_lbl.setText(f"Project Support:  ₼ {support_total:,.2f}")
         self._azn_offshore_lbl.setText(f"Total {other_label}:  ₼ {other_total:,.2f}")
-        self._azn_total_lbl.setText(f"AZN CTR Total:  ₼ {support_total + other_total:,.2f}")
+        self._azn_third_party_lbl.setText(
+            f"Total Third Party Activities:  ₼ {third_party_total:,.2f}")
+        self._azn_total_lbl.setText(
+            f"AZN CTR Total:  ₼ {support_total + other_total + third_party_total:,.2f}")
 
     def _recalc_usd_totals(self):
         equip_total = 0.0
@@ -2835,6 +3144,19 @@ class CTRGeneratorWidget(QWidget):
                 "All manpower rows are unmatched (✗). The AZN CTR will have no labor rows."
             )
 
+        unpriced = [
+            (self._transport_tbl.item(r, _TR_DESC).text().strip()
+             if self._transport_tbl.item(r, _TR_DESC) else f"row {r + 1}")
+            for r in range(self._transport_tbl.rowCount())
+            if (self._transport_tbl.item(r, _TR_RATE) or _ro_item("0")).text().strip()
+            in ("", "0", "0.0", "0.00")
+        ]
+        if unpriced:
+            warnings.append(
+                "Transport line(s) with no rate: " + ", ".join(unpriced)
+                + ". They'll appear in Third Party Activities at 0.00."
+            )
+
         if errors:
             log.warning("Generate blocked: %s", "; ".join(errors))
             QMessageBox.warning(self, "Cannot generate", "\n".join(errors))
@@ -2910,10 +3232,20 @@ class CTRGeneratorWidget(QWidget):
                 # Non-numeric — e.g. "NONRECHARG" — passed through as-is so
                 # build_usd can print it instead of a misleading 0.00.
                 rate = rate_txt
-            try:
-                days = float(_etxt(_EQ_DAYS) or 30)
-            except ValueError:
-                days = 30.0
+            # An empty Days cell is passed through empty rather than
+            # defaulting to 30 — a scaffold line arrives with no duration
+            # stated (and the user may clear any row's Days for the same
+            # reason), and inventing one there would put a number nobody
+            # chose into a priced document. A non-numeric value still
+            # falls back to 30, as before.
+            days_txt = _etxt(_EQ_DAYS)
+            if not days_txt:
+                days = ""
+            else:
+                try:
+                    days = float(days_txt)
+                except ValueError:
+                    days = 30.0
             # Always show the requested description as typed in the CTR
             # Request, not the matched pricebook name — "Matched Item" is
             # only an internal lookup key used to find the rate, and isn't
@@ -2958,6 +3290,14 @@ class CTRGeneratorWidget(QWidget):
                 "quantity":          qty,
             })
 
+        # Transport / hired services — the AZN CTR's "Third Party Activities"
+        # section. Unlike the tables above there's nothing to match against a
+        # pricebook here, so every row is included; a row still priced at 0
+        # is flagged as a warning before generating rather than skipped.
+        third_party_rows = [
+            self._transport_row_values(r) for r in range(self._transport_tbl.rowCount())
+        ]
+
         total_skipped = mp_skipped + eq_skipped + cs_skipped
         if total_skipped:
             log.info(
@@ -2973,11 +3313,13 @@ class CTRGeneratorWidget(QWidget):
             "scope":      self._scope_edit.text().strip(),
             "date":       self._date_edit.text().strip(),
             "revision":   self._revision_edit.text().strip(),
+            "comments":   self._comments_edit.text().strip(),
         }
         header_azn = {
             **_base,
-            "contract_no":  self._contract_no_azn_edit.text().strip(),
-            "project_type": self._project_type_edit.text().strip(),
+            "contract_no":   self._contract_no_azn_edit.text().strip(),
+            "project_type":  self._project_type_edit.text().strip(),
+            "required_info": list(self._required_info),
         }
         header_usd = {**_base, "contract_no": self._contract_no_usd_edit.text().strip()}
 
@@ -2992,6 +3334,7 @@ class CTRGeneratorWidget(QWidget):
             other_rows    = other_rows,
             equip_rows    = equip_rows,
             consump_rows  = consump_rows,
+            third_party_rows = third_party_rows,
             azn_tpl       = azn_tpl,
             usd_tpl       = usd_tpl,
             output_dir    = output_dir,

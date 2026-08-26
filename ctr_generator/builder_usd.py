@@ -47,6 +47,9 @@ Default layout (217_USD template):
     lives solely on the Pricing sheet — see below.
 
   Sheet "Pricing":
+    Rows 3–6     : header block (client, ref, location, date, revision,
+      scope) — each cell a formula mirroring its Main-sheet equivalent, so
+      the two pages of one CTR always agree; see _mirror_pricing_header.
     Row 10       : equipment header
     Rows 11–210  : equipment data
       A=item#, B=desc, C=qty, D=unit, E=rate_per_day, F=days, G=total, H=counter, I=SC cost, J=stock_code
@@ -65,7 +68,8 @@ Default layout (217_USD template):
 
   Editable header fields (rows 3–6, shared layout with AZN template):
     B3 = Client, C3 = Sub-Client, B4 = Location, E4 = Date,
-    G4 = Contract No, E5 = Revision, A6 = Scope / description (merged A6:G6)
+    G4 = Contract No, E5 = Revision, A6 = Scope / description (merged A6:G6),
+    C1 = Comments, carried over from the CTR Request's own Comments box
 
 Input values (description, quantity, rate, price, etc.) are written as
 plain Python values. Anything derived from another cell — row totals,
@@ -85,6 +89,8 @@ from datetime import datetime
 from pathlib import Path
 
 import openpyxl
+from openpyxl.cell.cell import MergedCell
+from openpyxl.styles import Alignment
 from openpyxl.utils import column_index_from_string as _col_idx
 from openpyxl.utils import get_column_letter as _col_letter
 from openpyxl.worksheet.properties import PageSetupProperties
@@ -125,6 +131,34 @@ def _shift_cell(addr: str, row_shift: int) -> str:
     """Return addr with its row number increased by row_shift."""
     row, col = _cell_row_col(addr)
     return f"{_col_letter(col)}{row + row_shift}"
+
+
+def _anchor_cell(ws, row: int, col: int):
+    """
+    The cell that actually stores what's displayed at (row, col).
+
+    openpyxl represents every cell of a merged range except its top-left as
+    a read-only MergedCell — assigning to one raises "'MergedCell' object
+    attribute 'value' is read-only". Templates are re-merged by hand
+    between revisions, so any cell this module addresses by fixed position
+    can quietly end up inside somebody else's merge. Returns the range's
+    anchor in that case (which is where the value visibly lands anyway), or
+    None if the merge can't be resolved.
+    """
+    cell = ws.cell(row=row, column=col)
+    if not isinstance(cell, MergedCell):
+        return cell
+    for rng in ws.merged_cells.ranges:
+        if rng.min_row <= row <= rng.max_row and rng.min_col <= col <= rng.max_col:
+            return ws.cell(row=rng.min_row, column=rng.min_col)
+    return None
+
+
+def _write_addr(ws, addr: str, value) -> None:
+    """Write `value` at `addr`, following a merge to the cell that holds it."""
+    cell = _anchor_cell(ws, *_cell_row_col(addr))
+    if cell is not None:
+        cell.value = value
 
 
 def _insert_rows_preserving_merges(ws, insert_row: int, amount: int) -> None:
@@ -190,6 +224,69 @@ def _copy_row_format(ws, src_row: int, dst_row: int, col_count: int) -> None:
             dst.alignment     = copy(src.alignment)
 
 
+def _clear_placeholder_cells(ws, texts) -> int:
+    """
+    Blank every cell whose entire value is one of `texts`.
+
+    The templates carry filler strings in their helper cells — "AA" all the
+    way down the column-H mirror on the Main sheets, "aa" beside the
+    Pricing sheet's margin block. They mean nothing; they normally go
+    unnoticed because column H is hidden and those Pricing rows fall
+    outside the print area, so they reappear as soon as a template is saved
+    with the column shown. Since a generated CTR goes to a client, they're
+    stripped rather than passed on.
+
+    Matching is on the whole trimmed value, so the genuine content sharing
+    those columns — the "=A10"/"=IF(B8=...)" mirror formulas, the real
+    labels — is never touched. Returns how many cells were cleared.
+    """
+    wanted = {str(t).strip() for t in (texts or []) if str(t).strip()}
+    if not wanted:
+        return 0
+    cleared = 0
+    for row in ws.iter_rows():
+        for cell in row:
+            if isinstance(cell.value, str) and cell.value.strip() in wanted:
+                cell.value = None
+                cleared += 1
+    return cleared
+
+
+def _extend_print_area(ws, extra_rows: int) -> None:
+    """
+    Push the sheet's print area down by `extra_rows`.
+
+    The print area is a fixed range saved in the template ("$A$1:$G$77")
+    and openpyxl does not move it when rows are inserted — so every row a
+    generated CTR adds pushes that much of the document out the bottom of
+    what actually prints. It is silent in Excel and only shows up in the
+    PDF, where the tail of the document (the Estimated CTR Total line and
+    the signature block) simply isn't there.
+
+    Left alone if the sheet has no print area, or has a multi-range one
+    this can't safely reason about — better to print the template's range
+    than to guess wrong about a layout that isn't the one this understands.
+    """
+    area = ws.print_area
+    if not area or extra_rows <= 0:
+        return
+    if isinstance(area, (list, tuple)):
+        if len(area) != 1:
+            return
+        area = area[0]
+    if "," in area or ":" not in area:
+        return
+
+    start, end = area.rsplit(":", 1)
+    digits, cut = "", len(end)
+    while cut > 0 and end[cut - 1].isdigit():
+        cut -= 1
+        digits = end[cut] + digits
+    if not digits:
+        return
+    ws.print_area = f"{start}:{end[:cut]}{int(digits) + extra_rows}"
+
+
 def _fit_to_page_width(ws) -> None:
     """See builder_azn._fit_to_page_width — same fix, forces one page wide
     instead of relying on the template's fixed print scale, plus a small
@@ -215,13 +312,14 @@ def _parse_date(value):
 
 
 def _set_cell(ws, row: int, col: int, value) -> None:
-    """Write value to a cell, skipping non-top-left merged-cell slots."""
+    """Write value at (row, col), skipping non-top-left merged-cell slots.
+
+    Used for the bulk section writes, where the anchor of any merge inside
+    the block is visited by the loop in its own right — so skipping is both
+    safe and avoids clearing a merge that reaches outside the block."""
     cell = ws.cell(row=row, column=col)
-    try:
+    if not isinstance(cell, MergedCell):
         cell.value = value
-    except AttributeError:
-        # MergedCell — only the top-left corner is writable; skip others
-        pass
 
 
 def _safe_float(v, default: float = 0.0) -> float:
@@ -230,6 +328,99 @@ def _safe_float(v, default: float = 0.0) -> float:
         return f if f == f else default   # NaN guard
     except (TypeError, ValueError):
         return default
+
+
+# Row-height estimate for wrapped comment text. Deliberately rough and
+# deliberately pessimistic: a column's width is expressed in characters of
+# the workbook's *default* font, so measuring a smaller cell font against it
+# under-counts how many characters fit on a line, over-counts the lines, and
+# leaves the row slightly taller than strictly needed. A little too tall
+# wastes a few points of page; too short silently cuts the comment off.
+_DEFAULT_ROW_HEIGHT     = 15.0
+_DEFAULT_FONT_SIZE      = 11.0
+_LINE_HEIGHT_FACTOR     = 1.35    # point size -> line box height
+_MAX_COMMENT_ROW_HEIGHT = 200.0
+
+
+def _wrapped_row_height(text: str, col_width, font_size, base_height: float) -> float:
+    """Height in points for `text` wrapped inside a column `col_width` wide."""
+    chars_per_line = max(10, int(col_width or _DEFAULT_ROW_HEIGHT))
+    lines = sum(
+        max(1, -(-len(para) // chars_per_line))          # ceil division
+        for para in str(text).split("\n")
+    )
+    needed = max(1, lines) * (font_size or _DEFAULT_FONT_SIZE) * _LINE_HEIGHT_FACTOR + 4
+    return max(base_height, min(needed, _MAX_COMMENT_ROW_HEIGHT))
+
+
+def _write_comments(ws, addr: str, text: str) -> None:
+    """
+    Write the CTR Request's comments into `addr`, forcing the cell to read
+    horizontally and wrap.
+
+    Both templates style that cell with textRotation=90 and no wrap — it
+    sits in the tall banner row beside the standing PO note, where it was
+    only ever meant to hold a short sideways tag. Left as-is, a real
+    sentence of comments comes out running vertically down the page and
+    clipped at the column edge. The row is also grown, if needed,
+    to fit however many lines the wrapped text takes — never shrunk, so the
+    PO note sharing row 1 keeps its space, and never touched at all when
+    there are no comments.
+    """
+    # The comments cell is addressed by fixed position too, so follow a
+    # merge to whatever cell actually holds it (see _anchor_cell).
+    cell = _anchor_cell(ws, *_cell_row_col(addr))
+    if cell is None:
+        return
+    cell.value = text
+    cell.alignment = Alignment(
+        horizontal="left", vertical="center", wrap_text=True, textRotation=0)
+    if not text:
+        return
+
+    # Give the row an explicit height tall enough for the wrapped text,
+    # never shorter than whatever the template set (row 1 also carries the
+    # PO note, which needs its own space). Clearing the height so the row
+    # auto-fits instead does NOT work here: Excel would auto-fit on open,
+    # but LibreOffice — which renders the PDF export — just draws the row at
+    # its default height, and the whole banner row came out as a sliver.
+    row = cell.row
+    col = cell.column_letter
+    base  = ws.row_dimensions[row].height or _DEFAULT_ROW_HEIGHT
+    width = ws.column_dimensions[col].width if col in ws.column_dimensions else None
+    ws.row_dimensions[row].height = _wrapped_row_height(
+        text, width, cell.font.size, base)
+
+
+def _mirror_pricing_header(ws_p, main_sheet: str) -> None:
+    """
+    Point the Pricing sheet's header block at the Main sheet's, by formula.
+
+    Pricing repeats the CTR's identity — client, ref, location, date,
+    revision, scope — at the top of its own page. Nothing used to write it,
+    so those cells kept whatever the template file happened to hold; on a
+    template saved from a previous CTR (which is how these templates are
+    made in practice) page 2 of every generated document carried the
+    *previous* job's CTR number, client and site while page 1 showed the
+    right ones.
+
+    Mirroring by formula rather than copying the values means the two pages
+    of one CTR can't drift apart, and that editing a header field on Main
+    in Excel updates Pricing with it — the same convention the rest of this
+    module follows for anything derived from another cell. Each is guarded
+    so an empty source cell shows as empty instead of Excel's bare 0.
+    """
+    def _mirror(pricing_key: str, main_key: str) -> None:
+        src = f"'{main_sheet}'!{_usd[main_key]}"
+        _write_addr(ws_p, _usd[pricing_key], f'=IF({src}="","",{src})')
+
+    _mirror("pricing_cell_client",     "cell_client")
+    _mirror("pricing_cell_sub_client", "cell_sub_client")
+    _mirror("pricing_cell_ctr_ref",    "cell_ctr_ref")
+    _mirror("pricing_cell_location",   "cell_location")
+    _mirror("pricing_cell_date",       "cell_date")
+    _mirror("pricing_cell_revision",   "cell_revision")
+    _mirror("pricing_cell_scope",      "cell_scope")
 
 
 def build_usd(
@@ -244,7 +435,8 @@ def build_usd(
     """
     equip_rows: list of dicts with keys:
         description (str), quantity (float), unit (str),
-        rate_per_day (float or 'NONRECHARG'), days (float),
+        rate_per_day (float or 'NONRECHARG'), days (float, or "" to leave
+        the cell blank for a line whose duration isn't known yet),
         stock_code (str)
 
     consump_rows: list of dicts with keys:
@@ -252,9 +444,10 @@ def build_usd(
         unit_code (str), product (str)
 
     header: optional dict with keys client, sub_client, location, scope,
-        date, contract_no, revision. Only non-empty values overwrite the
-        corresponding template cell — leaving a field blank preserves
-        whatever the template already has. location and scope are also
+        date, contract_no, revision, comments. Only non-empty values
+        overwrite the corresponding template cell — leaving a field blank
+        preserves whatever the template already has, except contract_no
+        and comments which are always written. location and scope are also
         used to build the output filename (see ctr_generator.naming).
 
     markup_rate: consumables markup as a fraction (e.g. 0.065 for 6.5%).
@@ -303,23 +496,32 @@ def build_usd(
         raise ValueError(f"Could not read USD Template {template_path}: {e}") from e
 
     # ── Main sheet: header ────────────────────────────────────────────────────
-    ws_m[_usd["cell_ctr_ref"]] = f"CTR-26-{job_ref} USD"
-    ws_m[_usd["cell_job_ref"]] = int(job_ref)
+    _write_addr(ws_m, _usd["cell_ctr_ref"], f"CTR-26-{job_ref} USD")
+    _write_addr(ws_m, _usd["cell_job_ref"], int(job_ref))
 
     if header:
-        if header.get("client"):      ws_m[_usd["cell_client"]]     = header["client"]
-        if header.get("sub_client"):  ws_m[_usd["cell_sub_client"]] = header["sub_client"]
-        if header.get("location"):    ws_m[_usd["cell_location"]]   = header["location"]
-        if header.get("date"):        ws_m[_usd["cell_date"]]       = _parse_date(header["date"])
-        # Contract No is always written from the UI field, even blank —
-        # unlike the other header fields here, a stale contract number left
-        # over from the template file is actively wrong for this job rather
-        # than a harmless default, so a blank UI field must blank the cell
-        # instead of silently preserving whatever the template had.
-        ws_m[_usd["cell_contract_no"]] = header.get("contract_no", "")
+        if header.get("client"):
+            _write_addr(ws_m, _usd["cell_client"], header["client"])
+        if header.get("sub_client"):
+            _write_addr(ws_m, _usd["cell_sub_client"], header["sub_client"])
+        if header.get("location"):
+            _write_addr(ws_m, _usd["cell_location"], header["location"])
+        if header.get("date"):
+            _write_addr(ws_m, _usd["cell_date"], _parse_date(header["date"]))
+        # Contract No and Comments are always written from the UI field,
+        # even blank — unlike the other header fields here, a stale value
+        # left over from the template file is actively wrong for this job
+        # rather than a harmless default, so a blank UI field must blank
+        # the cell instead of silently preserving whatever the template had.
+        _write_addr(ws_m, _usd["cell_contract_no"], header.get("contract_no", ""))
+        _write_comments(ws_m, _usd["cell_comments"], header.get("comments", ""))
         if header.get("revision") not in (None, ""):
-            ws_m[_usd["cell_revision"]] = header["revision"]
-        if header.get("scope"):       ws_m[_usd["cell_scope"]]      = header["scope"]
+            _write_addr(ws_m, _usd["cell_revision"], header["revision"])
+        if header.get("scope"):
+            _write_addr(ws_m, _usd["cell_scope"], header["scope"])
+
+    # ── Pricing sheet: header block, mirrored from Main ───────────────────────
+    _mirror_pricing_header(ws_p, main_sheet)
 
     _COLS = 10   # columns A–J used by data rows
 
@@ -362,7 +564,12 @@ def build_usd(
         qty       = _safe_float(er.get("quantity", 1), 1.0)
         unit      = str(er.get("unit", "DAY"))
         rate_raw  = er.get("rate_per_day", 0)
-        days      = _safe_float(er.get("days", 30), 30.0)
+        # A blank duration is written as a blank cell, not as a default —
+        # see the Days handling in window._generate. Excel reads the empty
+        # cell as 0 in this row's total formula, so the line still shows
+        # its description, quantity and unit while totalling 0.00.
+        days_raw  = er.get("days", 30)
+        days      = "" if days_raw in (None, "") else _safe_float(days_raw, 30.0)
         stock     = str(er.get("stock_code", ""))
 
         # A non-rechargeable item carries the "NONRECHARG" sentinel instead of
@@ -382,7 +589,7 @@ def build_usd(
         _set_cell(ws_p, r, 3,  qty)
         _set_cell(ws_p, r, 4,  unit)
         _set_cell(ws_p, r, 5,  rate)
-        _set_cell(ws_p, r, 6,  days)
+        _set_cell(ws_p, r, 6,  days if days != "" else None)
         # Guarded so a "NONRECHARG" rate totals 0 instead of erroring (#VALUE!).
         _set_cell(ws_p, r, 7,  f"=IF(ISNUMBER(E{r}),C{r}*E{r}*F{r},0)")
         _set_cell(ws_p, r, 8,  f"=A{r}")
@@ -395,6 +602,15 @@ def build_usd(
     # cosmetic and both Excel and LibreOffice's PDF export skip hidden rows
     # when printing, so the exported PDF shows only the rows that actually
     # have data.
+    #
+    # Only the unused rows are contracted, and a row that does have data is
+    # explicitly expanded — a template is made by saving a previous CTR, so
+    # it arrives with that job's unused rows already hidden, and without
+    # this a row written into one of them would be filled in correctly but
+    # stay invisible in both Excel and the PDF. A section that uses its
+    # whole capacity has nothing to contract and neither loop does anything.
+    for row in range(_EQUIP_START, _EQUIP_START + len(equip_rows)):
+        ws_p.row_dimensions[row].hidden = False
     for row in range(_EQUIP_START + len(equip_rows), equip_eff_end + 1):
         ws_p.row_dimensions[row].hidden = True
 
@@ -446,7 +662,9 @@ def build_usd(
         _set_cell(ws_p, r, 9,  f"=F{r}")
         _set_cell(ws_p, r, 10, product)
 
-    # Same padding-hide as the equipment section above.
+    # Same expand-used / contract-unused pass as the equipment section above.
+    for row in range(cons_start, cons_start + len(consump_rows)):
+        ws_p.row_dimensions[row].hidden = False
     for row in range(cons_start + len(consump_rows), cons_eff_end + 1):
         ws_p.row_dimensions[row].hidden = True
 
@@ -455,6 +673,17 @@ def build_usd(
     cons_total_col_letter = _col_letter(_CONS_TOTAL_COL)
     _set_cell(ws_p, cons_total_row, _CONS_TOTAL_COL,
               f"=SUM({cons_total_col_letter}{cons_start}:{cons_total_col_letter}{cons_eff_end})")
+
+    # The sheet's own furniture is never spare capacity, so it is never
+    # contracted: the two section totals, and everything sitting between
+    # the equipment block and the consumables block — the spacer rows, the
+    # "Consumables & Materials" heading and its column headers. The
+    # template arrives with that heading row hidden (a previous CTR was
+    # saved that way), which prints a consumables table with no title above
+    # it while every row around it shows.
+    for row in range(equip_total_row, cons_start):
+        ws_p.row_dimensions[row].hidden = False
+    ws_p.row_dimensions[cons_total_row].hidden = False
 
     # ── Main sheet: item lists (optional, usd_template.list_items_on_main).
     #    When enabled, one row per item (name/cost) is written per section,
@@ -518,6 +747,30 @@ def build_usd(
 
     summary_grand_addr = _shift_cell(_usd["cell_summary_grand"], total_shift)
     ws_m[summary_grand_addr] = f"={summary_equip_addr}+{cons_total_addr}"
+
+    # Every row inserted above moved each sheet's tail down by that much;
+    # the print area has to follow or the bottom of the CTR silently stops
+    # appearing in the PDF. Main grows only by the optional item lists
+    # (list_items_on_main); Pricing grows by whatever the equipment and
+    # consumables blocks needed beyond the template's capacity.
+    _extend_print_area(ws_m, total_shift)
+    _extend_print_area(ws_p, equip_extra + cons_extra)
+
+    # The Main sheet's labor and third-party blocks are never written by a
+    # USD CTR — labor and transport are priced on the AZN document — so any
+    # row of them that is genuinely blank across the printed columns is
+    # contracted, the same rule the data blocks follow. A row that does hold
+    # something is left alone rather than guessed at.
+    _printed_cols = _usd.get("main_printed_cols", 7)
+    for _first, _last in _usd.get("main_unused_blocks", []):
+        for row in range(_first, _last + 1):
+            if all(ws_m.cell(row=row, column=c).value in (None, "")
+                   for c in range(1, _printed_cols + 1)):
+                ws_m.row_dimensions[row].hidden = True
+
+    _placeholders = _usd.get("placeholder_texts", [])
+    _clear_placeholder_cells(ws_m, _placeholders)
+    _clear_placeholder_cells(ws_p, _placeholders)
 
     _fit_to_page_width(ws_m)
     _fit_to_page_width(ws_p)

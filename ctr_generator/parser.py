@@ -50,12 +50,21 @@ CTR Request layout (verified from 102290776 sample):
     C7  = Surveyor                 J7  = Project Type (Offshore/Onshore)
     C8  = Asset / Site             J8  = Estimated Project Commencement Date
     C9  = Job Description (Scope)
+    O6  = Comments (free text, merged O6:Q8)
     Row 12 = column headers for the combined line-item table.
     Rows 13+ = data rows, three independent blocks side by side:
       cols 1–7   Manpower      (№, Manpower, Quantity, Normal Working Days, Shift, Weekend, Shift)
       cols 8–12  Plant & Equipment (Stock Code, Name, UOM, Quantity, Duration Days)
       cols 13–16 Consumables   (Stock Code, Name, UOM, Quantity)
     Empty cells are stored as the literal string '-'.
+
+  Beside the line-item table (v1.0.9 form: columns U:AA; older forms:
+  below it) sits an extras block — "Additional Information" (Floatel /
+  Flight tickets / Accommodation / Per Diem / Meal / Training, each
+  "Required" or "Not Required"), "Type of Scaffold System" (a scaffold
+  system and its tonnage), and "TRANSPORT" (type / quantity / duration
+  per vehicle). It is read by _parse_request_extras, which locates each
+  part by its own label text rather than by fixed cell — see there.
 
 Every entry point below wraps file/sheet access so a missing sheet, locked
 file, or corrupt workbook surfaces as one actionable sentence instead of a
@@ -77,6 +86,8 @@ _usd_pb = CFG["usd_pricebook"]
 _sg     = CFG["sage_export"]
 _nm     = CFG["names_db"]
 _req    = CFG["ctr_request"]
+_xtr    = CFG["ctr_request_extras"]
+_scf    = CFG["scaffold"]
 
 _SAGE_SHEET     = _sg["sheet_name"]
 _NAMES_DB_SHEET = _nm["sheet_name"]
@@ -335,13 +346,212 @@ def parse_equip_names_db(src) -> pd.DataFrame:
 # CTR Request workbook
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _norm_label(value) -> str:
+    """Cell text reduced to a comparable label: trimmed, single-spaced, lowercase."""
+    if value is None:
+        return ""
+    return " ".join(str(value).split()).lower()
+
+
+def _as_number(value):
+    """Cell value as a float, or None if it isn't a plain number."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value.strip().replace(",", "."))
+        except ValueError:
+            return None
+    return None
+
+
+def _parse_request_extras(ws) -> dict:
+    """
+    Reads the request form's "Additional Information / Type of Scaffold
+    System / TRANSPORT" block, which sits beside (v1.0.9 form: columns
+    U:AA, rows 3-29) or below (older forms: columns B:P under the line
+    items) the main line-item table.
+
+    Returns:
+      additional_info : [{"label", "value", "required"}] — the
+          Floatel / Flight tickets / Accomodation / Per Diem / Meal /
+          Training list, with `required` true only for a cell reading
+          exactly "Required" (its sibling option is the literal "Not
+          Required", which a substring test would also match).
+      transport_rows  : [{"transport_type", "quantity", "duration"}]
+      scaffold        : {"system", "uom", "tonnage"} or None
+
+    Nothing here is read from a fixed cell. Each part is found by
+    searching the sheet for its own label text and then reading relative
+    to that cell, because the block has already moved once between form
+    revisions — and because a request form from before the block existed
+    at all must come back as "no extras" rather than as an error or, worse,
+    as whatever happens to sit at those coordinates instead.
+    """
+    max_row  = _xtr["search_max_row"]
+    max_col  = _xtr["search_max_col"]
+    span     = _xtr["max_block_rows"]
+    streak_limit = _xtr["max_blank_streak"]
+
+    def _cell(row, col):
+        if row < 1 or col < 1:
+            return None
+        return ws.cell(row=row, column=col).value
+
+    def _text(row, col) -> str:
+        val = _cell(row, col)
+        if val is None:
+            return ""
+        text = str(val).strip()
+        return "" if text == "-" else text
+
+    def _block_row_end(row: int, col: int, default_end: int) -> int:
+        """
+        Last row belonging to a block whose heading cell is vertically
+        merged over it (the v1.0.9 form merges "TRANSPORT" down its own
+        rows, U21:U29). That merge is the form's own statement of how far
+        the block runs, so it beats the generic row-span/blank-streak
+        guess — a stray value pasted just below the block can otherwise be
+        read as one more row of it. Falls back to `default_end` when the
+        heading isn't merged downward.
+        """
+        for merged in ws.merged_cells.ranges:
+            if (merged.min_row <= row <= merged.max_row
+                    and merged.min_col <= col <= merged.max_col
+                    and merged.max_row > row):
+                return min(merged.max_row, default_end)
+        return default_end
+
+    def _find(label: str):
+        """First (row, col) whose text equals `label`; None if absent."""
+        target = _norm_label(label)
+        if not target:
+            return None
+        for row in range(1, max_row + 1):
+            for col in range(1, max_col + 1):
+                if _norm_label(_cell(row, col)) == target:
+                    return row, col
+        return None
+
+    info_at      = _find(_xtr["label_additional_info"])
+    transport_at = _find(_xtr["label_transport"])
+
+    result = {"additional_info": [], "transport_rows": [], "scaffold": None}
+    if info_at is None and transport_at is None:
+        return result   # request form predates the block, or it was deleted
+
+    # ── Additional Information: label / value pairs down the two columns
+    #    starting at the heading itself. ────────────────────────────────────
+    if info_at is not None:
+        row0, col0 = info_at
+        options = {_norm_label(v) for v in _xtr["option_values"]}
+        required_option = _norm_label(_xtr["required_value"])
+        blanks = 0
+        for row in range(row0 + 1, _block_row_end(row0, col0, row0 + span) + 1):
+            label = _text(row, col0)
+            if not label:
+                blanks += 1
+                if blanks >= streak_limit:
+                    break
+                continue
+            blanks = 0
+            value = _text(row, col0 + 1)
+            # A line belongs to this list only if its value cell holds one
+            # of the form's two options — the same column carries unrelated
+            # entries further down (Contingency, the scaffold system), and
+            # they'd otherwise be read as Additional Information items.
+            if _norm_label(value) not in options:
+                continue
+            result["additional_info"].append({
+                "label":    label,
+                "value":    value,
+                "required": _norm_label(value) == required_option,
+            })
+
+    # ── TRANSPORT: the heading's own row also carries the Type/Quantity/
+    #    Duration column headings to its right; fall back to the three
+    #    columns immediately after it if they've been reworded. ────────────
+    if transport_at is not None:
+        row0, col0 = transport_at
+        wanted = {
+            "transport_type": _xtr["label_transport_type"],
+            "quantity":       _xtr["label_transport_qty"],
+            "duration":       _xtr["label_transport_duration"],
+        }
+        cols = {}
+        for col in range(col0, col0 + max(4, span)):
+            head = _norm_label(_cell(row0, col))
+            for key, label in wanted.items():
+                if key not in cols and head == _norm_label(label):
+                    cols[key] = col
+        for offset, key in enumerate(("transport_type", "quantity", "duration"), start=1):
+            cols.setdefault(key, col0 + offset)
+
+        blanks = 0
+        for row in range(row0 + 1, _block_row_end(row0, col0, row0 + span) + 1):
+            transport_type = _text(row, cols["transport_type"])
+            if not transport_type:
+                blanks += 1
+                if blanks >= streak_limit:
+                    break
+                continue
+            blanks = 0
+            result["transport_rows"].append({
+                "transport_type": transport_type,
+                "quantity":       _text(row, cols["quantity"]),
+                "duration":       _text(row, cols["duration"]),
+            })
+
+    # ── Scaffold: any cell in the block naming a scaffold system, other
+    #    than the block's own "Type of Scaffold System" heading. The
+    #    tonnage is the first number in the handful of cells to its right,
+    #    and the unit is the text cell just before that number ("...|FM|
+    #    TON|66.96"). Searching only the block's own bounding box keeps a
+    #    manpower row reading "SCAFFOLDER" out of the results. ────────────
+    anchors  = [a for a in (info_at, transport_at) if a is not None]
+    row_from = min(a[0] for a in anchors)
+    row_to   = min(max(a[0] for a in anchors) + span, max_row)
+    col_from = min(a[1] for a in anchors)
+    col_to   = min(max(a[1] for a in anchors) + span, max_col)
+
+    keyword     = _norm_label(_xtr["scaffold_keyword"])
+    heading     = _norm_label(_xtr["label_scaffold_header"])
+    value_span  = _xtr["scaffold_value_span"]
+    for row in range(row_from, row_to + 1):
+        for col in range(col_from, col_to + 1):
+            label = _norm_label(_cell(row, col))
+            if not label or keyword not in label or label == heading:
+                continue
+            tonnage, uom = None, ""
+            for step in range(1, value_span + 1):
+                number = _as_number(_cell(row, col + step))
+                if number is not None:
+                    tonnage = number
+                    uom = _text(row, col + step - 1) if step > 1 else ""
+                    break
+            if tonnage is None:
+                continue   # the block is present but this scaffold line is unfilled
+            result["scaffold"] = {
+                "system":  _text(row, col),
+                "uom":     uom or _scf.get("default_uom", "TON"),
+                "tonnage": tonnage,
+            }
+            break
+        if result["scaffold"]:
+            break
+
+    return result
+
+
 def parse_ctr_request(src) -> dict:
     """
     Reads the REQUEST sheet of a CTR Request workbook (e.g. *.xlsm).
 
     Returns a dict with header fields:
       requester, client, date_of_survey, job_id_ref, surveyor,
-      project_type, location, commencement_date, job_description
+      project_type, location, commencement_date, job_description, comments
 
     Plus three line-item lists (empty if the request has none filled in):
       manpower_rows, equipment_rows, consumable_rows
@@ -383,6 +593,9 @@ def parse_ctr_request(src) -> dict:
             column=_req["col_commencement_date"],
         ).value,
         "job_description":   _v(_req["row_job_description"],   _req["col_job_description"]),
+        # The form's free-text Comments box, merged O6:Q8 — openpyxl reads
+        # a merged range's value off its top-left cell, so O6 is the value.
+        "comments":          _v(_req["row_comments"],           _req["col_comments"]),
     }
 
     # The line-item table runs from data_start_row; below it (e.g. row 164
@@ -468,5 +681,6 @@ def parse_ctr_request(src) -> dict:
     result["manpower_rows"]   = manpower_rows
     result["equipment_rows"]  = equipment_rows
     result["consumable_rows"] = consumable_rows
+    result.update(_parse_request_extras(ws))
     wb.close()
     return result

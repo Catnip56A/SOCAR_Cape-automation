@@ -140,14 +140,23 @@ def _find_value(ws_calc, ws_raw, label: str, label_cols: list[str],
 def _find_activity_type(ws_calc, cfg: dict) -> str:
     """The manpower section's own "Onshore Activities" / "Offshore
     Activities" label, minus the " Activities" suffix. Empty string if not
-    found (e.g. a CTR type without a manpower section)."""
+    found (e.g. a CTR type without a manpower section).
+
+    Matched on what the cell *starts with*, not on the whole cell: the
+    generator appends the CTR Request's required Additional Information to
+    this header ("Offshore Activities : Per Diem required" — see
+    builder_azn.activities_label), and an exact-match test would read that
+    as no manpower section at all."""
     labels = {label.strip().lower(): label for label in cfg["activity_labels"]}
     col = _col_idx(cfg["activity_label_col"])
     for row in range(1, cfg["search_max_row"] + 1):
         cell_val = ws_calc.cell(row=row, column=col).value
-        if isinstance(cell_val, str) and cell_val.strip().lower() in labels:
-            matched = labels[cell_val.strip().lower()]
-            return matched.rsplit(" ", 1)[0]   # "Offshore Activities" -> "Offshore"
+        if not isinstance(cell_val, str):
+            continue
+        text = cell_val.strip().lower()
+        for key, matched in labels.items():
+            if text.startswith(key):
+                return matched.rsplit(" ", 1)[0]   # "Offshore Activities" -> "Offshore"
     return ""
 
 

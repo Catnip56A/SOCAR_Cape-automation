@@ -291,6 +291,8 @@ Must be named **"CTR_REQUEST"**. The standard SOCAR Cape CTR Request form alread
 | Columns H–L | Plant & Equipment items |
 | Columns M–P | Consumables |
 
+Beside the line-item table the form also carries an extras block — **Additional Information** (Floatel, Flight tickets, Accommodation, Per Diem, Meal, Training, each *Required* or *Not Required*), **Type of Scaffold System** (a scaffold system and its tonnage) and **TRANSPORT** (type / quantity / duration per vehicle). The app finds this block by its own heading text, so it works whether the block sits to the right of the table (current form) or below it (older forms), and a request form without the block loads exactly as before. See "Additional Info & Transport" below.
+
 ---
 
 ## Step-by-step usage
@@ -311,11 +313,12 @@ Click the **Pricebook-Based** sub-tab. Select **AZN Pricebook**, then click **Lo
 
 Click the **CTR Request-Based** sub-tab and click **Load CTR Request**. This reads the CTR_REQUEST sheet from the Combined DB file selected above.
 
-The app fills in the **CTR Header Info** fields below (Client, Location, Scope, Date) and populates three tables:
+The app fills in the **CTR Header Info** fields below (Client, Location, Scope, Date, Comments) and populates three tables:
 
 - **Manpower — AZN**: each requested labor row
 - **Plant & Equipment — USD**: each requested equipment row
 - **Consumables — USD**: each requested consumable row
+- **Additional Info & Transport — AZN**: the request's extras block (see below)
 
 Every row immediately shows its match status:
 - **✓ Matched** — an exact match was found in the pricebook/SAGE; rate is pre-filled
@@ -337,10 +340,31 @@ Once you fix a mismatch, the correction is saved automatically. The next time th
 
 ---
 
+### 4b. Additional Info & Transport
+
+The **Additional Info & Transport — AZN** group shows what the request's extras block asked for.
+
+**Additional Information.** Items marked *Required* are listed at the top of the group and appended to the AZN CTR's activities section header, e.g. `Offshore Activities : Accomadion, Per Diem required`. Nothing marked *Required* leaves the header as the plain `Onshore Activities` / `Offshore Activities` label.
+
+**Transport.** Each requested vehicle becomes one or more lines of the AZN CTR's **Third Party Activities** section (a section the template doesn't ship with — it's added only when there are transport lines, and the Summary block gains a matching *Total Other Activities* item). The request form only says which vehicle, how many, and for how long, so the **Description**, **Rate AZN**, **Mark Up %** and **Duration UOM** come from the transport rate table in `ctr_generator/template_config.json` and are editable in the table before generating:
+
+- one requested vehicle can bill as several lines — a minibus charges vehicle+driver and its fuel separately, and only the former carries mark-up;
+- a vehicle that isn't in the rate table still gets a line, at a 0.00 rate, so it's there to price by hand — generating warns about any line still priced at 0.00.
+
+Each row's total is `Quantity × Rate × Duration × (1 + Mark Up)`.
+
+**Scaffold.** Scaffold is equipment, so a requested scaffold tonnage is added to the **Plant & Equipment — USD** table instead of appearing here — as an ordinary equipment line carrying the three things the request states: the system's name, the tonnage as **Quantity**, and **TON** as the unit. It reaches the USD CTR's Pricing sheet exactly like every other equipment line:
+
+`1 | Conventional Scaffold | 66.96 | TON | rate/day | days | total`
+
+The request gives no rate and no duration for scaffold, so **Rate/Day and Days both arrive blank** — they're yours to fill in. The row is marked **✓ Manual** rather than red: it can't match the pricebook, but the request did ask for scaffold, so the line is written to the CTR either way with its name, tonnage and unit, totalling 0.00 until you price it. If you set **Match By** to the pricebook description instead of typing a rate, that correction is remembered and the next request naming the same scaffold system matches on its own.
+
+---
+
 ### 5. Review totals
 
 Running totals are shown below each table:
-- **AZN**: Project Support (onshore) + Total Offshore = AZN CTR Total
+- **AZN**: Project Support (onshore) + Total Offshore + Total Third Party Activities = AZN CTR Total
 - **USD**: Equipment total + Consumables (with 6.5% markup) = USD CTR Total
 
 Only **✓ Matched** and **✓ Manual** rows are included in totals and in the generated output. Red **✗ No match** rows are excluded and never written to the output file at a rate of zero.
@@ -361,6 +385,7 @@ Scroll down to the **Generate** group:
 | **Contract No (AZN)** | Written to cell G4 of the AZN template |
 | **Contract No (USD)** | Written to cell G4 of the USD template |
 | **Revision** | Defaults to 0; written to cell E5 |
+| **Comments** | Free text from the request's own Comments box (O6); written to cell C1 of both templates. Always written, even when blank, so a previous request's comments can't linger in an unrelated CTR. |
 | **Job Ref** | Must be a number (e.g. 217); used in the file name and cell O3 |
 | **Output folder** | Where the generated files are saved |
 

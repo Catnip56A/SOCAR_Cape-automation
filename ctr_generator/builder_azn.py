@@ -12,8 +12,9 @@ Default layout (217_AZN template):
   Row 7  : "Project Support" section header (fixed text)
   Row 8  : column headers for the Project Support section
   Rows 9–18 : "support" section data rows — any manpower row whose
-    description contains the keyword "support" (case-insensitive; see
-    is_support_manpower), regardless of its Onshore/Offshore type
+    description contains the keyword "support" or names one of the
+    always-support roles (case-insensitive; see is_support_manpower),
+    regardless of its Onshore/Offshore type
   Row 20 : G20 = total project support
   Row 21 : section header for every other manpower row — text is
     "Onshore Activities" or "Offshore Activities" depending on the CTR
@@ -21,14 +22,19 @@ Default layout (217_AZN template):
   Row 22 : column headers for that section
   Rows 23–62: data rows for every manpower row NOT matched as "support"
   Row 64 : G64 = total for that section
-  Summary (rows 66–71):
+  Optional "Third Party Activities" section, inserted right after that
+    total when the CTR Request has transport / hired-service lines — the
+    template ships without it (see _write_third_party_section), and the
+    Summary block below gains a matching "Total Other Activities" line.
+  Summary (rows 66–71, before any of the above shifts them down):
     G67 = total project support
     G68 = total of the other section
     G71 = estimated CTR total
 
   Editable header fields (rows 3–6, shared layout with USD template):
     B3 = Client, C3 = Sub-Client, B4 = Location, E4 = Date,
-    G4 = Contract No, E5 = Revision, A6 = Scope / description (merged A6:G6)
+    G4 = Contract No, E5 = Revision, A6 = Scope / description (merged A6:G6),
+    C1 = Comments, carried over from the CTR Request's own Comments box
 
 Input values (comment, employees, quantity, rate, etc.) are written as
 plain Python values. Anything derived from another cell — row totals,
@@ -40,7 +46,9 @@ formulas there simply show their last-calculated value.
 The "support" keyword itself (see is_support_manpower / strip_support_keyword)
 is an internal routing marker, not client-facing text — it's stripped from
 the Comment and Description cells of every written row before they reach
-the document, so "Painter Support" appears as plain "Painter".
+the document, so "Painter Support" appears as plain "Painter". A row routed
+there by its role name instead keeps its description as written, since
+there's no marker word to remove.
 """
 
 from __future__ import annotations
@@ -52,6 +60,8 @@ from datetime import datetime
 from pathlib import Path
 
 import openpyxl
+from openpyxl.cell.cell import MergedCell
+from openpyxl.styles import Alignment
 from openpyxl.utils import column_index_from_string as _col_idx
 from openpyxl.utils import get_column_letter as _col_letter
 from openpyxl.worksheet.properties import PageSetupProperties
@@ -78,10 +88,30 @@ _DATE_FORMATS = ("%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y", "%d.%m.%Y")
 _SUPPORT_KEYWORD = "support"
 _SUPPORT_RE = re.compile(re.escape(_SUPPORT_KEYWORD), re.IGNORECASE)
 
+# Roles that belong in "Project Support" whatever the request calls them —
+# a project engineer is charged there whether or not the requester thought
+# to write "support" next to the role. Matched as a plain lowercase
+# substring, same as the keyword above, so "Senior Project Engineer" and
+# "PROJECT ENGINEER-National" both match one "project engineer" entry.
+# Keep entries to full role names (azn_template.support_roles in
+# template_config.json): a short fragment would match inside unrelated
+# roles and silently move them out of the activities section.
+_SUPPORT_ROLES = tuple(
+    role.strip().lower()
+    for role in _azn.get("support_roles", [])
+    if str(role).strip()
+)
+
 
 def is_support_manpower(description: str) -> bool:
-    """True if a manpower description should be treated as "support" manpower."""
-    return _SUPPORT_KEYWORD in (description or "").lower()
+    """
+    True if a manpower description should be treated as "support" manpower —
+    either because it carries the "support" keyword, or because it names one
+    of the always-support roles in _SUPPORT_ROLES. Any one of those matching
+    is enough.
+    """
+    desc = (description or "").lower()
+    return _SUPPORT_KEYWORD in desc or any(role in desc for role in _SUPPORT_ROLES)
 
 
 def strip_support_keyword(text: str) -> str:
@@ -101,17 +131,35 @@ def strip_support_keyword(text: str) -> str:
     return stripped or text.strip()
 
 
-def activities_label(project_type: str) -> str:
+def activities_label(project_type: str, required_info: list[str] | None = None) -> str:
     """
     Section header text for the non-"support" manpower section (row 21/H21):
     "Onshore Activities" or "Offshore Activities", chosen from the CTR
     request's project type. Falls back to "Offshore Activities" (the
     template's original hardcoded text) when project_type is blank or
     doesn't recognize either word.
+
+    `required_info` are the CTR Request's Additional Information items
+    marked "Required" (Floatel, Accommodation, Per Diem, …). They're
+    appended to the header so the section itself says what the labor rates
+    still have to cover, e.g.:
+
+        Offshore Activities : Accomadion, Per Diem required
+
+    With nothing required the header is just the plain label, exactly as
+    before. Note that the CTR Tracker finds this section by the label it
+    starts with, not by the whole cell text (see tracker._find_activity_type)
+    — keep the label first if this format ever changes.
     """
     if "onshore" in (project_type or "").lower():
-        return _azn.get("label_onshore_activities", "Onshore Activities")
-    return _azn.get("label_offshore_activities", "Offshore Activities")
+        label = _azn.get("label_onshore_activities", "Onshore Activities")
+    else:
+        label = _azn.get("label_offshore_activities", "Offshore Activities")
+
+    items = [str(item).strip() for item in (required_info or []) if str(item).strip()]
+    if not items:
+        return label
+    return f"{label} : {', '.join(items)} required"
 
 
 def _cell_row_col(addr: str) -> tuple[int, int]:
@@ -119,6 +167,45 @@ def _cell_row_col(addr: str) -> tuple[int, int]:
     col_str = "".join(c for c in addr if c.isalpha())
     row_str = "".join(c for c in addr if c.isdigit())
     return int(row_str), _col_idx(col_str)
+
+
+def _anchor_cell(ws, row: int, col: int):
+    """
+    The cell that actually stores what's displayed at (row, col).
+
+    openpyxl represents every cell of a merged range except its top-left as
+    a read-only MergedCell — assigning to one raises "'MergedCell' object
+    attribute 'value' is read-only". Templates are re-merged by hand
+    between revisions, so any cell this module addresses by fixed position
+    can quietly end up inside somebody else's merge. Returns the range's
+    anchor in that case (which is where the value visibly lands anyway), or
+    None if the merge can't be resolved.
+    """
+    cell = ws.cell(row=row, column=col)
+    if not isinstance(cell, MergedCell):
+        return cell
+    for rng in ws.merged_cells.ranges:
+        if rng.min_row <= row <= rng.max_row and rng.min_col <= col <= rng.max_col:
+            return ws.cell(row=rng.min_row, column=rng.min_col)
+    return None
+
+
+def _write_addr(ws, addr: str, value) -> None:
+    """Write `value` at `addr`, following a merge to the cell that holds it."""
+    cell = _anchor_cell(ws, *_cell_row_col(addr))
+    if cell is not None:
+        cell.value = value
+
+
+def _set_cell(ws, row: int, col: int, value) -> None:
+    """Write value at (row, col), skipping non-top-left merged-cell slots.
+
+    Used for the bulk section writes, where the anchor of any merge inside
+    the block is visited by the loop in its own right — so skipping is both
+    safe and avoids clearing a merge that reaches outside the block."""
+    cell = ws.cell(row=row, column=col)
+    if not isinstance(cell, MergedCell):
+        cell.value = value
 
 
 def _insert_rows_preserving_merges(ws, insert_row: int, amount: int) -> None:
@@ -162,6 +249,69 @@ def _copy_row_format(ws, src_row: int, dst_row: int, col_count: int) -> None:
             dst.alignment    = copy(src.alignment)
 
 
+def _clear_placeholder_cells(ws, texts) -> int:
+    """
+    Blank every cell whose entire value is one of `texts`.
+
+    The templates carry filler strings in their helper cells — "AA" all the
+    way down the column-H mirror on the Main sheets, "aa" beside the
+    Pricing sheet's margin block. They mean nothing; they normally go
+    unnoticed because column H is hidden and those Pricing rows fall
+    outside the print area, so they reappear as soon as a template is saved
+    with the column shown. Since a generated CTR goes to a client, they're
+    stripped rather than passed on.
+
+    Matching is on the whole trimmed value, so the genuine content sharing
+    those columns — the "=A10"/"=IF(B8=...)" mirror formulas, the real
+    labels — is never touched. Returns how many cells were cleared.
+    """
+    wanted = {str(t).strip() for t in (texts or []) if str(t).strip()}
+    if not wanted:
+        return 0
+    cleared = 0
+    for row in ws.iter_rows():
+        for cell in row:
+            if isinstance(cell.value, str) and cell.value.strip() in wanted:
+                cell.value = None
+                cleared += 1
+    return cleared
+
+
+def _extend_print_area(ws, extra_rows: int) -> None:
+    """
+    Push the sheet's print area down by `extra_rows`.
+
+    The print area is a fixed range saved in the template ("$A$1:$G$77")
+    and openpyxl does not move it when rows are inserted — so every row a
+    generated CTR adds pushes that much of the document out the bottom of
+    what actually prints. It is silent in Excel and only shows up in the
+    PDF, where the tail of the document (the Estimated CTR Total line and
+    the signature block) simply isn't there.
+
+    Left alone if the sheet has no print area, or has a multi-range one
+    this can't safely reason about — better to print the template's range
+    than to guess wrong about a layout that isn't the one this understands.
+    """
+    area = ws.print_area
+    if not area or extra_rows <= 0:
+        return
+    if isinstance(area, (list, tuple)):
+        if len(area) != 1:
+            return
+        area = area[0]
+    if "," in area or ":" not in area:
+        return
+
+    start, end = area.rsplit(":", 1)
+    digits, cut = "", len(end)
+    while cut > 0 and end[cut - 1].isdigit():
+        cut -= 1
+        digits = end[cut] + digits
+    if not digits:
+        return
+    ws.print_area = f"{start}:{end[:cut]}{int(digits) + extra_rows}"
+
+
 def _fit_to_page_width(ws) -> None:
     """
     Forces the sheet to print at exactly one page wide (any number of pages
@@ -187,6 +337,14 @@ def _fit_to_page_width(ws) -> None:
     ws.page_margins.right = 0.3
 
 
+def _safe_float(value, default: float = 0.0) -> float:
+    """Best-effort float conversion; `default` for blanks and non-numbers."""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def _parse_date(value):
     """Best-effort string → datetime conversion; returns value unchanged if unparseable."""
     if isinstance(value, str):
@@ -198,6 +356,159 @@ def _parse_date(value):
     return value
 
 
+# Row-height estimate for wrapped comment text. Deliberately rough and
+# deliberately pessimistic: a column's width is expressed in characters of
+# the workbook's *default* font, so measuring a smaller cell font against it
+# under-counts how many characters fit on a line, over-counts the lines, and
+# leaves the row slightly taller than strictly needed. A little too tall
+# wastes a few points of page; too short silently cuts the comment off.
+_DEFAULT_ROW_HEIGHT     = 15.0
+_DEFAULT_FONT_SIZE      = 11.0
+_LINE_HEIGHT_FACTOR     = 1.35    # point size -> line box height
+_MAX_COMMENT_ROW_HEIGHT = 200.0
+
+
+def _wrapped_row_height(text: str, col_width, font_size, base_height: float) -> float:
+    """Height in points for `text` wrapped inside a column `col_width` wide."""
+    chars_per_line = max(10, int(col_width or _DEFAULT_ROW_HEIGHT))
+    lines = sum(
+        max(1, -(-len(para) // chars_per_line))          # ceil division
+        for para in str(text).split("\n")
+    )
+    needed = max(1, lines) * (font_size or _DEFAULT_FONT_SIZE) * _LINE_HEIGHT_FACTOR + 4
+    return max(base_height, min(needed, _MAX_COMMENT_ROW_HEIGHT))
+
+
+def _write_comments(ws, addr: str, text: str) -> None:
+    """
+    Write the CTR Request's comments into `addr`, forcing the cell to read
+    horizontally and wrap.
+
+    Both templates style that cell with textRotation=90 and no wrap — it
+    sits in the tall banner row beside the standing PO note, where it was
+    only ever meant to hold a short sideways tag. Left as-is, a real
+    sentence of comments comes out running vertically down the page and
+    clipped at the column edge. The row is also grown, if needed,
+    to fit however many lines the wrapped text takes — never shrunk, so the
+    PO note sharing row 1 keeps its space, and never touched at all when
+    there are no comments.
+    """
+    # The comments cell is addressed by fixed position too, so follow a
+    # merge to whatever cell actually holds it (see _anchor_cell).
+    cell = _anchor_cell(ws, *_cell_row_col(addr))
+    if cell is None:
+        return
+    cell.value = text
+    cell.alignment = Alignment(
+        horizontal="left", vertical="center", wrap_text=True, textRotation=0)
+    if not text:
+        return
+
+    # Give the row an explicit height tall enough for the wrapped text,
+    # never shorter than whatever the template set (row 1 also carries the
+    # PO note, which needs its own space). Clearing the height so the row
+    # auto-fits instead does NOT work here: Excel would auto-fit on open,
+    # but LibreOffice — which renders the PDF export — just draws the row at
+    # its default height, and the whole banner row came out as a sliver.
+    row = cell.row
+    col = cell.column_letter
+    base  = ws.row_dimensions[row].height or _DEFAULT_ROW_HEIGHT
+    width = ws.column_dimensions[col].width if col in ws.column_dimensions else None
+    ws.row_dimensions[row].height = _wrapped_row_height(
+        text, width, cell.font.size, base)
+
+
+def _write_third_party_section(
+    ws, after_row: int, rows: list[dict], col_count: int, labor_data_start: int,
+) -> tuple[int, int]:
+    """
+    Insert a "Third Party Activities" section immediately below `after_row`
+    (the activities section's Total row) and write `rows` into it.
+
+    The shipped AZN template has no such section — a CTR that needs one
+    (transport, hired services) has it added by hand, between the labor
+    total and the Summary block, laid out as:
+
+        Third Party Activities                          <- merged A:G
+        Comment | Quantity | Description | Mark Up, % | Duration&UOM | Rate | Total
+        ...one row per line item...
+        Total Third Party Activities            =SUM() <- merged A:F
+
+    Returns (total_row, rows_inserted). Formatting for each new row is
+    copied from the equivalent row of the labor section starting at
+    `labor_data_start` — its title, column-header, data and total rows are
+    all above the insertion point, so they're still where the caller found
+    them (which is not where the template had them, if the request needed
+    extra manpower rows inserted earlier).
+
+    Each row's total is qty x rate x duration x (1 + mark-up). Duration is
+    embedded in the formula as a literal because its own cell is text ("6
+    Days" / "2 Trips") — the request states a duration but not what a
+    duration means for that vehicle, so it stays human-readable rather than
+    being split into a number and a unit column the template doesn't have.
+    """
+    hdr_row     = after_row + 1
+    col_hdr_row = hdr_row + 1
+    data_start  = col_hdr_row + 1
+    data_end    = data_start + len(rows) - 1
+    total_row   = data_end + 1
+    inserted    = len(rows) + 3
+
+    _insert_rows_preserving_merges(ws, hdr_row, inserted)
+
+    # Source rows for formatting: the labor section's own title / column
+    # header / data / total rows, all above the insertion point.
+    src_total   = after_row
+    src_col_hdr = labor_data_start - 1
+    src_data    = labor_data_start
+    src_hdr     = labor_data_start - 2
+
+    _copy_row_format(ws, src_hdr,     hdr_row,     col_count)
+    _copy_row_format(ws, src_col_hdr, col_hdr_row, col_count)
+    for r in range(data_start, data_end + 1):
+        _copy_row_format(ws, src_data, r, col_count)
+    _copy_row_format(ws, src_total, total_row, col_count)
+
+    ws.merge_cells(start_row=hdr_row,   start_column=1, end_row=hdr_row,   end_column=7)
+    ws.merge_cells(start_row=total_row, start_column=1, end_row=total_row, end_column=6)
+
+    ws.cell(row=hdr_row, column=1).value = _azn.get(
+        "third_party_label", "Third Party Activities")
+    for i, heading in enumerate(_azn.get("third_party_headers", []), start=1):
+        ws.cell(row=col_hdr_row, column=i).value = heading
+
+    for i, tp in enumerate(rows):
+        r = data_start + i
+        qty      = _safe_float(tp.get("quantity", 1), 1.0)
+        rate     = _safe_float(tp.get("rate_azn", 0), 0.0)
+        markup   = _safe_float(tp.get("markup", 0), 0.0)
+        duration = _safe_float(tp.get("duration", 1), 1.0)
+        uom      = str(tp.get("uom", "") or "").strip()
+
+        ws.cell(row=r, column=1).value = str(tp.get("comment", "") or "")
+        ws.cell(row=r, column=2).value = qty
+        ws.cell(row=r, column=3).value = str(tp.get("description", "") or "")
+        # A line that carries no mark-up is left blank rather than showing
+        # "0.0%", the way the hand-priced CTR this section is modelled on
+        # writes its un-marked-up fuel line. Excel reads the empty cell as 0
+        # in the row's (1+D) term either way.
+        markup_cell = ws.cell(row=r, column=4)
+        markup_cell.value = markup or None
+        markup_cell.number_format = _azn.get("third_party_markup_format", "0.0%")
+        ws.cell(row=r, column=5).value = f"{duration:g} {uom}".strip()
+        ws.cell(row=r, column=6).value = rate
+        ws.cell(row=r, column=7).value = f"=B{r}*F{r}*{duration:g}*(1+D{r})"
+
+    for r in range(hdr_row, total_row + 1):
+        ws.row_dimensions[r].hidden = False
+
+    ws.cell(row=total_row, column=1).value = _azn.get(
+        "third_party_total_label", "Total Third Party Activities")
+    ws.cell(row=total_row, column=7).value = f"=SUM(G{data_start}:G{data_end})"
+
+    return total_row, inserted
+
+
 def build_azn(
     support_rows: list[dict],
     other_rows: list[dict],
@@ -205,12 +516,14 @@ def build_azn(
     output_dir: str | Path,
     job_ref: str,
     header: dict | None = None,
+    third_party_rows: list[dict] | None = None,
 ) -> Path:
     """
     Write labor rows into a copy of the AZN template.
 
-    support_rows: manpower rows whose description matched the "support"
-        keyword (see is_support_manpower) — written into rows 9–18.
+    support_rows: manpower rows matched as support manpower — by the
+        "support" keyword or by role name (see is_support_manpower) —
+        written into rows 9–18.
     other_rows: every other manpower row — written into rows 23+.
 
     Each row is a dict with keys:
@@ -225,12 +538,21 @@ def build_azn(
         the other header fields, has no dedicated template cell to fall
         back to — a blank/missing value defaults to "Offshore Activities".
         location and scope are also used to build the output filename
-        (see ctr_generator.naming).
+        (see ctr_generator.naming). required_info (a list of Additional
+        Information items the CTR Request marked "Required") is appended to
+        that same row-21 header — see activities_label.
+
+    third_party_rows: transport / hired-service lines for the "Third Party
+        Activities" section, each a dict with keys comment, quantity,
+        description, markup, duration, uom, rate_azn. The template has no
+        such section, so one is inserted only when this list is non-empty —
+        a CTR without third-party lines comes out byte-for-byte as before.
 
     Returns the path to the saved xlsx file.
     """
     template_path = Path(template_path)
     output_dir    = Path(output_dir)
+    third_party_rows = list(third_party_rows or [])
 
     if not template_path.is_file():
         raise ValueError(f"AZN Template not found: {template_path}")
@@ -265,23 +587,29 @@ def build_azn(
         raise ValueError(f"Could not read AZN Template {template_path}: {e}") from e
 
     # ── Header cells ──────────────────────────────────────────────────────────
-    ws[_azn["cell_ctr_ref"]] = f"CTR-26-{job_ref} AZN"
-    ws[_azn["cell_job_ref"]] = int(job_ref)
+    _write_addr(ws, _azn["cell_ctr_ref"], f"CTR-26-{job_ref} AZN")
+    _write_addr(ws, _azn["cell_job_ref"], int(job_ref))
 
     if header:
-        if header.get("client"):      ws[_azn["cell_client"]]     = header["client"]
-        if header.get("sub_client"):  ws[_azn["cell_sub_client"]] = header["sub_client"]
-        if header.get("location"):    ws[_azn["cell_location"]]   = header["location"]
-        if header.get("date"):        ws[_azn["cell_date"]]       = _parse_date(header["date"])
-        # Contract No is always written from the UI field, even blank —
-        # unlike the other header fields here, a stale contract number left
-        # over from the template file is actively wrong for this job rather
-        # than a harmless default, so a blank UI field must blank the cell
-        # instead of silently preserving whatever the template had.
-        ws[_azn["cell_contract_no"]] = header.get("contract_no", "")
+        if header.get("client"):
+            _write_addr(ws, _azn["cell_client"], header["client"])
+        if header.get("sub_client"):
+            _write_addr(ws, _azn["cell_sub_client"], header["sub_client"])
+        if header.get("location"):
+            _write_addr(ws, _azn["cell_location"], header["location"])
+        if header.get("date"):
+            _write_addr(ws, _azn["cell_date"], _parse_date(header["date"]))
+        # Contract No and Comments are always written from the UI field,
+        # even blank — unlike the other header fields here, a stale value
+        # left over from the template file is actively wrong for this job
+        # rather than a harmless default, so a blank UI field must blank
+        # the cell instead of silently preserving whatever the template had.
+        _write_addr(ws, _azn["cell_contract_no"], header.get("contract_no", ""))
+        _write_comments(ws, _azn["cell_comments"], header.get("comments", ""))
         if header.get("revision") not in (None, ""):
-            ws[_azn["cell_revision"]] = header["revision"]
-        if header.get("scope"):       ws[_azn["cell_scope"]]      = header["scope"]
+            _write_addr(ws, _azn["cell_revision"], header["revision"])
+        if header.get("scope"):
+            _write_addr(ws, _azn["cell_scope"], header["scope"])
 
     # ── Insert extra rows before writing so overflow doesn't clobber the
     #    second section or the summary block ──────────────────────────────────
@@ -316,7 +644,10 @@ def build_azn(
     #    section's shifted title row (2 rows above its data start), to both
     #    the merged A-column cell and its standalone H-column mirror. ────────
     other_title_row = other_start - 2
-    label = activities_label((header or {}).get("project_type", "") if header else "")
+    label = activities_label(
+        (header or {}).get("project_type", "") if header else "",
+        (header or {}).get("required_info") if header else None,
+    )
     ws.cell(row=other_title_row, column=1).value = label
     ws.cell(row=other_title_row, column=8).value = label
 
@@ -326,7 +657,7 @@ def build_azn(
         clear_end = max(eff_end, start + len(rows) - 1) if rows else eff_end
         for row in range(start, clear_end + 1):
             for col in range(1, _COLS + 1):
-                ws.cell(row=row, column=col).value = None
+                _set_cell(ws, row, col, None)
 
         for i, lr in enumerate(rows):
             r = start + i
@@ -359,6 +690,16 @@ def build_azn(
         # purely cosmetic and both Excel and LibreOffice's PDF export skip
         # hidden rows when printing, so the exported PDF shows only the
         # rows that actually have data.
+        #
+        # Only the unused rows are contracted, and a row that does have data
+        # is explicitly expanded — a template is made by saving a previous
+        # CTR, so it arrives with that job's unused rows already hidden, and
+        # without this a row written into one of them would be filled in
+        # correctly but stay invisible in both Excel and the PDF. A section
+        # that uses its whole capacity has nothing to contract and neither
+        # loop does anything.
+        for row in range(start, start + len(rows)):
+            ws.row_dimensions[row].hidden = False
         for row in range(start + len(rows), eff_end + 1):
             ws.row_dimensions[row].hidden = True
 
@@ -370,7 +711,13 @@ def build_azn(
         # Summing the whole capacity range (not just the written rows) is
         # safe — the cleared rows above are blank and contribute 0.
         total_row = eff_end + total_gap + 1
-        ws.cell(row=total_row, column=7).value = f"=SUM(G{start}:G{eff_end})"
+        _set_cell(ws, total_row, 7, f"=SUM(G{start}:G{eff_end})")
+        # The section's own furniture — its title row, column headers and
+        # total — is never spare capacity, so it is never contracted, even
+        # if the template was saved with those rows hidden.
+        for row in (start - 2, start - 1, *range(eff_end + 1, total_row + 1)):
+            if row >= 1:
+                ws.row_dimensions[row].hidden = False
         return total_row
 
     support_total_row = _write_section(
@@ -378,18 +725,63 @@ def build_azn(
     other_total_row = _write_section(
         other_rows,   other_start,         other_eff_end,                   _OTHER_TOTAL_GAP)
 
+    # ── Third Party Activities — inserted between the labor total and the
+    #    Summary block, and only when the request actually has transport /
+    #    hired-service lines (the template ships without the section). ─────
+    third_party_total_row = None
+    if third_party_rows:
+        third_party_total_row, tp_inserted = _write_third_party_section(
+            ws, other_total_row, third_party_rows, _COLS, other_start)
+        _row_shift += tp_inserted
+
     # ── Summary cells — addresses from config, shifted by any inserted rows ────
     _r, _c = _cell_row_col(_azn["cell_summary_onshore"])
     support_summary_addr = f"{_col_letter(_c)}{_r + _row_shift}"
     ws.cell(row=_r + _row_shift, column=_c).value = f"=G{support_total_row}"
 
     _r, _c = _cell_row_col(_azn["cell_summary_offshore"])
-    other_summary_addr = f"{_col_letter(_c)}{_r + _row_shift}"
-    ws.cell(row=_r + _row_shift, column=_c).value = f"=G{other_total_row}"
+    other_summary_row  = _r + _row_shift
+    other_summary_addr = f"{_col_letter(_c)}{other_summary_row}"
+    ws.cell(row=other_summary_row, column=_c).value = f"=G{other_total_row}"
 
     _r, _c = _cell_row_col(_azn["cell_summary_combined"])
-    ws.cell(row=_r + _row_shift, column=_c).value = f"={support_summary_addr}+{other_summary_addr}"
+    combined_row = _r + _row_shift
+    summary_addrs = [support_summary_addr, other_summary_addr]
 
+    # The Summary block needs its own line for the third-party total, added
+    # right below the labor one; every numbered item below it (Contingency)
+    # shifts down a place and is renumbered to match.
+    summary_extra = 0
+    if third_party_total_row is not None:
+        tp_summary_row = other_summary_row + 1
+        combined_row  += 1
+        summary_extra  = 1
+        _insert_rows_preserving_merges(ws, tp_summary_row, 1)
+        _copy_row_format(ws, other_summary_row, tp_summary_row, _COLS)
+        ws.merge_cells(start_row=tp_summary_row, start_column=2,
+                       end_row=tp_summary_row, end_column=5)
+        ws.cell(row=tp_summary_row, column=2).value = _azn.get(
+            "third_party_summary_label", "Total Other Activities")
+        ws.cell(row=tp_summary_row, column=_c).value = f"=G{third_party_total_row}"
+        summary_addrs.append(f"{_col_letter(_c)}{tp_summary_row}")
+
+        item_no = ws.cell(row=other_summary_row, column=1).value
+        if isinstance(item_no, (int, float)) and not isinstance(item_no, bool):
+            for row in range(tp_summary_row, combined_row):
+                existing = ws.cell(row=row, column=1).value
+                if row == tp_summary_row or (
+                    isinstance(existing, (int, float)) and not isinstance(existing, bool)
+                ):
+                    item_no = int(item_no) + 1
+                    ws.cell(row=row, column=1).value = item_no
+
+    ws.cell(row=combined_row, column=_c).value = "=" + "+".join(summary_addrs)
+
+    # Every row inserted above moved the document's tail down by that much;
+    # the print area has to follow or the bottom of the CTR silently stops
+    # appearing in the PDF.
+    _extend_print_area(ws, _row_shift + summary_extra)
+    _clear_placeholder_cells(ws, _azn.get("placeholder_texts", []))
     _fit_to_page_width(ws)
 
     try:

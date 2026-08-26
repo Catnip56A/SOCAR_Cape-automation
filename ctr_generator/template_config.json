@@ -21,8 +21,19 @@
     "cell_contract_no": "G4",
     "cell_revision":   "E5",
     "cell_scope":      "A6",
+    "cell_comments":   "C1",
+    "placeholder_texts": ["AA", "aa"],
     "label_onshore_activities":  "Onshore Activities",
-    "label_offshore_activities": "Offshore Activities"
+    "label_offshore_activities": "Offshore Activities",
+    "support_roles": ["Project Engineer"],
+    "third_party_label":         "Third Party Activities",
+    "third_party_total_label":   "Total Third Party Activities",
+    "third_party_summary_label": "Total Other Activities",
+    "third_party_markup_format": "0.0%",
+    "third_party_headers": [
+      "Comment", "Quantity", "Description", "Mark Up, %",
+      "Duration&\nUOM", "Rate, AZN", "Total, AZN"
+    ]
   },
 
   "usd_template": {
@@ -43,6 +54,17 @@
     "cell_contract_no": "G4",
     "cell_revision":   "E5",
     "cell_scope":      "A6",
+    "cell_comments":   "C1",
+    "placeholder_texts": ["AA", "aa"],
+    "main_unused_blocks": [[9, 18], [23, 62], [67, 107]],
+    "main_printed_cols": 7,
+    "pricing_cell_client":     "C3",
+    "pricing_cell_sub_client": "D3",
+    "pricing_cell_ctr_ref":    "G3",
+    "pricing_cell_location":   "C4",
+    "pricing_cell_date":       "G4",
+    "pricing_cell_revision":   "G5",
+    "pricing_cell_scope":      "B6",
     "cell_total_equip_2":    "G112",
     "cell_total_cons_raw":   "G115",
     "cell_cons_markup_rate": "E116",
@@ -171,6 +193,43 @@
     "ACE (Azeri-Central-East) Project": {"project_code": "FMA0119-ACE", "tracker_location": "Offshore"}
   },
 
+  "ctr_request_extras": {
+    "_comment": "The Additional Information / Type of Scaffold System / TRANSPORT block on the CTR Request form. It is found by searching for its own label text, not by fixed cell — it sits in columns U:AA at the top right in the v1.0.9 form and below the line items in older ones, and a form without the block parses as \"no extras\".",
+    "search_max_row": 400,
+    "search_max_col": 45,
+    "label_additional_info": "Additional Information",
+    "label_transport": "TRANSPORT",
+    "label_transport_type": "Type of Transport",
+    "label_transport_qty": "Quantity",
+    "label_transport_duration": "Duration",
+    "label_scaffold_header": "Type of Scaffold System",
+    "scaffold_keyword": "scaffold",
+    "scaffold_value_span": 4,
+    "required_value": "Required",
+    "option_values": ["Required", "Not Required"],
+    "max_block_rows": 24,
+    "max_blank_streak": 4
+  },
+
+  "transport_rates": {
+    "_comment": "AZN rate, mark-up and duration unit per requested transport type — the request form gives only the type, quantity and duration. One type may expand into several CTR lines (a minibus bills vehicle+driver and fuel separately, only the former marked up). A type with no entry here is written using its requested wording at a 0.00 rate with _default's mark-up, so it appears in the UI to be priced by hand.",
+    "_default": [
+      { "rate_azn": 0.0, "markup": 0.065, "uom": "Days" }
+    ],
+    "Mini Bus": [
+      { "description": "Minibus+driver",   "rate_azn": 110.0, "markup": 0.065, "uom": "Days" },
+      { "description": "Fuel for minibus", "rate_azn": 10.0,  "markup": 0.0,   "uom": "Days" }
+    ],
+    "Truck": [
+      { "description": "Truck", "rate_azn": 135.0, "markup": 0.065, "uom": "Trips" }
+    ]
+  },
+
+  "scaffold": {
+    "_comment": "Scaffold requested as a tonnage becomes an ordinary USD Plant & Equipment line carrying the three things the request states: the system's name, the tonnage, and TON. default_uom is only a fallback for when the request's own unit cell is blank — rate and days come from the pricebook match and the user, as for any other equipment line.",
+    "default_uom": "TON"
+  },
+
   "ctr_request": {
     "sheet_name": "CTR_REQUEST",
     "data_start_row": 13,
@@ -183,6 +242,7 @@
     "row_location":          8, "col_location":          3,
     "row_commencement_date": 8, "col_commencement_date": 11,
     "row_job_description":   9, "col_job_description":   3,
+    "row_comments":          6, "col_comments":         15,
     "manpower_desc_col":          2,
     "manpower_qty_col":           3,
     "manpower_working_days_col":  4,

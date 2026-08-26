@@ -40,8 +40,47 @@ _DEFAULTS: dict = {
         "cell_contract_no": "G4",
         "cell_revision":    "E5",
         "cell_scope":       "A6",
+        # Free-text comments carried over from the CTR Request's own
+        # Comments box (O6). Row 1 is a tall banner row whose D1:G1 holds
+        # the standing PO note; C1 sits beside it and is empty in the
+        # template.
+        "cell_comments":    "C1",
+        # Placeholder text left scattered through the templates' helper
+        # cells ("AA" down the hidden column-H mirror, "aa" in the Pricing
+        # sheet's margin block). It is meaningless filler that was never
+        # meant to be read, and normally sits in a hidden column or outside
+        # the print area — but it surfaces the moment a template is saved
+        # with those columns shown, so it is stripped from the generated
+        # document. Only cells whose entire value is one of these strings
+        # are cleared; the real mirror formulas beside them are untouched.
+        "placeholder_texts": ["AA", "aa"],
         "label_onshore_activities":  "Onshore Activities",
         "label_offshore_activities": "Offshore Activities",
+        # Roles always billed out of "Project Support", even when the
+        # request's wording has no "support" in it (see
+        # builder_azn.is_support_manpower). Matched as a case-insensitive
+        # substring, so one "Project Engineer" entry also catches "Senior
+        # Project Engineer" — use full role names here, never a fragment
+        # short enough to appear inside an unrelated role.
+        "support_roles": ["Project Engineer"],
+        # "Third Party Activities" section — not present in the shipped AZN
+        # template, so build_azn inserts it (header row, column-header row,
+        # one row per transport line, total row) between the activities
+        # total and the Summary block, but only when the CTR Request
+        # actually has TRANSPORT lines. Layout copied from a hand-made CTR
+        # that has one (see build_azn._write_third_party_section).
+        "third_party_label":         "Third Party Activities",
+        "third_party_total_label":   "Total Third Party Activities",
+        "third_party_summary_label": "Total Other Activities",
+        # Mark-up is stored as a fraction (0.065) and shown as a percentage,
+        # matching how the USD template already formats its consumables
+        # mark-up. Without this the column inherits the "Quantity" format of
+        # the labor row its styling is copied from and prints "0.065".
+        "third_party_markup_format": "0.0%",
+        "third_party_headers": [
+            "Comment", "Quantity", "Description", "Mark Up, %",
+            "Duration&\nUOM", "Rate, AZN", "Total, AZN",
+        ],
     },
     "usd_template": {
         "main_sheet":    "Main",
@@ -61,6 +100,33 @@ _DEFAULTS: dict = {
         "cell_contract_no": "G4",
         "cell_revision":    "E5",
         "cell_scope":       "A6",
+        "cell_comments":    "C1",
+        # See azn_template.placeholder_texts — same filler, same treatment.
+        "placeholder_texts": ["AA", "aa"],
+        # Main-sheet blocks a USD CTR never fills: Project Support, the
+        # Onshore/Offshore Activities section, and Third Party Activities —
+        # labor and transport are priced on the AZN document, so on this one
+        # they are always empty. They're contracted like any other unused
+        # capacity; left expanded, the USD CTR's first page is ~90 blank
+        # rows and every real figure (equipment, consumables, the summary,
+        # the CTR total) is pushed onto page 2. Only rows that are actually
+        # empty across the printed columns are contracted, so a template
+        # that does carry something here keeps showing it.
+        "main_unused_blocks": [[9, 18], [23, 62], [67, 107]],
+        "main_printed_cols": 7,
+        # The Pricing sheet carries its own copy of the header block. It
+        # isn't a second set of inputs — each cell mirrors the Main sheet's
+        # equivalent by formula, so the two pages of one CTR can't disagree
+        # and editing Main in Excel updates Pricing too. Left unwritten,
+        # these keep whatever the template file had, which on a template
+        # made from a previous CTR is that job's number, client and site.
+        "pricing_cell_client":     "C3",
+        "pricing_cell_sub_client": "D3",
+        "pricing_cell_ctr_ref":    "G3",
+        "pricing_cell_location":   "C4",
+        "pricing_cell_date":       "G4",
+        "pricing_cell_revision":   "G5",
+        "pricing_cell_scope":      "B6",
         "cell_total_equip_2":     "G112",
         "cell_total_cons_raw":    "G115",
         "cell_cons_markup_rate":  "E116",
@@ -255,6 +321,72 @@ _DEFAULTS: dict = {
         "ACE (Azeri-Central-East) Project": {"project_code": "FMA0119-ACE", "tracker_location": "Offshore"},
     },
 
+    # The "Additional Information / Type of Scaffold System / TRANSPORT"
+    # block that the v1.0.9 CTR Request form carries alongside the line-item
+    # table (columns U:AA, rows 3-29 in that revision; columns B:P below the
+    # line items in the older hand-filled forms). Nothing here is addressed
+    # by fixed cell: the block is located by searching for its own label
+    # text and then reading relative to that, since it has already moved
+    # once and a request form without the block at all (pre-1.0.9) must
+    # parse as "no extras" rather than as an error.
+    "ctr_request_extras": {
+        "search_max_row": 400,
+        "search_max_col": 45,
+        "label_additional_info": "Additional Information",
+        "label_transport": "TRANSPORT",
+        "label_transport_type": "Type of Transport",
+        "label_transport_qty": "Quantity",
+        "label_transport_duration": "Duration",
+        "label_scaffold_header": "Type of Scaffold System",
+        # A scaffold entry is any cell inside the block whose text mentions
+        # this word (e.g. "Conventional Scaffold", "System Scaffold") other
+        # than the block's own "Type of Scaffold System" heading; the
+        # tonnage is the first number in the few cells to its right, and
+        # the unit is the text cell immediately before that number.
+        "scaffold_keyword": "scaffold",
+        "scaffold_value_span": 4,
+        # An Additional Information line counts as requested only when its
+        # value cell reads exactly this (case-insensitive) — the form's
+        # other option is the literal "Not Required", which must not match
+        # on a substring test.
+        "required_value": "Required",
+        "option_values": ["Required", "Not Required"],
+        "max_block_rows": 24,
+        "max_blank_streak": 4,
+    },
+
+    # Rates for the transport types a CTR Request can ask for. The request
+    # form only says *what* and *how many/how long* — the AZN rate, the
+    # mark-up and the duration's unit are commercial figures that live
+    # here, seeded from a real CTR (see TEST_Files/3rd + scaffold). One
+    # requested transport type can expand into several CTR lines (a minibus
+    # bills the vehicle+driver and its fuel separately, and only the former
+    # carries mark-up). A type with no entry here still gets a line — using
+    # the requested wording, "_default"'s mark-up and a 0.00 rate — so it
+    # shows up in the UI to be priced by hand rather than disappearing.
+    "transport_rates": {
+        "_default": [
+            {"rate_azn": 0.0, "markup": 0.065, "uom": "Days"}
+        ],
+        "Mini Bus": [
+            {"description": "Minibus+driver",  "rate_azn": 110.0, "markup": 0.065, "uom": "Days"},
+            {"description": "Fuel for minibus", "rate_azn": 10.0, "markup": 0.0,   "uom": "Days"}
+        ],
+        "Truck": [
+            {"description": "Truck", "rate_azn": 135.0, "markup": 0.065, "uom": "Trips"}
+        ],
+    },
+
+    # Scaffold requested as a tonnage in the extras block becomes an
+    # ordinary USD Plant & Equipment line — scaffold is equipment, and a
+    # hand-made scaffold CTR shows it as one: name, tonnage, TON. Only the
+    # unit fallback lives here, used when the request's own unit cell is
+    # blank; the rate and duration come from the pricebook match and the
+    # user, like any other equipment line.
+    "scaffold": {
+        "default_uom": "TON",
+    },
+
     "ctr_request": {
         "sheet_name": "CTR_REQUEST",
         "data_start_row": 13,
@@ -267,6 +399,9 @@ _DEFAULTS: dict = {
         "row_location":          8, "col_location":          3,
         "row_commencement_date": 8, "col_commencement_date": 11,
         "row_job_description":   9, "col_job_description":   3,
+        # The request's Comments box — merged O6:Q8, so the text lives in
+        # its top-left cell O6. Same position on the 1.0.8 and 1.0.9 forms.
+        "row_comments":          6, "col_comments":         15,
         "manpower_desc_col":          2,
         "manpower_qty_col":           3,
         "manpower_working_days_col":  4,
