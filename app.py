@@ -19,8 +19,8 @@ from PySide6.QtCore import (
 )
 from PySide6.QtGui import QBrush, QColor, QFont, QPainter, QPen
 from PySide6.QtWidgets import (
-    QAbstractItemView, QApplication, QCheckBox, QFileDialog,
-    QFormLayout, QFrame, QGroupBox, QHBoxLayout, QHeaderView,
+    QAbstractItemView, QApplication, QCheckBox, QDialog, QDialogButtonBox,
+    QFileDialog, QFormLayout, QFrame, QGroupBox, QHBoxLayout, QHeaderView,
     QLabel, QListWidget, QListWidgetItem, QMainWindow,
     QMessageBox, QProgressDialog, QPushButton, QScrollArea,
     QSplitter, QStackedWidget, QStyle, QStyledItemDelegate, QTabWidget,
@@ -29,6 +29,10 @@ from PySide6.QtWidgets import (
 
 sys.path.insert(0, str(Path(__file__).parent))
 from sheet_parser import parse_workbook
+from comparison_history import (
+    comparisons_dir, default_label, list_saved_comparisons, load_comparison,
+    save_comparison, suggest_save_path,
+)
 from ctr_generator import __version__ as _CTR_VERSION
 from ctr_generator.window import CTRGeneratorWidget
 from ctr_generator.tracker_window import CTRTrackerWidget
@@ -74,6 +78,100 @@ def _find_col(df: pd.DataFrame, *candidates: str) -> str | None:
         if hit:
             return hit
     return None
+
+
+def _norm_val(v) -> str:
+    s = str(v).strip()
+    return "" if s.lower() in ("nan", "none", "") else s
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Rate (CTR) vs Rechargeable (MR) consistency check
+# ─────────────────────────────────────────────────────────────────────────────
+# Both sides encode "not billable" with the same literal token, "NONRECHARG"
+# (MR's Rechargeable column and CTR's Rate column both use it — the CTR just
+# writes it into Rate instead of a number). A rechargeable item's CTR Rate is
+# a plain number instead. So a mismatch is: MR says RECHARGE but CTR has no
+# usable number, or MR says NONRECHARG but CTR has a real rate.
+
+def _rate_implied_status(rate_val) -> str | None:
+    """'RECHARGE' if Rate is a usable number, 'NONRECHARG' if it's that
+    literal placeholder, None if blank/unrecognized (nothing to compare)."""
+    s = _norm_val(rate_val).upper()
+    if s == "":
+        return None
+    if s == "NONRECHARG":
+        return "NONRECHARG"
+    try:
+        float(s)
+    except ValueError:
+        return None
+    return "RECHARGE"
+
+
+def _find_rate_rechargeable_mismatches(display_df: pd.DataFrame) -> set[tuple[int, str]]:
+    """(row, col) cells where MR's Rechargeable flag and CTR's Rate disagree
+    about whether the item is billable."""
+    cells: set[tuple[int, str]] = set()
+    if "Rechargeable" not in display_df.columns or "Rate (CTR)" not in display_df.columns:
+        return cells
+    for row_idx, row in display_df.iterrows():
+        rech = _norm_val(row["Rechargeable"]).upper()
+        if rech not in ("RECHARGE", "NONRECHARG"):
+            continue
+        rate_status = _rate_implied_status(row["Rate (CTR)"])
+        if rate_status is None or rate_status == rech:
+            continue
+        cells.add((row_idx, "Rechargeable"))
+        cells.add((row_idx, "Rate (CTR)"))
+    return cells
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Combined view: per-Stock-Code MR/CTR quantity totals
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _aggregate_combined(
+    mr: pd.DataFrame, ctr: pd.DataFrame,
+    qty_mr: str | None, unit_mr: str | None,
+    qty_ctr: str | None, unit_ctr: str | None,
+    matched_keys: set,
+) -> dict[str, dict]:
+    """Group MR and CTR rows by Stock Code (restricted to matched_keys) and
+    sum Qty per side. Returns {key: {"mr_qty", "mr_units", "ctr_qty",
+    "ctr_units"}} — *_units is the sorted set of distinct non-blank units
+    contributing to that side's total, so more than one entry signals a
+    unit conflict the caller must resolve before trusting the sum."""
+
+    def _agg_side(df: pd.DataFrame, qty_col: str | None, unit_col: str | None) -> dict:
+        result: dict = {}
+        if qty_col is None or qty_col not in df.columns:
+            return result
+        for key, grp in df.groupby("_KEY_"):
+            if key not in matched_keys:
+                continue
+            qty_numeric = pd.to_numeric(grp[qty_col], errors="coerce")
+            qty_total = float(qty_numeric.sum()) if qty_numeric.notna().any() else None
+            units = sorted({
+                _norm_val(u).upper()
+                for u in (grp[unit_col] if unit_col and unit_col in grp.columns else [])
+                if _norm_val(u)
+            })
+            result[key] = {"qty": qty_total, "units": units}
+        return result
+
+    mr_agg  = _agg_side(mr,  qty_mr,  unit_mr)
+    ctr_agg = _agg_side(ctr, qty_ctr, unit_ctr)
+
+    raw: dict[str, dict] = {}
+    for key in matched_keys:
+        m = mr_agg.get(key,  {"qty": None, "units": []})
+        c = ctr_agg.get(key, {"qty": None, "units": []})
+        raw[key] = {
+            "mr_qty": m["qty"],   "mr_units":  m["units"],
+            "ctr_qty": c["qty"],  "ctr_units": c["units"],
+        }
+    return raw
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -187,17 +285,29 @@ _CTR_EMPTY = QColor("#EFF9F6")   # very light teal — CTR cell, no data
 # DataFrame → QTableView adapter
 # ─────────────────────────────────────────────────────────────────────────────
 
-_MISMATCH_BG = QColor("#FFCDD2")   # light red — mismatched cell
-_MISMATCH_FG = QColor("#B71C1C")   # dark red  — mismatched cell text
+_MISMATCH_BG = QColor("#FFCDD2")   # light red   — mismatched cell / negative diff
+_MISMATCH_FG = QColor("#B71C1C")   # dark red    — mismatched cell / negative diff text
+_POSITIVE_BG = QColor("#C8E6C9")   # light green — positive diff (Combined view)
+_POSITIVE_FG = QColor("#1B5E20")   # dark green  — positive diff text
+
+# Highlight "kind" -> (background, foreground). A cell's highlight kind is
+# looked up in this map wherever a colour is actually needed, so adding a
+# new kind (e.g. the Combined view's Diff colouring) never touches the
+# mismatch-detection logic that decides *which* cells get one.
+_HIGHLIGHT_COLORS = {
+    "mismatch": (_MISMATCH_BG, _MISMATCH_FG),
+    "negative": (_MISMATCH_BG, _MISMATCH_FG),
+    "positive": (_POSITIVE_BG, _POSITIVE_FG),
+}
 
 
 class PandasModel(QAbstractTableModel):
     def __init__(self, df: pd.DataFrame, parent=None):
         super().__init__(parent)
         self._df = df.reset_index(drop=True)
-        self._highlights: set[tuple[int, str]] = set()  # (src_row, col_name)
+        self._highlights: dict[tuple[int, str], str] = {}  # (src_row, col_name) -> kind
 
-    def set_highlights(self, cells: set[tuple[int, str]]):
+    def set_highlights(self, cells: dict[tuple[int, str], str]):
         self._highlights = cells
         if self.rowCount() > 0 and self.columnCount() > 0:
             self.dataChanged.emit(
@@ -219,15 +329,17 @@ class PandasModel(QAbstractTableModel):
                 return ""
             return str(val) if val is not None else ""
 
-        # Mismatch highlight overrides all other cell colours
-        is_mismatch = (index.row(), col_name) in self._highlights
+        # A highlight (mismatch, or a Combined-view Diff colour) overrides
+        # all other cell colours.
+        kind = self._highlights.get((index.row(), col_name))
         if role == Qt.ItemDataRole.UserRole:
-            return is_mismatch
-        if is_mismatch:
+            return kind
+        if kind:
+            bg, fg = _HIGHLIGHT_COLORS[kind]
             if role == Qt.ItemDataRole.BackgroundRole:
-                return QBrush(_MISMATCH_BG)
+                return QBrush(bg)
             if role == Qt.ItemDataRole.ForegroundRole:
-                return QBrush(_MISMATCH_FG)
+                return QBrush(fg)
 
         if role == Qt.ItemDataRole.BackgroundRole:
             side = _col_side(col_name)
@@ -259,25 +371,27 @@ class PandasModel(QAbstractTableModel):
 
 
 class ResultTableDelegate(QStyledItemDelegate):
-    """Keeps mismatch cells visibly red even when the row is selected.
+    """Keeps a highlighted cell's colour visible even when the row is
+    selected.
 
     Qt's selection layer is normally opaque and paints over BackgroundRole.
-    For mismatch cells we take over paint(), draw the red background first,
-    then lay a semi-transparent blue tint so the selection is still
-    perceptible, and finally draw the text in dark red.
+    For highlighted cells we take over paint(), draw the highlight colour
+    first, then lay a semi-transparent blue tint so the selection is still
+    perceptible, and finally draw the text in the highlight's foreground.
     """
     _SEL_TINT = QColor(25, 118, 210, 45)   # PRIMARY at ~18 % opacity
 
     def paint(self, painter, option, index):
-        is_mismatch = bool(index.data(Qt.ItemDataRole.UserRole))
+        kind = index.data(Qt.ItemDataRole.UserRole)
         is_selected = bool(option.state & QStyle.StateFlag.State_Selected)
 
-        if is_mismatch and is_selected:
+        if kind and is_selected:
+            bg, fg = _HIGHLIGHT_COLORS[kind]
             painter.save()
-            painter.fillRect(option.rect, _MISMATCH_BG)
+            painter.fillRect(option.rect, bg)
             painter.fillRect(option.rect, self._SEL_TINT)
             text = str(index.data(Qt.ItemDataRole.DisplayRole) or "")
-            painter.setPen(_MISMATCH_FG)
+            painter.setPen(fg)
             painter.drawText(
                 option.rect.adjusted(6, 0, -4, 0),
                 Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
@@ -310,6 +424,17 @@ def _load_view(view: QTableView, df: pd.DataFrame):
     view.resizeColumnsToContents()
 
 
+def _show_result(stack: QStackedWidget, view: QTableView, df: pd.DataFrame):
+    """Loads df into view and switches stack to the table (or the empty
+    state if df has nothing in it). Shared by a fresh Compare and by
+    reopening a saved comparison — both populate the same result stacks."""
+    if df.empty:
+        stack.setCurrentIndex(0)
+    else:
+        _load_view(view, df)
+        stack.setCurrentIndex(1)
+
+
 def _result_stack(empty_msg: str) -> tuple[QStackedWidget, QTableView]:
     """Returns (stack, view). Stack index 0 = empty state, 1 = table."""
     stack = QStackedWidget()
@@ -318,6 +443,68 @@ def _result_stack(empty_msg: str) -> tuple[QStackedWidget, QTableView]:
     view.setItemDelegate(ResultTableDelegate(view))
     stack.addWidget(view)
     return stack, view
+
+
+def _review_stack(empty_msg: str) -> tuple[QStackedWidget, QListWidget]:
+    """Like _result_stack, but a QListWidget of custom row widgets instead
+    of a table — each row needs live Approve/Reject buttons, which a
+    QTableView cell can't host without a lot more machinery."""
+    stack = QStackedWidget()
+    stack.addWidget(EmptyState(empty_msg))
+    lw = QListWidget()
+    lw.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+    stack.addWidget(lw)
+    return stack, lw
+
+
+class ComparisonPickerDialog(QDialog):
+    """Lists every saved comparison (newest first) so the user picks one by
+    name instead of having to browse the filesystem for it. selected_path
+    is set on accept(); None means the dialog was cancelled."""
+
+    def __init__(self, entries: list[dict], parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Load Comparison")
+        self.resize(560, 360)
+        self.selected_path: Path | None = None
+
+        lay = QVBoxLayout(self)
+        lay.addWidget(QLabel(f"{len(entries)} saved comparison{'s' if len(entries) != 1 else ''}:"))
+
+        self._list = QListWidget()
+        self._list.setAlternatingRowColors(True)
+        for entry in entries:
+            mr_names  = ", ".join(Path(f).name for f in entry["mr_files"])  or "—"
+            ctr_names = ", ".join(Path(f).name for f in entry["ctr_files"]) or "—"
+            item = QListWidgetItem(f"{entry['label']}\n{entry['timestamp'] or 'unknown time'}")
+            item.setToolTip(f"MR:  {mr_names}\nCTR: {ctr_names}\n\n{entry['path']}")
+            item.setData(Qt.ItemDataRole.UserRole, entry["path"])
+            self._list.addItem(item)
+        self._list.itemDoubleClicked.connect(self._accept_current)
+        lay.addWidget(self._list)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Open | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.button(QDialogButtonBox.StandardButton.Open).setEnabled(False)
+        buttons.accepted.connect(self._accept_current)
+        buttons.rejected.connect(self.reject)
+        self._list.itemSelectionChanged.connect(
+            lambda: buttons.button(QDialogButtonBox.StandardButton.Open).setEnabled(
+                bool(self._list.selectedItems())
+            )
+        )
+        lay.addWidget(buttons)
+
+        if entries:
+            self._list.setCurrentRow(0)
+
+    def _accept_current(self):
+        items = self._list.selectedItems()
+        if not items:
+            return
+        self.selected_path = items[0].data(Qt.ItemDataRole.UserRole)
+        self.accept()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -423,6 +610,19 @@ class MainWindow(QMainWindow):
         self._workers:   list = []
         self._mismatch_rows: list[int] = []   # source-model rows with any mismatch
         self._mismatch_pos:  int       = -1   # current navigation position
+        self._rate_rech_mismatch_cells: set[tuple[int, str]] = set()
+
+        # Combined view: per-Stock-Code MR/CTR qty totals for matched keys.
+        self._combined_raw:      dict[str, dict] = {}   # key -> {mr_qty, mr_units, ctr_qty, ctr_units}
+        self._combined_decisions: dict[str, bool] = {}  # key -> True (approved) / False (rejected)
+        self._combined_df        = pd.DataFrame()
+        self._combined_review_df = pd.DataFrame()
+        self._combined_error_df  = pd.DataFrame()
+
+        # Source file names behind the current results — for labelling a
+        # saved comparison. Populated by a fresh Compare or by loading one.
+        self._mr_files_used:  list[str] = []
+        self._ctr_files_used: list[str] = []
 
         self._build_ui()
 
@@ -545,6 +745,34 @@ class MainWindow(QMainWindow):
         self._compare_btn.clicked.connect(self._run_compare)
         cl.addWidget(self._compare_btn)
 
+        # Alternative to uploading + comparing: reopen a past comparison
+        # directly. Lives here (not with Download/Save below) so it works
+        # even before anything's been uploaded.
+        or_lbl = QLabel("— or —")
+        or_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        or_lbl.setStyleSheet(f"color: {MUTED}; font-size: 10px;")
+        cl.addWidget(or_lbl)
+
+        self._load_btn = QPushButton("Load Comparison…")
+        self._load_btn.setFixedHeight(36)
+        self._load_btn.setToolTip(
+            "Reopen a previously saved comparison exactly as it was left, "
+            "without needing the original MR/CTR files.\n"
+            "Replaces anything currently uploaded or compared."
+        )
+        self._load_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: white;
+                color: {PRIMARY};
+                border: 1.5px solid {PRIMARY};
+                border-radius: 6px;
+                font-size: 12px;
+            }}
+            QPushButton:hover {{ background: {MR_LIGHT}; }}
+        """)
+        self._load_btn.clicked.connect(self._load_comparison)
+        cl.addWidget(self._load_btn)
+
         # ── Bottom: results (hidden until first compare) ───────────────────
         self._results_w = QWidget()
         res_l = QVBoxLayout(self._results_w)
@@ -617,10 +845,17 @@ class MainWindow(QMainWindow):
             "Run Compare to see items that appear only in MR.")
         self._stack_only_ctr, self._tab_only_ctr = _result_stack(
             "Run Compare to see items that appear only in CTR.")
+        self._stack_review,  self._review_list   = _review_stack(
+            "Turn on Combined View — stock codes whose MR/CTR rows disagree "
+            "on Unit will appear here for manual approval.")
+        self._stack_error,   self._tab_error     = _result_stack(
+            "Rejected unit-conflict entries will appear here.")
 
         self._tabs.addTab(self._stack_matched,  "Matched")
         self._tabs.addTab(self._stack_only_mr,  "Only in MR")
         self._tabs.addTab(self._stack_only_ctr, "Only in CTR")
+        self._tabs.addTab(self._stack_review,   "Needs Review")
+        self._tabs.addTab(self._stack_error,    "Error Data")
 
         # Corner toolbar: navigate between mismatches + toggle highlight
         _corner = QWidget()
@@ -638,13 +873,15 @@ class MainWindow(QMainWindow):
             QPushButton:disabled {{ color: {BORDER}; }}
         """
         self._prev_mm_btn = QPushButton("↑")
-        self._prev_mm_btn.setToolTip("Jump to previous mismatched row  (Qty or Unit differs)")
+        self._prev_mm_btn.setToolTip(
+            "Jump to previous mismatched row  (Qty, Unit, or Rate/Rechargeable differs)")
         self._prev_mm_btn.setStyleSheet(nav_css)
         self._prev_mm_btn.setEnabled(False)
         self._prev_mm_btn.clicked.connect(lambda: self._nav_mismatch(-1))
 
         self._next_mm_btn = QPushButton("↓")
-        self._next_mm_btn.setToolTip("Jump to next mismatched row  (Qty or Unit differs)")
+        self._next_mm_btn.setToolTip(
+            "Jump to next mismatched row  (Qty, Unit, or Rate/Rechargeable differs)")
         self._next_mm_btn.setStyleSheet(nav_css)
         self._next_mm_btn.setEnabled(False)
         self._next_mm_btn.clicked.connect(lambda: self._nav_mismatch(+1))
@@ -670,23 +907,44 @@ class MainWindow(QMainWindow):
         """)
         self._compare_vals_btn.toggled.connect(self._apply_value_highlights)
 
+        self._combined_btn = QPushButton("Combined View")
+        self._combined_btn.setCheckable(True)
+        self._combined_btn.setEnabled(False)
+        self._combined_btn.setToolTip(
+            "Show one row per Stock Code, with MR and CTR Qty summed across "
+            "every matched row and a Diff column.\n"
+            "Stock codes whose contributing rows disagree on Unit are held "
+            "out — resolve them in the 'Needs Review' tab."
+        )
+        self._combined_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: white; color: #E65100;
+                border: 1px solid #E65100; border-radius: 4px;
+                padding: 2px 10px; font-size: 11px;
+                min-height: 24px;
+            }}
+            QPushButton:checked {{
+                background: #FFF3E0; color: #E65100;
+                border: 1.5px solid #E65100; font-weight: bold;
+            }}
+            QPushButton:disabled {{ color: {BORDER}; border-color: {BORDER}; }}
+        """)
+        self._combined_btn.toggled.connect(self._apply_combined_view)
+
         _cl.addWidget(self._prev_mm_btn)
         _cl.addWidget(self._next_mm_btn)
         _cl.addSpacing(4)
         _cl.addWidget(self._compare_vals_btn)
+        _cl.addSpacing(4)
+        _cl.addWidget(self._combined_btn)
         self._tabs.setCornerWidget(_corner)
 
         res_l.addWidget(self._tabs)
 
-        # Download button
-        self._download_btn = QPushButton("Download Excel Report…")
-        self._download_btn.setEnabled(False)
-        self._download_btn.setFixedHeight(36)
-        self._download_btn.setToolTip(
-            "Save a .xlsx report with three sheets:\n"
-            "Matched, Only in MR, Only in CTR."
-        )
-        self._download_btn.setStyleSheet(f"""
+        # Export / persist row: Excel report download, plus save a full
+        # comparison snapshot for later. ("Load Comparison…" lives in the
+        # top controls instead, since it works before a Compare too.)
+        _export_btn_css = f"""
             QPushButton {{
                 background: white;
                 color: {PRIMARY};
@@ -696,9 +954,35 @@ class MainWindow(QMainWindow):
             }}
             QPushButton:hover    {{ background: {MR_LIGHT}; }}
             QPushButton:disabled {{ color: {BORDER}; border-color: {BORDER}; }}
-        """)
+        """
+        export_row = QHBoxLayout()
+        export_row.setSpacing(8)
+
+        self._download_btn = QPushButton("Download Excel Report…")
+        self._download_btn.setEnabled(False)
+        self._download_btn.setFixedHeight(36)
+        self._download_btn.setToolTip(
+            "Save a .xlsx report with sheets:\n"
+            "Matched, Only in MR, Only in CTR, plus Combined and Error Data "
+            "when the Combined View has been used."
+        )
+        self._download_btn.setStyleSheet(_export_btn_css)
         self._download_btn.clicked.connect(self._download_report)
-        res_l.addWidget(self._download_btn)
+        export_row.addWidget(self._download_btn)
+
+        self._save_btn = QPushButton("Save Comparison…")
+        self._save_btn.setEnabled(False)
+        self._save_btn.setFixedHeight(36)
+        self._save_btn.setToolTip(
+            "Save the full current results (Matched, Only in MR/CTR, Combined "
+            "totals, and any unit-conflict decisions) so you can reopen this "
+            "exact comparison later, even if the source files change."
+        )
+        self._save_btn.setStyleSheet(_export_btn_css)
+        self._save_btn.clicked.connect(self._save_comparison)
+        export_row.addWidget(self._save_btn)
+
+        res_l.addLayout(export_row)
 
         # ── Tab 1: CTR Generator ────────────────────────────────────────────
         self._ctr_gen = CTRGeneratorWidget(parent=self)
@@ -997,26 +1281,78 @@ class MainWindow(QMainWindow):
         self._omr_dl     = _build_display(only_mr_df)
         self._octr_dl    = _build_display(only_ctr_df)
 
-        # Update metrics
-        self._m_matched.setText(str(len(matched)))
-        self._m_only_mr.setText(str(len(only_mr_df)))
-        self._m_only_ctr.setText(str(len(only_ctr_df)))
+        # Rate (CTR) vs Rechargeable (MR) consistency check — always runs on
+        # Compare, independent of the Compare Values toggle below.
+        self._rate_rech_mismatch_cells = _find_rate_rechargeable_mismatches(self._display_df)
+
+        # Combined view: per-Stock-Code MR/CTR Qty totals, restricted to keys
+        # that actually matched. Column names here are resolved against the
+        # raw, pre-merge mr/ctr frames (not `merged`) — pandas only suffixes
+        # a column with _MR/_CTR when both sides share that exact name (e.g.
+        # "Unit"); "Qty" vs "Quantity" never collide, so those stay
+        # unsuffixed in `merged` while the raw frames still use their own
+        # native names on both counts. Reusing qty_mr/unit_mr/etc. (resolved
+        # against `merged`, for the display table) here would silently find
+        # nothing on the "Unit" columns.
+        qty_mr_raw   = _find_col(mr,  "Qty")
+        unit_mr_raw  = _find_col(mr,  "Unit")
+        qty_ctr_raw  = _find_col(ctr, "Quantity", "Qty")
+        unit_ctr_raw = _find_col(ctr, "Unit")
+
+        # Fresh Compare = fresh decisions; a stock code approved/rejected
+        # before this run no longer applies once the underlying data changed.
+        matched_keys = set(matched["_KEY_"])
+        self._combined_raw = _aggregate_combined(
+            mr, ctr, qty_mr_raw, unit_mr_raw, qty_ctr_raw, unit_ctr_raw, matched_keys)
+        self._combined_decisions = {}
+        self._mr_files_used  = sorted(mr["_SourceFile"].dropna().unique().tolist()) \
+            if "_SourceFile" in mr.columns else []
+        self._ctr_files_used = sorted(ctr["_SourceFile"].dropna().unique().tolist()) \
+            if "_SourceFile" in ctr.columns else []
+
+        self._present_compare_results()
+
+        now = datetime.now().strftime("%H:%M")
+        n_rate_rech = len({r for r, _ in self._rate_rech_mismatch_cells})
+        rate_rech_note = (
+            f" · {n_rate_rech} Rate/Rechargeable mismatch{'es' if n_rate_rech != 1 else ''}"
+            if n_rate_rech else ""
+        )
+        self._set_status(
+            f"Compared at {now} — "
+            f"{len(matched)} matched · "
+            f"{len(only_mr_df)} only in MR · "
+            f"{len(only_ctr_df)} only in CTR"
+            f"{rate_rech_note}."
+        )
+        log.info("Compare finished: matched=%d only_mr=%d only_ctr=%d",
+                  len(matched), len(only_mr_df), len(only_ctr_df))
+
+    def _present_compare_results(self):
+        """Populates the results panel — metrics, the three main tabs, the
+        Rate/Rechargeable baseline highlight, and the Combined/Needs
+        Review/Error Data tabs — from whatever is currently in
+        self._display_df/_omr_dl/_octr_dl/_combined_raw/_combined_decisions/
+        _rate_rech_mismatch_cells. Shared by a fresh Compare and by
+        reopening a saved comparison, so both end up in the same state."""
+        self._refresh_combined_tables()
+
+        self._m_matched.setText(str(len(self._display_df)))
+        self._m_only_mr.setText(str(len(self._omr_dl)))
+        self._m_only_ctr.setText(str(len(self._octr_dl)))
         self._metrics_w.setVisible(True)
 
-        # Populate result stacks
-        def _show(stack, view, df, empty_df=None):
-            if df.empty:
-                stack.setCurrentIndex(0)
-            else:
-                _load_view(view, df)
-                stack.setCurrentIndex(1)
+        _show_result(self._stack_matched,  self._tab_matched,  self._display_df)
+        _show_result(self._stack_only_mr,  self._tab_only_mr,  self._omr_dl)
+        _show_result(self._stack_only_ctr, self._tab_only_ctr, self._octr_dl)
 
-        _show(self._stack_matched,  self._tab_matched,  self._display_df)
-        _show(self._stack_only_mr,  self._tab_only_mr,  self._omr_dl)
-        _show(self._stack_only_ctr, self._tab_only_ctr, self._octr_dl)
+        if not self._display_df.empty:
+            self._tab_matched.model().sourceModel().set_highlights(
+                {c: "mismatch" for c in self._rate_rech_mismatch_cells})
 
         self._tabs.setCurrentWidget(self._stack_matched)
         self._download_btn.setEnabled(True)
+        self._save_btn.setEnabled(True)
         self._step_bar.set_step(2)
 
         # Reset value-comparison state (new data loaded, old highlights gone)
@@ -1030,21 +1366,17 @@ class MainWindow(QMainWindow):
         self._next_mm_btn.setEnabled(False)
         self._mismatch_lbl.setVisible(False)
 
+        # Reset combined-view state (new data loaded, old grouping gone)
+        self._combined_btn.blockSignals(True)
+        self._combined_btn.setChecked(False)
+        self._combined_btn.blockSignals(False)
+        self._combined_btn.setEnabled(bool(self._combined_raw))
+
         # Expand results panel to take ~70 % of the window height
         if not self._results_w.isVisible():
             self._results_w.setVisible(True)
         total = self._splitter.height()
         self._splitter.setSizes([int(total * 0.30), int(total * 0.70)])
-
-        now = datetime.now().strftime("%H:%M")
-        self._set_status(
-            f"Compared at {now} — "
-            f"{len(matched)} matched · "
-            f"{len(only_mr_df)} only in MR · "
-            f"{len(only_ctr_df)} only in CTR."
-        )
-        log.info("Compare finished: matched=%d only_mr=%d only_ctr=%d",
-                  len(matched), len(only_mr_df), len(only_ctr_df))
 
     # ── Value comparison highlights ───────────────────────────────────────────
 
@@ -1054,8 +1386,15 @@ class MainWindow(QMainWindow):
             return
         source: PandasModel = proxy.sourceModel()
 
+        if self._combined_btn.isChecked():
+            self._apply_combined_diff_highlights(source, active)
+            return
+
         if not active or self._display_df.empty:
-            source.set_highlights(set())
+            # Turning this off doesn't clear the Rate/Rechargeable check —
+            # that one runs unconditionally on every Compare (see
+            # _run_compare), this toggle only adds/removes the Qty/Unit layer.
+            source.set_highlights({c: "mismatch" for c in self._rate_rech_mismatch_cells})
             self._mismatch_rows = []
             self._mismatch_pos  = -1
             self._prev_mm_btn.setEnabled(False)
@@ -1078,16 +1417,21 @@ class MainWindow(QMainWindow):
             except (ValueError, TypeError):
                 return True               # non-numeric: fall back to string compare
 
-        mismatch_cells: set[tuple[int, str]] = set()
-        mismatch_row_set: set[int] = set()
+        # Rate/Rechargeable mismatches always count as navigable "mismatch
+        # rows" here too, alongside the Qty/Unit differences this toggle
+        # was originally built for — both are surfaced by the same arrows.
+        mismatch_cells: dict[tuple[int, str], str] = {
+            c: "mismatch" for c in self._rate_rech_mismatch_cells
+        }
+        mismatch_row_set: set[int] = {r for r, _ in self._rate_rech_mismatch_cells}
 
         for col_mr, col_ctr in [("Qty (MR)", "Qty (CTR)"), ("Unit (MR)", "Unit (CTR)")]:
             if col_mr not in df.columns or col_ctr not in df.columns:
                 continue
             for row_idx in range(len(df)):
                 if _differs(df.iloc[row_idx][col_mr], df.iloc[row_idx][col_ctr]):
-                    mismatch_cells.add((row_idx, col_mr))
-                    mismatch_cells.add((row_idx, col_ctr))
+                    mismatch_cells[(row_idx, col_mr)] = "mismatch"
+                    mismatch_cells[(row_idx, col_ctr)] = "mismatch"
                     mismatch_row_set.add(row_idx)
 
         source.set_highlights(mismatch_cells)
@@ -1108,14 +1452,65 @@ class MainWindow(QMainWindow):
             self._nav_mismatch(0, absolute=True)   # scroll to first match
             self._set_status(
                 f"Compare Values — {n} row{'s' if n != 1 else ''} with "
-                "Qty or Unit mismatch highlighted in red.")
+                "Qty, Unit, or Rate/Rechargeable mismatch highlighted in red.")
         else:
             self._mismatch_lbl.setText(
                 '<span style="color:#2E7D32; font-size:11px;">'
                 '&#10003;&nbsp; All values match'
                 '</span>')
             self._mismatch_lbl.setVisible(True)
-            self._set_status("Compare Values — no Qty or Unit mismatches found.")
+            self._set_status("Compare Values — no Qty, Unit, or Rate/Rechargeable mismatches found.")
+
+    def _apply_combined_diff_highlights(self, source: "PandasModel", active: bool):
+        """Compare Values, applied to the Combined view: colours the Diff
+        column green where CTR's total is higher than MR's, red where it's
+        lower, instead of the detail view's Qty/Unit/Rate mismatch
+        highlighting. No row navigation here — the arrows stay tied to the
+        detail view's per-row mismatches."""
+        self._mismatch_rows = []
+        self._mismatch_pos  = -1
+        self._prev_mm_btn.setEnabled(False)
+        self._next_mm_btn.setEnabled(False)
+
+        diff_col = "Diff (CTR − MR)"
+        if not active or self._combined_df.empty or diff_col not in self._combined_df.columns:
+            source.set_highlights({})
+            self._mismatch_lbl.setVisible(False)
+            return
+
+        cells: dict[tuple[int, str], str] = {}
+        positive = negative = 0
+        for row_idx, val in enumerate(self._combined_df[diff_col]):
+            if val is None or (isinstance(val, float) and pd.isna(val)):
+                continue
+            if val > 0:
+                cells[(row_idx, diff_col)] = "positive"
+                positive += 1
+            elif val < 0:
+                cells[(row_idx, diff_col)] = "negative"
+                negative += 1
+
+        source.set_highlights(cells)
+
+        if positive or negative:
+            self._mismatch_lbl.setText(
+                f'<span style="color:#1B5E20; font-size:11px;">'
+                f'&#9650; {positive} CTR &gt; MR</span>'
+                f'&nbsp;&nbsp;'
+                f'<span style="color:#C62828; font-size:11px;">'
+                f'&#9660; {negative} CTR &lt; MR</span>'
+            )
+            self._mismatch_lbl.setVisible(True)
+            self._set_status(
+                f"Compare Values — Combined totals: {positive} Stock Code(s) with "
+                f"CTR higher than MR (green), {negative} with CTR lower than MR (red).")
+        else:
+            self._mismatch_lbl.setText(
+                '<span style="color:#2E7D32; font-size:11px;">'
+                '&#10003;&nbsp; All combined totals match'
+                '</span>')
+            self._mismatch_lbl.setVisible(True)
+            self._set_status("Compare Values — no MR/CTR total differences in Combined view.")
 
     def _nav_mismatch(self, step: int, absolute: bool = False):
         if not self._mismatch_rows:
@@ -1139,6 +1534,160 @@ class MainWindow(QMainWindow):
             f"Mismatch {self._mismatch_pos + 1} of {n}  — "
             f"Stock Code: {self._display_df.iloc[src_row]['Stock Code']}")
 
+    # ── Combined view ────────────────────────────────────────────────────────
+
+    def _refresh_combined_tables(self):
+        """Rebuild the Combined / Needs Review / Error Data frames from
+        _combined_raw + _combined_decisions, and refresh the tabs that show
+        them. Called after every Compare and after every Approve/Reject."""
+        rows_combined, rows_review, rows_error = [], [], []
+
+        for key in sorted(self._combined_raw):
+            agg = self._combined_raw[key]
+            mr_qty, ctr_qty = agg["mr_qty"], agg["ctr_qty"]
+            all_units = sorted(set(agg["mr_units"]) | set(agg["ctr_units"]))
+            conflict  = len(all_units) > 1
+            diff = (ctr_qty - mr_qty) if (mr_qty is not None and ctr_qty is not None) else None
+
+            base = {
+                "Stock Code":      key,
+                "Qty (MR) Total":  mr_qty,
+                "Qty (CTR) Total": ctr_qty,
+                "Diff (CTR − MR)": diff,
+                "Unit":            " / ".join(all_units),
+            }
+
+            if not conflict:
+                base["Flag"] = ""
+                rows_combined.append(base)
+                continue
+
+            decision = self._combined_decisions.get(key)
+            if decision is True:
+                base["Flag"] = "⚠ Unit conflict — approved"
+                rows_combined.append(base)
+            elif decision is False:
+                base["Reason"] = (
+                    f"Unit conflict ({', '.join(all_units)}) — "
+                    "rejected, excluded from Combined totals"
+                )
+                rows_error.append(base)
+            else:
+                rows_review.append(base)
+
+        combined_cols = ["Stock Code", "Qty (MR) Total", "Qty (CTR) Total",
+                          "Diff (CTR − MR)", "Unit", "Flag"]
+        review_cols   = ["Stock Code", "Qty (MR) Total", "Qty (CTR) Total",
+                          "Diff (CTR − MR)", "Unit"]
+        error_cols    = ["Stock Code", "Qty (MR) Total", "Qty (CTR) Total",
+                          "Unit", "Reason"]
+
+        self._combined_df = (
+            pd.DataFrame(rows_combined, columns=combined_cols)
+              .sort_values("Stock Code").reset_index(drop=True)
+            if rows_combined else pd.DataFrame(columns=combined_cols)
+        )
+        self._combined_review_df = (
+            pd.DataFrame(rows_review, columns=review_cols)
+              .sort_values("Stock Code").reset_index(drop=True)
+            if rows_review else pd.DataFrame(columns=review_cols)
+        )
+        self._combined_error_df = (
+            pd.DataFrame(rows_error, columns=error_cols)
+              .sort_values("Stock Code").reset_index(drop=True)
+            if rows_error else pd.DataFrame(columns=error_cols)
+        )
+
+        self._fill_review_list()
+        self._update_review_tab_badge()
+        _show_result(self._stack_error, self._tab_error, self._combined_error_df)
+
+        if self._combined_btn.isChecked():
+            _load_view(self._tab_matched, self._combined_df)
+            # A fresh model has no highlights — reapply Compare Values'
+            # green/red Diff colouring if it was on before this rebuild.
+            self._apply_value_highlights(self._compare_vals_btn.isChecked())
+
+    def _update_review_tab_badge(self):
+        """So a pending unit-conflict review is visible on the tab bar
+        itself, without having to open the tab to find out."""
+        idx = self._tabs.indexOf(self._stack_review)
+        n = len(self._combined_review_df)
+        if n:
+            self._tabs.setTabText(idx, f"Needs Review  ⚠ {n}")
+            self._tabs.tabBar().setTabTextColor(idx, QColor("#E65100"))
+        else:
+            self._tabs.setTabText(idx, "Needs Review")
+            self._tabs.tabBar().setTabTextColor(idx, QColor())
+
+    def _fill_review_list(self):
+        lw = self._review_list
+        lw.clear()
+        if self._combined_review_df.empty:
+            self._stack_review.setCurrentIndex(0)
+            return
+        self._stack_review.setCurrentIndex(1)
+
+        for _, row in self._combined_review_df.iterrows():
+            key = row["Stock Code"]
+            agg = self._combined_raw[key]
+            mr_units  = ", ".join(agg["mr_units"])  or "—"
+            ctr_units = ", ".join(agg["ctr_units"]) or "—"
+            label = (
+                f"<b>{key}</b> &mdash; MR: {agg['mr_qty']} ({mr_units})"
+                f"&nbsp;&nbsp; CTR: {agg['ctr_qty']} ({ctr_units})"
+                f"&nbsp;&nbsp; <span style='color:#C62828;'>units disagree, "
+                "can't be summed automatically</span>"
+            )
+
+            item = QListWidgetItem()
+            item.setFlags(Qt.ItemFlag.ItemIsEnabled)
+            row_w = QWidget()
+            rl = QHBoxLayout(row_w)
+            rl.setContentsMargins(6, 4, 6, 4)
+            lbl = QLabel(label)
+            lbl.setWordWrap(True)
+            lbl.setTextFormat(Qt.TextFormat.RichText)
+            rl.addWidget(lbl, 1)
+
+            approve_btn = QPushButton("Approve")
+            approve_btn.setToolTip(
+                "Include in the Combined totals anyway, flagged as a warning.")
+            approve_btn.setFixedWidth(84)
+            approve_btn.clicked.connect(lambda _, k=key: self._on_review_decision(k, True))
+
+            reject_btn = QPushButton("Reject")
+            reject_btn.setToolTip(
+                "Exclude from the Combined totals; move to Error Data.")
+            reject_btn.setFixedWidth(84)
+            reject_btn.clicked.connect(lambda _, k=key: self._on_review_decision(k, False))
+
+            rl.addWidget(approve_btn)
+            rl.addWidget(reject_btn)
+
+            lw.addItem(item)
+            lw.setItemWidget(item, row_w)
+            item.setSizeHint(row_w.sizeHint())
+
+    def _on_review_decision(self, stock_code: str, approved: bool):
+        self._combined_decisions[stock_code] = approved
+        self._refresh_combined_tables()
+        self._set_status(
+            f"Stock Code {stock_code} — unit conflict "
+            + ("approved, included in Combined totals as a warning."
+               if approved else "rejected, moved to Error Data.")
+        )
+
+    def _apply_combined_view(self, active: bool):
+        if self._tab_matched.model() is None:
+            return
+        _load_view(self._tab_matched, self._combined_df if active else self._display_df)
+        # Compare Values works in both views (Qty/Unit/Rate mismatches in
+        # detail, green/red Diff colouring in Combined) — a fresh model from
+        # _load_view above has no highlights, so reapply whichever state it
+        # was already in for the view we just switched to.
+        self._apply_value_highlights(self._compare_vals_btn.isChecked())
+
     # ── Download ──────────────────────────────────────────────────────────────
 
     def _download_report(self):
@@ -1154,12 +1703,95 @@ class MainWindow(QMainWindow):
                 self._display_df.to_excel(writer, index=False, sheet_name="Matched")
                 self._omr_dl.to_excel(writer,     index=False, sheet_name="Only in MR")
                 self._octr_dl.to_excel(writer,    index=False, sheet_name="Only in CTR")
+                if not self._combined_df.empty:
+                    self._combined_df.to_excel(writer, index=False, sheet_name="Combined")
+                if not self._combined_error_df.empty:
+                    self._combined_error_df.to_excel(writer, index=False, sheet_name="Error Data")
             Path(path).write_bytes(buf.getvalue())
             log.info("Report saved: %s", path)
             QMessageBox.information(self, "Saved", f"Report saved:\n{path}")
         except Exception as exc:
             log.exception("Failed to save report: %s", path)
             QMessageBox.critical(self, "Save error", str(exc))
+
+    # ── Comparison history ───────────────────────────────────────────────────
+
+    def _save_comparison(self):
+        label = default_label(self._mr_files_used, self._ctr_files_used)
+        suggested = suggest_save_path(label)
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save Comparison", str(suggested), "JSON files (*.json)"
+        )
+        if not path:
+            return
+        try:
+            save_comparison(
+                Path(path),
+                label=Path(path).stem,
+                mr_files=self._mr_files_used,
+                ctr_files=self._ctr_files_used,
+                display_df=self._display_df,
+                omr_df=self._omr_dl,
+                octr_df=self._octr_dl,
+                combined_raw=self._combined_raw,
+                combined_decisions=self._combined_decisions,
+            )
+            log.info("Comparison saved: %s", path)
+            QMessageBox.information(self, "Saved", f"Comparison saved:\n{path}")
+        except Exception as exc:
+            log.exception("Failed to save comparison: %s", path)
+            QMessageBox.critical(self, "Save error", str(exc))
+
+    def _load_comparison(self):
+        entries = list_saved_comparisons()
+        if not entries:
+            QMessageBox.information(
+                self, "No saved comparisons",
+                f"No saved comparisons found in:\n{comparisons_dir()}\n\n"
+                "Use \"Save Comparison…\" after a Compare to create one."
+            )
+            return
+
+        dlg = ComparisonPickerDialog(entries, parent=self)
+        if dlg.exec() != QDialog.DialogCode.Accepted or dlg.selected_path is None:
+            return
+        path = dlg.selected_path
+
+        try:
+            data = load_comparison(path)
+        except Exception as exc:
+            log.exception("Failed to load comparison: %s", path)
+            QMessageBox.critical(self, "Load error", str(exc))
+            return
+
+        # A saved comparison is a complete, self-contained snapshot — it
+        # doesn't correspond to whatever is currently uploaded (if
+        # anything), so that gets wiped rather than left sitting stale next
+        # to results from a different comparison entirely.
+        self._clear("mr")
+        self._clear("ctr")
+        self._mr_preview.setModel(None)
+        self._ctr_preview.setModel(None)
+
+        self._display_df                = data["display_df"]
+        self._omr_dl                    = data["omr_df"]
+        self._octr_dl                   = data["octr_df"]
+        self._combined_raw              = data["combined_raw"]
+        self._combined_decisions        = data["combined_decisions"]
+        self._mr_files_used             = data["mr_files"]
+        self._ctr_files_used            = data["ctr_files"]
+        self._rate_rech_mismatch_cells = _find_rate_rechargeable_mismatches(self._display_df)
+
+        self._present_compare_results()
+
+        log.info("Comparison loaded: %s", path)
+        self._set_status(
+            f"Loaded comparison “{data['label']}” "
+            f"(saved {data['timestamp'] or 'unknown time'}) — "
+            f"{len(self._display_df)} matched · "
+            f"{len(self._omr_dl)} only in MR · "
+            f"{len(self._octr_dl)} only in CTR."
+        )
 
     # ── CTR Generator ─────────────────────────────────────────────────────────
 

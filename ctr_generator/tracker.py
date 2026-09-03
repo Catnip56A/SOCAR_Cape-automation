@@ -80,6 +80,22 @@ def match_site(site_hint: str) -> str | None:
     return None
 
 
+def company_project_code(client: str) -> str | None:
+    """Case-insensitive match of a CTR's Client field against
+    ctr_tracker_companies. Some companies (e.g. Turan Drilling, CDC) always
+    use the same Project Code no matter which site/location the CTR is
+    for — this takes priority over the location-based lookup above when it
+    matches. Returns None if the client isn't one of the configured
+    companies, so the caller falls back to location_options()."""
+    client_norm = client.strip().lower()
+    if not client_norm:
+        return None
+    for name, code in CFG.get("ctr_tracker_companies", {}).items():
+        if name.strip().lower() == client_norm:
+            return code
+    return None
+
+
 def _main_sheet(wb) -> "openpyxl.worksheet.worksheet.Worksheet":
     azn_name = CFG["azn_template"]["sheet_name"]
     usd_name = CFG["usd_template"]["main_sheet"]

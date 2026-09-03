@@ -260,6 +260,27 @@ _DEFAULTS: dict = {
         "col_value":         "S",
         "col_currency":      "AC",
         "col_revision":      "AI",
+        # Row-local helper formulas every real row in the sheet carries.
+        # Only needed when a brand-new row is inserted (see "separate
+        # revision" below); every other write path leaves whatever the
+        # pre-created row already has in these columns alone.
+        #
+        # Confirmed against the real file's actual formulas (a full column
+        # scan on Windows, not just this session's earlier sample): every
+        # data row carries exactly these four. Three (A, BA, BB) reference
+        # only cells in their own row, so a plain Excel row-insert renumbers
+        # them correctly on its own — row_local_formulas just needs to seed
+        # them on the brand-new row. The fourth, the running counter (B),
+        # references the row *above* it instead, which is why it's split
+        # out separately below — see tracker_xlwings.insert_revision_rows
+        # for the extra repair step that one needs and the other three don't.
+        "row_local_formulas": [
+            ["A",  'IF(I{row}>0,H{row}&"-"&I{row},H{row})'],
+            ["BA", 'D{row}&" "&AC{row}'],
+            ["BB", "A{row}"],
+        ],
+        "col_row_counter":       "B",
+        "row_counter_formula":   "B{prev_row}+1",
         # Total CTR value converted to USD — always rewritten with this
         "col_value_usd":     "AJ",
         # formula (AC/S are that row's own currency/value columns) using
@@ -319,6 +340,17 @@ _DEFAULTS: dict = {
         "Onshore Projects":      {"project_code": "FMA0037-SHDPRJ",  "tracker_location": "Onshore"},
         "Shah Deniz Bravo":      {"project_code": "FMA0062-SDB",     "tracker_location": "Offshore"},
         "ACE (Azeri-Central-East) Project": {"project_code": "FMA0119-ACE", "tracker_location": "Offshore"},
+    },
+
+    # Company name -> Project Code, matched case-insensitively against the
+    # CTR's own Client field. Takes priority over ctr_tracker_locations —
+    # some companies always use the same project code regardless of which
+    # site/location the CTR is actually for. Edit/add entries here — no
+    # code changes needed. (Verified against the real tracker's own
+    # historical rows: Turan Drilling -> AZE0104, CDC -> AZE0129.)
+    "ctr_tracker_companies": {
+        "Turan Drilling": "AZE0104",
+        "CDC":            "AZE0129",
     },
 
     # The "Additional Information / Type of Scaffold System / TRANSPORT"

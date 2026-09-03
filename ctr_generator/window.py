@@ -3198,7 +3198,18 @@ class CTRGeneratorWidget(QWidget):
                 rate = float(_txt(_MP_RATE) or 0)
             except ValueError:
                 rate = 0.0
+            shift      = _txt(_MP_SHIFT)     or "Day"
+            shift_type = _txt(_MP_SHIFTTYPE) or "Normal"
+            # "Normal" is the default Shift Type — worth calling out only
+            # when it's something else (Overtime/Rotational/Standby).
+            comment = f"{shift} Shift" if shift_type == "Normal" else f"{shift} Shift, {shift_type}"
             row_dict = {
+                # Comment is otherwise unused for a manpower row — this is
+                # the only place Shift/Shift Type end up in the generated
+                # CTR at all (they're used internally to pick the AZN
+                # pricebook rate, see _match_azn_labor, but never written
+                # to the output on their own).
+                "comment":       comment,
                 "num_employees": num_emp,
                 "description":   _txt(_MP_DESC),
                 "quantity":      qty,

@@ -158,6 +158,13 @@
     "col_value":        "S",
     "col_currency":     "AC",
     "col_revision":     "AI",
+    "row_local_formulas": [
+      ["A",  "IF(I{row}>0,H{row}&\"-\"&I{row},H{row})"],
+      ["BA", "D{row}&\" \"&AC{row}"],
+      ["BB", "A{row}"]
+    ],
+    "col_row_counter":     "B",
+    "row_counter_formula": "B{prev_row}+1",
     "col_value_usd":     "AJ",
     "value_usd_formula": "IF(AC{row}=\"USD\", S{row}, IF(AC{row}=\"AZN\", S{row}/{rate}, \"\"))",
     "value_style_by_currency": {"AZN": 72, "USD": 159},
@@ -191,6 +198,11 @@
     "Onshore Projects":      {"project_code": "FMA0037-SHDPRJ",   "tracker_location": "Onshore"},
     "Shah Deniz Bravo":      {"project_code": "FMA0062-SDB",      "tracker_location": "Offshore"},
     "ACE (Azeri-Central-East) Project": {"project_code": "FMA0119-ACE", "tracker_location": "Offshore"}
+  },
+
+  "ctr_tracker_companies": {
+    "Turan Drilling": "AZE0104",
+    "CDC":            "AZE0129"
   },
 
   "ctr_request_extras": {

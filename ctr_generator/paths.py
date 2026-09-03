@@ -18,12 +18,7 @@ import sys
 from pathlib import Path
 
 
-def user_data_dir() -> Path:
-    """
-    Returns a writable, per-user directory for this app's data, stable
-    across restarts (and across PyInstaller onefile re-extraction).
-    Creates the directory if it doesn't exist yet.
-    """
+def _socar_data_root() -> Path:
     if sys.platform == "win32":
         base = os.environ.get("APPDATA") or str(Path.home())
     elif sys.platform == "darwin":
@@ -31,6 +26,28 @@ def user_data_dir() -> Path:
     else:
         base = os.environ.get("XDG_DATA_HOME") or str(Path.home() / ".local" / "share")
 
-    path = Path(base) / "SOCAR" / "CTRGenerator"
+    return Path(base) / "SOCAR"
+
+
+def user_data_dir() -> Path:
+    """
+    Returns a writable, per-user directory for the CTR Generator's own data
+    (presets, saved renames, match aliases), stable across restarts (and
+    across PyInstaller onefile re-extraction). Creates the directory if it
+    doesn't exist yet.
+    """
+    path = _socar_data_root() / "CTRGenerator"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def comparisons_data_dir() -> Path:
+    """
+    Returns a writable, per-user directory for saved MR vs CTR comparisons —
+    a sibling of user_data_dir(), not nested inside it, since a saved
+    comparison isn't CTR Generator data and shouldn't live in its folder.
+    Creates the directory if it doesn't exist yet.
+    """
+    path = _socar_data_root() / "Comparisons"
     path.mkdir(parents=True, exist_ok=True)
     return path

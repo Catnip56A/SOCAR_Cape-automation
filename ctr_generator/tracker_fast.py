@@ -7,15 +7,21 @@ Placement: a CTR is written into the existing tracker row whose CTR
 number column already contains its base number (currency suffix
 stripped, e.g. "CTR-26-217 AZN" -> "CTR-26-217" — see
 CFG["ctr_tracker"]["value_usd_formula"] for why AZN/USD share one base
-number). Rows are pre-created by hand; this module never creates a new
-row and never shifts existing ones — if no matching, still-empty row
-exists, the CTR is skipped with a warning instead of guessing a
-placement. An earlier version appended to the first blank row at the
-end of the sheet; that was replaced because CTR numbers need to land
-next to the row a human already reserved for them, and because true row
-insertion (shifting thousands of existing rows, their formulas, cell
-comments, and data-validation ranges) was judged too risky to hand-roll
-against a shared production file.
+number), *and* whose Currency/Revision cells (if not blank) already agree
+with the entry being written — see _classify_target_row. Rows are
+pre-created by hand; if no matching, still-empty row exists, the CTR is
+skipped with a warning instead of guessing a placement. An earlier
+version appended to the first blank row at the end of the sheet; that was
+replaced because CTR numbers need to land next to the row a human already
+reserved for them.
+
+The one exception is "add as separate revision" (revision_mode) with no
+spare pre-created row available for that CTR number: a real row does get
+inserted there, but not by this module — see tracker_xlwings.py, which
+drives actual Excel to do it (so formula/range references shift exactly
+as they would if a person inserted the row by hand) and always runs
+*before* this module takes its one read/write snapshot of the sheet.
+Every other write path here still never creates or shifts a row.
 
 Performance: this edits only the target sheet's raw XML directly inside
 the .xlsm zip and copies every other archive member — other sheets,
@@ -42,6 +48,7 @@ from lxml import etree
 
 from ctr_generator.config import CFG
 from ctr_generator.tracker import CTREntry, backup_tracker
+from ctr_generator import tracker_xlwings
 
 log = logging.getLogger(__name__)
 
@@ -214,7 +221,7 @@ def _set_formula_cell(c_elem, formula: str) -> None:
 #
 # Split into two groups because they're treated differently when a row's
 # cell already has something in it: the "core" fields are what
-# _find_target_row requires to be empty for a match (see its check_cols),
+# _classify_target_row requires to be empty for a match (see its check_cols),
 # so by the time we get here they're guaranteed blank (or allow_overwrite
 # is on and blank-ness doesn't matter) — always written. The "soft"
 # fields are explicitly allowed to already have a value (a human often
@@ -244,55 +251,412 @@ def _activity_matches_location(activity_type: str, tracker_location: str) -> boo
     return activity_type == normalized_location
 
 
-def _find_target_row(
+def _classify_target_row(
     row_by_num: dict[int, "etree._Element"],
     shared_strings: list[str],
     cfg: dict,
     base_ctr_number: str,
+    currency: str,
     used_rows: set[int],
-    allow_overwrite: bool,
-) -> tuple[int | None, str]:
-    """A row whose CTR number column matches base_ctr_number, or
-    (None, reason) — distinguishing "no such CTR number anywhere" from
-    "found it, but that row is already filled in" so the skip warning is
-    actually useful.
+) -> tuple[str | None, int | None, bool, str]:
+    """Finds the row reserved for base_ctr_number, distinguishing four
+    outcomes so the caller can decide what a "revision" write should do:
 
-    Only the core data fields (date/description/value/currency/revision)
-    have to be empty for a match to count as available — Client,
-    Location and Project Code are fine to already have something, since
-    a human pre-creating the row often fills those in by hand as part of
-    setting it up. allow_overwrite skips the emptiness requirement
-    entirely and returns the first matching row regardless of its
-    current contents."""
-    d_col = cfg["col_ctr_number"]
-    check_cols = [
-        cfg["col_date"], cfg["col_description"],
-        cfg["col_value"], cfg["col_currency"], cfg["col_revision"],
-    ]
-    found_but_filled = False
+        ("empty", row, has_filled_sibling, "")
+            — a compatible row with nothing in it yet; write into it
+              normally. has_filled_sibling is True when a *different* row
+              for this same (CTR number, currency) already has data —
+              i.e. this write is still a revision of that other row, even
+              though it lands in an available spare rather than
+              overwriting anything (see write_entries_fast).
+        ("filled", row, True, "")
+            — no empty row, but a row already holding data for this exact
+              (CTR number, currency) — the caller decides overwrite vs.
+              separate revision (see write_entries_fast).
+        ("wrong_currency", None, False, reason)
+            — this CTR number exists, but only ever for the *other*
+              currency — nothing reserved for this one at all, as opposed
+              to something already there that a write would collide with.
+              The caller always creates a row for it (see
+              write_entries_fast) — unlike a genuine revision conflict,
+              there's nothing existing to overwrite or protect here.
+        (None, None, False, reason)
+            — the CTR number itself doesn't exist in the sheet at all.
+
+    A row already labeled with a *different* currency (data a human, or an
+    earlier write, put there) is treated as reserved for that other
+    currency and skipped entirely — never matched, never reported as
+    "filled" — so writing an AZN entry can't collide with a row waiting
+    for its USD counterpart. This matches the real tracker's own
+    convention of pre-creating one blank row per (CTR number, currency).
+
+    Revision is deliberately *not* filtered on the same way — a row's
+    Revision (AI) just records which revision its current data is, not a
+    reservation label for a not-yet-written one (unlike currency, there's
+    no real-file evidence of a "one row per revision" pre-creation
+    convention), and overwriting a row is precisely how its revision is
+    expected to change. It only matters once a row's classified: see
+    write_entries_fast for how kind == "filled" is actually handled.
+
+    Date/Description/Value determine emptiness (must be blank). A cell
+    already holding the *same* currency is a pre-label reservation marker,
+    not "data already there", so Currency isn't required blank here.
+    Client, Location and Project Code are fine to already have something
+    either way, since a human pre-creating the row often fills those in
+    by hand as part of setting it up.
+    """
+    d_col   = cfg["col_ctr_number"]
+    cur_col = cfg["col_currency"]
+    check_cols = [cfg["col_date"], cfg["col_description"], cfg["col_value"]]
+
+    empty_row: int | None = None
+    filled_row: int | None = None
+    any_ctr_number_row = False
 
     for row_num in sorted(row_by_num):
-        if row_num in used_rows:
-            continue
         row_elem = row_by_num[row_num]
-        d_ref = f"{d_col}{row_num}"
-        d_cell = next((c for c in row_elem if c.get("r") == d_ref), None)
+        d_cell = next((c for c in row_elem if c.get("r") == f"{d_col}{row_num}"), None)
         if d_cell is None:
             continue
         if _cell_text(d_cell, shared_strings).strip() != base_ctr_number:
             continue
+        # True regardless of used_rows — another entry in this same batch
+        # already claiming this row as *its own* write target doesn't mean
+        # the CTR number itself doesn't exist. Getting this wrong makes a
+        # second entry for the same CTR number (e.g. its USD row, or
+        # another revision) invisible to every later entry in the batch —
+        # exactly the bug where only the first entry per CTR number ever
+        # wrote successfully and everything else came back "no row found".
+        any_ctr_number_row = True
 
-        if allow_overwrite:
-            return row_num, ""
+        if row_num in used_rows:
+            continue   # already claimed as a write target by another
+                        # entry in this batch — can't be picked again, but
+                        # its existence just above still counts
 
         cells = {c.get("r"): c for c in row_elem.findall(f"{_M}c")}
-        if all(_cell_is_empty(cells.get(f"{col}{row_num}")) for col in check_cols):
-            return row_num, ""
-        found_but_filled = True
 
-    if found_but_filled:
-        return None, f'a row with CTR number "{base_ctr_number}" exists but is already filled in'
-    return None, f'no row found with CTR number "{base_ctr_number}" in column {d_col}'
+        cur_cell = cells.get(f"{cur_col}{row_num}")
+        cur_text = _cell_text(cur_cell, shared_strings).strip() if cur_cell is not None else ""
+        if cur_text and currency and cur_text.upper() != currency.strip().upper():
+            continue   # reserved for the other currency
+
+        if all(_cell_is_empty(cells.get(f"{col}{row_num}")) for col in check_cols):
+            if empty_row is None:
+                empty_row = row_num
+        elif filled_row is None:
+            filled_row = row_num
+
+    if empty_row is not None:
+        return "empty", empty_row, filled_row is not None, ""
+    if filled_row is not None:
+        return "filled", filled_row, True, ""
+    if any_ctr_number_row:
+        return "wrong_currency", None, False, (
+            f'a row with CTR number "{base_ctr_number}" exists but only for a '
+            f"different currency"
+        )
+    return None, None, False, f'no row found with CTR number "{base_ctr_number}" in column {d_col}'
+
+
+def _existing_revision(
+    row_by_num: dict[int, "etree._Element"], shared_strings: list[str], cfg: dict, row_num: int,
+) -> str:
+    """The Revision (AI) cell's current text for an already-filled row, so
+    a "separate revision" write can tell whether this is actually a new
+    revision or just a correction to the same one it already has."""
+    row_elem = row_by_num.get(row_num)
+    if row_elem is None:
+        return ""
+    rev_col = cfg["col_revision"]
+    rev_cell = next((c for c in row_elem if c.get("r") == f"{rev_col}{row_num}"), None)
+    return _cell_text(rev_cell, shared_strings).strip() if rev_cell is not None else ""
+
+
+def _row_currency(
+    row_by_num: dict[int, "etree._Element"], shared_strings: list[str], cfg: dict, row_num: int,
+) -> str:
+    """The Currency (AC) cell's current text for a row — "" if it's blank,
+    i.e. not yet explicitly labeled for either currency."""
+    row_elem = row_by_num.get(row_num)
+    if row_elem is None:
+        return ""
+    cur_col = cfg["col_currency"]
+    cur_cell = next((c for c in row_elem if c.get("r") == f"{cur_col}{row_num}"), None)
+    return _cell_text(cur_cell, shared_strings).strip().upper() if cur_cell is not None else ""
+
+
+def _last_row_for_ctr(
+    row_by_num: dict[int, "etree._Element"], shared_strings: list[str], cfg: dict,
+    base_ctr_number: str,
+) -> int | None:
+    """The highest row number among every row sharing base_ctr_number
+    (any currency) — used to place a CTR number's *first* row for a
+    currency it's never had before, right after whichever currency's
+    block already exists, so the two stay grouped together in the sheet
+    rather than the new one landing somewhere unrelated. None if no row
+    shares that CTR number at all.
+
+    Deliberately ignores used_rows — this is purely a position lookup
+    (where does this CTR number's block end), not a claim on a write
+    target, so another entry in the same batch already writing into one
+    of this CTR number's rows must not hide that row from this lookup."""
+    d_col = cfg["col_ctr_number"]
+    last_row = None
+    for row_num in sorted(row_by_num):
+        row_elem = row_by_num[row_num]
+        d_cell = next((c for c in row_elem if c.get("r") == f"{d_col}{row_num}"), None)
+        if d_cell is not None and _cell_text(d_cell, shared_strings).strip() == base_ctr_number:
+            last_row = row_num
+    return last_row
+
+
+def _revision_sort_key(revision_text: str) -> tuple[int, float]:
+    """Ordering for revision comparison: negative numbers, then blank
+    ("no value"), then zero and positive numbers — in that order. Blank
+    sorts strictly between negative and zero, not merely "after
+    everything numeric": e.g. revision "-1" < "" < "0" < "1".
+
+    Numeric revisions ("2", "10") compare as numbers, not text, so "10"
+    correctly sorts after "9" rather than before it. Text with a number
+    embedded in it ("Rev2", "2-draft") is stripped down to that number
+    for comparison purposes only — the original text is still what's
+    actually written to the sheet (see write_entries_fast), this key
+    only ever decides ordering. Text with no number in it at all (or a
+    genuinely blank revision) has nothing to compare by, so it falls in
+    the same "no value" slot."""
+    text = (revision_text or "").strip()
+    match = re.search(r"-?\d+(?:\.\d+)?", text) if text else None
+    if match is None:
+        return (1, 0.0)                  # no value / no embedded number
+    value = float(match.group())
+    return (0, value) if value < 0 else (2, value)   # negative, or zero-and-up
+
+
+def _insertion_row_for_revision(
+    row_by_num: dict[int, "etree._Element"],
+    shared_strings: list[str],
+    cfg: dict,
+    base_ctr_number: str,
+    currency: str,
+    new_revision: str,
+    used_rows: set[int],
+) -> int:
+    """Where a brand-new row for new_revision belongs, in ascending
+    revision order among every *filled* row already there for this exact
+    (CTR number, currency) — not just appended after whichever one
+    _classify_target_row happened to find first. Returns the row number
+    to insert *at* (Excel shifts that row, and everything below it, down
+    by one) — the row currently holding the smallest existing revision
+    that's greater than new_revision, so the new row lands between it and
+    whatever comes before. If new_revision is higher than every existing
+    one (the common case — always adding the latest), that's simply one
+    past the last existing revision row."""
+    d_col   = cfg["col_ctr_number"]
+    cur_col = cfg["col_currency"]
+    rev_col = cfg["col_revision"]
+    check_cols = [cfg["col_date"], cfg["col_description"], cfg["col_value"]]
+
+    filled: list[tuple[tuple, int]] = []   # (revision_sort_key, row_num)
+    for row_num in sorted(row_by_num):
+        if row_num in used_rows:
+            continue
+        row_elem = row_by_num[row_num]
+        d_cell = next((c for c in row_elem if c.get("r") == f"{d_col}{row_num}"), None)
+        if d_cell is None or _cell_text(d_cell, shared_strings).strip() != base_ctr_number:
+            continue
+        cells = {c.get("r"): c for c in row_elem.findall(f"{_M}c")}
+        cur_cell = cells.get(f"{cur_col}{row_num}")
+        cur_text = _cell_text(cur_cell, shared_strings).strip() if cur_cell is not None else ""
+        if cur_text and currency and cur_text.upper() != currency.strip().upper():
+            continue
+        if all(_cell_is_empty(cells.get(f"{col}{row_num}")) for col in check_cols):
+            continue   # not filled — irrelevant to revision ordering
+        rev_cell = cells.get(f"{rev_col}{row_num}")
+        rev_text = _cell_text(rev_cell, shared_strings).strip() if rev_cell is not None else ""
+        filled.append((_revision_sort_key(rev_text), row_num))
+
+    filled.sort(key=lambda t: t[0])
+    new_key = _revision_sort_key(new_revision)
+    for key, row_num in filled:
+        if key > new_key:
+            return row_num
+    # Higher than every existing revision (or there were none found here,
+    # which shouldn't happen given the caller only calls this once it
+    # already knows a filled row exists) — land right after the last one.
+    return (filled[-1][1] + 1) if filled else None
+
+
+def _validated_base(entry: CTREntry) -> tuple[str | None, str]:
+    """Base (currency-suffix-stripped) CTR number for entry, or (None,
+    reason) if it can't even be considered — shared by both passes below
+    so they never disagree about which entries are eligible."""
+    if not _activity_matches_location(entry.activity_type, entry.tracker_location):
+        return None, (
+            f'CTR labor section says "{entry.activity_type} Activities" but the '
+            f'selected Location is "{entry.tracker_location}" — resolve the '
+            "mismatch before retrying"
+        )
+    base = _normalize_ctr_number(entry.ctr_number)
+    if not base:
+        return None, "no CTR number to match on"
+    return base, ""
+
+
+def _plan_insertions(
+    tracker_path: Path, cfg: dict, entries: list[CTREntry],
+    allow_overwrite: bool, revision_mode: str,
+) -> tuple[list[tuple[int, str]], dict[int, int], dict[int, str]]:
+    """Read-only planning pass, against the file's *current* on-disk
+    state, for the two situations that need a brand-new row inserted:
+
+      - "wrong_currency": this CTR number exists, but has never had a row
+        for this entry's currency at all — always creates one, regardless
+        of allow_overwrite/revision_mode, since nothing existing is being
+        touched or replaced; there's no "overwrite" happening here.
+      - "filled" + genuinely a new revision: gated behind allow_overwrite
+        and revision_mode == "separate", same as before.
+
+    Must run, and any resulting insertion must happen, strictly before the
+    real read/write pass below opens the file: that pass takes one
+    snapshot of the sheet and writes it back in a single shot at the end,
+    so an insertion done concurrently with or after that snapshot would
+    simply be overwritten and lost.
+
+    When *two* entries in the same batch both need a row inserted for the
+    same CTR number (its other currency, or another new revision), the
+    two brand-new rows are indistinguishable to the real pass below — both
+    are blank except for the CTR number — so it can't tell which one was
+    computed for which entry, and picks whichever happens to come first.
+    That's not just cosmetic: it can silently land a new revision *above*
+    an older one, since the position each insertion actually lands at
+    depends on every other insertion in the same batch shifting things
+    as they're applied. So insert_at_row here is only ever the position
+    computed against this pass's own read-only snapshot, before any of
+    them have actually happened — final_row_for_idx below is what the
+    real pass must use instead of re-discovering a target from scratch.
+
+    Returns (to_insert, final_row_for_idx, pre_skip):
+      to_insert         — [(insert_at_row, base_ctr_number), ...] for
+                           tracker_xlwings.insert_revision_rows, each
+                           computed against this snapshot.
+      final_row_for_idx — entries[] index -> the row it will actually
+                           land on once every insertion in to_insert has
+                           been applied (accounting for each one shifting
+                           the others) — the real pass writes directly
+                           into this row for these entries, skipping
+                           re-classification entirely.
+      pre_skip          — entries[] index -> reason, for anything this
+                           pass already knows can't be written (invalid).
+    """
+    with zipfile.ZipFile(tracker_path, "r") as zin:
+        sheet_part = _resolve_sheet_part(zin, cfg["sheet_name"])
+        probe_root = etree.fromstring(zin.read(sheet_part))
+        probe_strings = _load_shared_strings(zin)
+    probe_row_by_num = {
+        int(r.get("r")): r for r in probe_root.findall(f".//{_M}sheetData/{_M}row")
+    }
+    probe_used: set[int] = set()
+
+    # (idx, insert_at_row, base_ctr_number), in the order entries are
+    # walked below — turned into to_insert/final_row_for_idx afterward.
+    raw_insertions: list[tuple[int, int, str]] = []
+    pre_skip: dict[int, str] = {}
+
+    for idx, entry in enumerate(entries):
+        base, reason = _validated_base(entry)
+        if base is None:
+            pre_skip[idx] = reason
+            continue
+
+        kind, row, _, _ = _classify_target_row(
+            probe_row_by_num, probe_strings, cfg, base, entry.currency, probe_used,
+        )
+
+        if kind == "wrong_currency":
+            # No row was ever reserved for this currency — not a conflict
+            # to resolve, just a currency this CTR number hasn't had a row
+            # for yet. Always create one, right after whichever currency's
+            # block already exists, so the two stay grouped together.
+            last_row = _last_row_for_ctr(probe_row_by_num, probe_strings, cfg, base)
+            if last_row is not None:
+                raw_insertions.append((idx, last_row + 1, base))
+            continue
+
+        if kind is None:
+            continue   # real pass reports the "no row found" skip itself
+        probe_used.add(row)
+
+        if kind == "empty":
+            continue   # a normal write
+
+        if not (allow_overwrite and revision_mode == "separate"):
+            continue   # real pass overwrites `row` directly, or skips it — either way, nothing to plan here
+
+        # Same revision as what's already there — a correction, not a new
+        # revision — so the real pass overwrites `row` in place instead.
+        # Blank counts as a revision value here too (matching
+        # _revision_sort_key's "no value" category): a blank entry into a
+        # row that's also blank is "the same" and overwrites, not a
+        # different revision needing a spare/inserted row of its own.
+        if (entry.revision or "").strip() == _existing_revision(
+            probe_row_by_num, probe_strings, cfg, row,
+        ):
+            continue
+
+        spare_kind, spare_row, _, _ = _classify_target_row(
+            probe_row_by_num, probe_strings, cfg, base, entry.currency, probe_used,
+        )
+        # A row already has at least one revision for this (CTR, currency)
+        # by this point, so any spare found here must already be
+        # explicitly labeled with the matching currency to be reused — an
+        # unlabeled blank one is more likely reserved for the *other*
+        # currency (the real tracker's own pairing convention) than a
+        # free-for-all slot, and taking it would leave that currency
+        # without its intended spare. A row's *first* revision (the
+        # `kind == "empty"` branch above, before this point) still treats
+        # a blank currency cell as compatible with either, since that's
+        # the ordinary case of a human-precreated row getting labeled on
+        # first use.
+        has_matching_spare = (
+            spare_kind == "empty"
+            and _row_currency(probe_row_by_num, probe_strings, cfg, spare_row) == entry.currency.strip().upper()
+        )
+        if has_matching_spare:
+            probe_used.add(spare_row)   # reserve it too, in case of a duplicate CTR number later in this same batch
+        else:
+            # Not `probe_used` here — reading existing revisions for
+            # ordering must see every row actually on the sheet,
+            # including `row` itself (already marked used above so no
+            # *other* entry in this batch writes into it, which is an
+            # unrelated concern from being read for comparison here).
+            insert_at = _insertion_row_for_revision(
+                probe_row_by_num, probe_strings, cfg, base,
+                entry.currency, entry.revision, set(),
+            )
+            raw_insertions.append((idx, insert_at, base))
+
+    # Simulate the cumulative shift each insertion causes on the others,
+    # processed from the top of the sheet down: an insertion at row X
+    # pushes every row at/after X down by one, so any *other* insertion
+    # whose own raw target is >= X ends up one row further down for each
+    # such earlier (lower-numbered) insertion that lands before it. This
+    # exactly predicts what tracker_xlwings.insert_revision_rows actually
+    # produces (it applies them bottom-up so it can use these same raw
+    # row numbers directly, without needing to track shifts itself) —
+    # ties (two insertions computed at the identical raw row) are broken
+    # by original entries[] order, both here and in the list passed to
+    # insert_revision_rows below, so the two stay consistent.
+    ordered = sorted(raw_insertions, key=lambda t: t[1])
+    to_insert: list[tuple[int, str]] = []
+    final_row_for_idx: dict[int, int] = {}
+    shift = 0
+    for idx, insert_at, base in ordered:
+        final_row_for_idx[idx] = insert_at + shift
+        to_insert.append((insert_at, base))
+        shift += 1
+
+    return to_insert, final_row_for_idx, pre_skip
 
 
 def write_entries_fast(
@@ -300,6 +664,7 @@ def write_entries_fast(
     entries: list[CTREntry],
     make_backup: bool = False,
     allow_overwrite: bool = False,
+    revision_mode: str = "overwrite",
 ) -> tuple[list[tuple[str, int]], list[tuple[str, str]], Path | None]:
     """Writes each entry into the existing tracker row reserved for its
     CTR number (see module docstring), backs up if requested, and saves
@@ -311,7 +676,34 @@ def write_entries_fast(
     allow_overwrite (off by default) lets a match land on a row whose
     core data fields already have something in them, instead of treating
     that as "already filled" and skipping it — use with care, since it
-    can silently replace real data with no undo besides the backup."""
+    can silently replace real data with no undo besides the backup.
+
+    revision_mode ("overwrite" or "separate"; ignored unless
+    allow_overwrite is on) decides *how* an already-filled row gets
+    handled: "overwrite" replaces its data in place; "separate" leaves it
+    untouched and writes into a spare pre-created row sharing the same
+    CTR number and currency instead — or, if none is available and this
+    really is a new revision (entry.revision differs from what's already
+    on the matched row; writing the *same* revision again overwrites in
+    place instead, same as "overwrite" would), inserts a new one via
+    Excel automation (see tracker_xlwings.py — Windows/macOS with Excel
+    installed only), positioned in ascending revision order among any
+    other rows already there for that CTR number and currency — between
+    two existing revisions if entry.revision falls between them, not
+    just appended after whichever one happens to be found first.
+
+    A CTR number that has rows for one currency but has never had one for
+    the entry's currency at all is handled independently of both
+    allow_overwrite and revision_mode — there's nothing existing to
+    overwrite or protect there, just a currency this CTR number hasn't
+    had a row for yet, so one is always created (via the same Excel
+    automation as above), right after whichever currency's block already
+    exists so the two stay grouped together.
+
+    Any entry that carries a revision number (from the CTR file's own
+    header field) gets it written to the dedicated Revision column (AI) —
+    row order (and AI itself) is what marks a row as a revision, so
+    nothing is separately written to note that elsewhere."""
     if not entries:
         raise ValueError("No CTR entries to write.")
     if len(entries) > 10:
@@ -320,6 +712,27 @@ def write_entries_fast(
     tracker_path = Path(tracker_path)
     cfg = CFG["ctr_tracker"]
     backup_path = backup_tracker(tracker_path) if make_backup else None
+
+    # Always runs (not just when allow_overwrite is on) — a missing-currency
+    # row needs creating regardless; _plan_insertions itself gates the
+    # separate-revision-insertion logic behind allow_overwrite internally.
+    to_insert, final_row_for_idx, pre_skip = _plan_insertions(
+        tracker_path, cfg, entries, allow_overwrite, revision_mode,
+    )
+
+    if to_insert:
+        try:
+            tracker_xlwings.insert_revision_rows(
+                tracker_path, cfg["sheet_name"],
+                [(insert_at, base, cfg["col_ctr_number"]) for insert_at, base in to_insert],
+                row_local_formulas=[tuple(pair) for pair in cfg.get("row_local_formulas", [])],
+                col_row_counter=cfg.get("col_row_counter"),
+                row_counter_formula=cfg.get("row_counter_formula"),
+            )
+        except (tracker_xlwings.ExcelAutomationUnavailable, RuntimeError) as exc:
+            for idx in final_row_for_idx:
+                pre_skip[idx] = str(exc)
+            final_row_for_idx = {}
 
     with zipfile.ZipFile(tracker_path, "r") as zin:
         sheet_part = _resolve_sheet_part(zin, cfg["sheet_name"])
@@ -335,28 +748,81 @@ def write_entries_fast(
     default_styles = _col_default_styles(sheet_root)
 
     written: list[tuple[str, int]] = []
-    skipped: list[tuple[str, str]] = []
+    skipped: list[tuple[str, str]] = [
+        (entries[idx].ctr_number, reason) for idx, reason in pre_skip.items()
+    ]
     used_rows: set[int] = set()
 
-    for entry in entries:
-        if not _activity_matches_location(entry.activity_type, entry.tracker_location):
-            skipped.append((
-                entry.ctr_number,
-                f'CTR labor section says "{entry.activity_type} Activities" but the '
-                f'selected Location is "{entry.tracker_location}" — resolve the '
-                "mismatch before retrying"
-            ))
+    for idx, entry in enumerate(entries):
+        if idx in pre_skip:
             continue
 
-        base = _normalize_ctr_number(entry.ctr_number)
-        if not base:
-            skipped.append((entry.ctr_number or "(blank CTR number)", "no CTR number to match on"))
+        base, reason = _validated_base(entry)
+        if base is None:
+            skipped.append((entry.ctr_number or "(blank CTR number)", reason))
             continue
 
-        row, reason = _find_target_row(row_by_num, shared_strings, cfg, base, used_rows, allow_overwrite)
-        if row is None:
-            skipped.append((entry.ctr_number, reason))
-            continue
+        if idx in final_row_for_idx:
+            # The planning pass already inserted (or found a spare for)
+            # this exact entry and knows precisely which row it landed
+            # on — use that directly instead of re-classifying, which
+            # can't tell this entry's newly-inserted row apart from any
+            # *other* entry's in the same batch (both are blank except
+            # for the CTR number) and could otherwise hand this entry a
+            # row meant for a sibling insertion, silently scrambling
+            # currency grouping or revision order.
+            row = final_row_for_idx[idx]
+        else:
+            kind, row, _, reason = _classify_target_row(
+                row_by_num, shared_strings, cfg, base, entry.currency, used_rows,
+            )
+            if kind is None:
+                skipped.append((entry.ctr_number, reason))
+                continue
+            if kind == "wrong_currency":
+                # The planning pass should have resolved this via
+                # insertion (making it findable via final_row_for_idx
+                # above) or already recorded a pre_skip reason if that
+                # insertion failed — reaching this branch means neither
+                # happened, which shouldn't occur; skip rather than
+                # silently doing nothing with it.
+                skipped.append((
+                    entry.ctr_number,
+                    f'a row with CTR number "{base}" exists but never had one for '
+                    f'currency "{entry.currency}", and no row could be created for it',
+                ))
+                continue
+            if kind == "filled":
+                if not allow_overwrite:
+                    skipped.append((
+                        entry.ctr_number,
+                        f'a row with CTR number "{base}" exists but is already filled in',
+                    ))
+                    continue
+                # Blank counts as a revision value here too — a blank
+                # entry into a row whose revision is also blank is "the
+                # same", not a different revision.
+                same_revision = (entry.revision or "").strip() == _existing_revision(
+                    row_by_num, shared_strings, cfg, row,
+                )
+                if revision_mode == "separate" and not same_revision:
+                    # The planning pass should have resolved this to a
+                    # spare row (found via final_row_for_idx above), an
+                    # insertion, or a pre_skip entry — reaching "filled"
+                    # here means none of those happened. Treat it as
+                    # unresolved rather than silently overwriting a row
+                    # the user explicitly chose not to touch.
+                    skipped.append((
+                        entry.ctr_number,
+                        f'a row with CTR number "{base}" already has data and no spare or '
+                        "inserted row was available for it",
+                    ))
+                    continue
+                # Either revision_mode == "overwrite", or it's "separate"
+                # but entry.revision matches what this row already has —
+                # not actually a new revision, just a correction to the
+                # same one, so it overwrites in place rather than
+                # spawning another row.
         used_rows.add(row)
 
         row_elem = row_by_num[row]
