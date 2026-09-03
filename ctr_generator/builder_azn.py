@@ -527,7 +527,9 @@ def build_azn(
     other_rows: every other manpower row — written into rows 23+.
 
     Each row is a dict with keys:
-        comment, num_employees (int/float), description (str),
+        comment (str — the manpower table's Shift/Shift Type, e.g.
+            "Day Shift, Normal"; see window.py's Generate handler),
+        num_employees (int/float), description (str),
         quantity (float), uom (str), rate_azn (float), nationality (str)
 
     header: optional dict with keys client, sub_client, location, scope,

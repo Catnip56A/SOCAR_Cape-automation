@@ -31,12 +31,14 @@ from datetime import date as _date
 
 from PySide6.QtCore import QSettings, QThread, Qt, Signal
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QGroupBox, QHBoxLayout, QLabel, QLineEdit,
-    QMessageBox, QProgressDialog, QPushButton, QScrollArea, QTableWidgetItem,
-    QVBoxLayout, QWidget,
+    QButtonGroup, QCheckBox, QComboBox, QGroupBox, QHBoxLayout, QLabel,
+    QLineEdit, QMessageBox, QProgressDialog, QPushButton, QRadioButton,
+    QScrollArea, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
-from ctr_generator.tracker import CTREntry, extract_ctr_data, location_options, match_site
+from ctr_generator.tracker import (
+    CTREntry, company_project_code, extract_ctr_data, location_options, match_site,
+)
 from ctr_generator.tracker_fast import write_entries_fast
 from ctr_generator.window import _file_picker_row, _group_css, _highlight_row, _make_table, _ro_item
 
@@ -71,18 +73,20 @@ class _WriteWorker(QThread):
     error       = Signal(str)
 
     def __init__(self, tracker_path: str, entries: list[CTREntry], make_backup: bool,
-                 allow_overwrite: bool, parent=None):
+                 allow_overwrite: bool, revision_mode: str, parent=None):
         super().__init__(parent)
         self._tracker_path = tracker_path
         self._entries = entries
         self._make_backup = make_backup
         self._allow_overwrite = allow_overwrite
+        self._revision_mode = revision_mode
 
     def run(self):
         try:
             written, skipped, backup_path = write_entries_fast(
                 self._tracker_path, self._entries,
                 make_backup=self._make_backup, allow_overwrite=self._allow_overwrite,
+                revision_mode=self._revision_mode,
             )
             self.finished_ok.emit(written, skipped, backup_path)
         except Exception as exc:
@@ -176,9 +180,51 @@ class CTRTrackerWidget(QWidget):
             "existing data in it will be replaced with no undo besides the backup above."
         )
         self._overwrite_check.setStyleSheet("font-size: 11px; color: #C62828;")
+        self._overwrite_check.toggled.connect(self._on_overwrite_toggled)
         gl.addWidget(self._overwrite_check)
 
+        # Only meaningful once Overwrite is on — how to handle a CTR whose
+        # matching row already has data in it.
+        revision_row = QHBoxLayout()
+        revision_row.setContentsMargins(20, 0, 0, 0)   # indented under the checkbox above
+        revision_row.setSpacing(10)
+        self._revision_group = QButtonGroup(self)
+        self._overwrite_revision_radio = QRadioButton("Overwrite this row")
+        self._overwrite_revision_radio.setToolTip(
+            "Replace the existing row's data in place. Its Revision "
+            "column (AI) and Comment (Y) are updated to this CTR's own "
+            "revision number."
+        )
+        self._separate_revision_radio = QRadioButton("Add as separate revision")
+        self._separate_revision_radio.setToolTip(
+            "Leave the existing row untouched and write this CTR into a "
+            "spare pre-created row sharing the same CTR number, if one is "
+            "available. If none is available, a new row is inserted "
+            "directly below the existing one (via Excel automation — "
+            "requires Excel installed; see tracker_xlwings.py). Either "
+            "way, this CTR's own revision number is written to both the "
+            "Revision column (AI) and Comment (Y)."
+        )
+        self._overwrite_revision_radio.setChecked(True)
+        self._revision_group.addButton(self._overwrite_revision_radio)
+        self._revision_group.addButton(self._separate_revision_radio)
+        for rb in (self._overwrite_revision_radio, self._separate_revision_radio):
+            rb.setStyleSheet("font-size: 11px;")
+            rb.setEnabled(False)
+            revision_row.addWidget(rb)
+        revision_row.addStretch()
+        gl.addLayout(revision_row)
+
         parent_layout.addWidget(grp)
+
+    def _on_overwrite_toggled(self, checked: bool):
+        self._overwrite_revision_radio.setEnabled(checked)
+        self._separate_revision_radio.setEnabled(checked)
+
+    def _revision_mode(self) -> str:
+        """'separate' or 'overwrite' — only meaningful when the Overwrite
+        checkbox is on; write_entries_fast ignores it otherwise."""
+        return "separate" if self._separate_revision_radio.isChecked() else "overwrite"
 
     def _build_add_section(self, parent_layout: QVBoxLayout):
         grp = QGroupBox("Add a CTR")
@@ -202,6 +248,7 @@ class CTRTrackerWidget(QWidget):
         gl.addWidget(load_btn)
 
         self._client_edit      = QLineEdit()
+        self._client_edit.textChanged.connect(self._on_client_changed)
         self._ctr_no_edit      = QLineEdit()
         self._date_edit        = QLineEdit()
         self._date_edit.setPlaceholderText("YYYY-MM-DD")
@@ -319,8 +366,25 @@ class CTRTrackerWidget(QWidget):
     def _on_site_changed(self, name: str):
         loc = self._locations.get(name)
         if loc:
-            self._project_code_edit.setText(loc["project_code"])
             self._tracker_location_combo.setCurrentText(loc["tracker_location"])
+            # A company-based Project Code (see _on_client_changed) takes
+            # priority over the location's — don't let picking a site
+            # silently clobber it back.
+            if not company_project_code(self._client_edit.text()):
+                self._project_code_edit.setText(loc["project_code"])
+
+    def _on_client_changed(self, client: str):
+        code = company_project_code(client)
+        if code:
+            self._project_code_edit.setText(code)
+        else:
+            # No company override applies (anymore) — fall back to
+            # whatever the currently selected Location gives, same as if
+            # it had just been picked. If no Location is selected either,
+            # there's nothing to fall back to, so the field is left alone.
+            loc = self._locations.get(self._site_combo.currentText())
+            if loc:
+                self._project_code_edit.setText(loc["project_code"])
 
     def _add_to_batch(self):
         if len(self._batch) >= _MAX_BATCH:
@@ -451,15 +515,26 @@ class CTRTrackerWidget(QWidget):
         n = len(self._batch)
         make_backup = self._backup_check.isChecked()
         allow_overwrite = self._overwrite_check.isChecked()
+        revision_mode = self._revision_mode()
         backup_note = (
             "A timestamped backup will be saved next to the file first."
             if make_backup else
             "No backup copy will be made (enable the checkbox above to save one)."
         )
-        overwrite_note = (
-            "\n\n⚠ Overwrite mode is ON — a matching row's existing data will be replaced."
-            if allow_overwrite else ""
-        )
+        if not allow_overwrite:
+            overwrite_note = ""
+        elif revision_mode == "overwrite":
+            overwrite_note = (
+                "\n\n⚠ Overwrite mode is ON — a matching row's existing data will be "
+                "replaced, its Revision and Comment updated."
+            )
+        else:
+            overwrite_note = (
+                "\n\n⚠ Overwrite mode is ON, \"Add as separate revision\" selected — a "
+                "matching row that already has data will be left alone, and this CTR "
+                "written into a spare row or a newly inserted one instead. A row insert "
+                "requires Excel to be installed on this machine."
+            )
         reply = QMessageBox.question(
             self, "Write to Tracker",
             f"Write {n} CTR{'s' if n != 1 else ''} to:\n{tracker_path}\n\n{backup_note}"
@@ -481,7 +556,10 @@ class CTRTrackerWidget(QWidget):
         self._write_btn.setEnabled(False)
         self._add_batch_btn.setEnabled(False)
 
-        worker = _WriteWorker(tracker_path, list(self._batch), make_backup, allow_overwrite, parent=self)
+        worker = _WriteWorker(
+            tracker_path, list(self._batch), make_backup, allow_overwrite,
+            revision_mode, parent=self,
+        )
         self._workers.append(worker)
 
         def _done(written: list, skipped: list, backup_path):

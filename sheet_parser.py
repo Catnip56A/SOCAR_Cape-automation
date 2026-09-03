@@ -35,7 +35,7 @@ from openpyxl.utils import column_index_from_string
 # Shared helpers
 # ---------------------------------------------------------------------------
 
-_SKIP_SHEETS: set = set()  # no automatic exclusions — user picks sheets in the UI
+_SKIP_SHEETS: set = {"socar-cape"}  # admin/index sheet in MR workbooks, not comparison data
 
 
 def _norm(v) -> str:
@@ -254,6 +254,11 @@ def _parse_named_ranges(wb, display_name: str) -> list:
             continue
 
         ws = wb[sheet_name]
+        if ws.sheet_state != "visible":
+            # Sheet is hidden or veryHidden in the workbook (e.g. unused CH-*/
+            # NCH-* template pages in an MR) — not a page the user actually
+            # sees or fills in, even though it still carries named ranges.
+            continue
 
         # CTR: Plant & Equipment section
         if "equip_start" in ranges and "equip_end" in ranges:
@@ -446,11 +451,13 @@ def parse_workbook(path, sheet_names=None, filename=None) -> list:
         return BytesIO(raw_bytes) if raw_bytes is not None else path
 
     # ---- Method 1: Named-range based (primary) ----
+    visible_sheets: set | None = None
     try:
         wb = openpyxl.load_workbook(
             BytesIO(raw_bytes) if raw_bytes is not None else str(path),
             read_only=True, data_only=True
         )
+        visible_sheets = {s for s in wb.sheetnames if wb[s].sheet_state == "visible"}
         results = _parse_named_ranges(wb, display_name)
         wb.close()
         if results:
@@ -478,6 +485,13 @@ def parse_workbook(path, sheet_names=None, filename=None) -> list:
             ) from e
         raise ValueError(f"Could not read {display_name}: {e}") from e
     all_sheets = xls.sheet_names
+    if visible_sheets is not None:
+        # Hidden/veryHidden sheets (e.g. unused CH-*/NCH-* template pages in
+        # an MR) aren't pages the user actually sees or fills in — same
+        # reasoning as the sheet_state check in _parse_named_ranges, applied
+        # here too since this fallback runs whenever a file has no named
+        # ranges at all (cons_start/cons_end, equip_start/equip_end).
+        all_sheets = [s for s in all_sheets if s in visible_sheets]
 
     if sheet_names is None:
         sheet_names = [s for s in all_sheets if s.strip().lower() not in _SKIP_SHEETS]
