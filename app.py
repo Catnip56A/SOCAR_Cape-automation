@@ -21,7 +21,7 @@ from PySide6.QtGui import QBrush, QColor, QFont, QPainter, QPen
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QDialog, QDialogButtonBox,
     QFileDialog, QFormLayout, QFrame, QGroupBox, QHBoxLayout, QHeaderView,
-    QLabel, QListWidget, QListWidgetItem, QMainWindow,
+    QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow,
     QMessageBox, QProgressDialog, QPushButton, QScrollArea,
     QSplitter, QStackedWidget, QStyle, QStyledItemDelegate, QTabWidget,
     QTableView, QVBoxLayout, QWidget,
@@ -465,11 +465,19 @@ class ComparisonPickerDialog(QDialog):
     def __init__(self, entries: list[dict], parent=None):
         super().__init__(parent)
         self.setWindowTitle("Load Comparison")
-        self.resize(560, 360)
+        self.resize(560, 400)
         self.selected_path: Path | None = None
+        self._entries = entries
 
         lay = QVBoxLayout(self)
-        lay.addWidget(QLabel(f"{len(entries)} saved comparison{'s' if len(entries) != 1 else ''}:"))
+        self._count_lbl = QLabel(f"{len(entries)} saved comparison{'s' if len(entries) != 1 else ''}:")
+        lay.addWidget(self._count_lbl)
+
+        self._search = QLineEdit()
+        self._search.setPlaceholderText("Search by name, timestamp, or file…")
+        self._search.setClearButtonEnabled(True)
+        self._search.textChanged.connect(self._apply_filter)
+        lay.addWidget(self._search)
 
         self._list = QListWidget()
         self._list.setAlternatingRowColors(True)
@@ -479,6 +487,10 @@ class ComparisonPickerDialog(QDialog):
             item = QListWidgetItem(f"{entry['label']}\n{entry['timestamp'] or 'unknown time'}")
             item.setToolTip(f"MR:  {mr_names}\nCTR: {ctr_names}\n\n{entry['path']}")
             item.setData(Qt.ItemDataRole.UserRole, entry["path"])
+            search_blob = " ".join([
+                entry["label"], entry["timestamp"] or "", mr_names, ctr_names,
+            ]).lower()
+            item.setData(Qt.ItemDataRole.UserRole + 1, search_blob)
             self._list.addItem(item)
         self._list.itemDoubleClicked.connect(self._accept_current)
         lay.addWidget(self._list)
@@ -486,18 +498,36 @@ class ComparisonPickerDialog(QDialog):
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Open | QDialogButtonBox.StandardButton.Cancel
         )
-        buttons.button(QDialogButtonBox.StandardButton.Open).setEnabled(False)
+        self._open_btn = buttons.button(QDialogButtonBox.StandardButton.Open)
+        self._open_btn.setEnabled(False)
         buttons.accepted.connect(self._accept_current)
         buttons.rejected.connect(self.reject)
         self._list.itemSelectionChanged.connect(
-            lambda: buttons.button(QDialogButtonBox.StandardButton.Open).setEnabled(
-                bool(self._list.selectedItems())
-            )
+            lambda: self._open_btn.setEnabled(bool(self._list.selectedItems()))
         )
         lay.addWidget(buttons)
 
         if entries:
             self._list.setCurrentRow(0)
+        self._search.setFocus()
+
+    def _apply_filter(self, text: str):
+        needle = text.strip().lower()
+        first_visible = None
+        for i in range(self._list.count()):
+            item = self._list.item(i)
+            blob = item.data(Qt.ItemDataRole.UserRole + 1) or ""
+            match = needle in blob
+            item.setHidden(not match)
+            if match and first_visible is None:
+                first_visible = item
+
+        selected = self._list.selectedItems()
+        if not selected or selected[0].isHidden():
+            self._list.clearSelection()
+            if first_visible is not None:
+                self._list.setCurrentItem(first_visible)
+        self._open_btn.setEnabled(bool(self._list.selectedItems()))
 
     def _accept_current(self):
         items = self._list.selectedItems()
@@ -624,6 +654,18 @@ class MainWindow(QMainWindow):
         self._mr_files_used:  list[str] = []
         self._ctr_files_used: list[str] = []
 
+        # Path of the saved comparison currently open, if any — lets Save
+        # offer "overwrite this one" instead of always Save As. Cleared by
+        # Clear (either side) or by starting fresh with new uploads.
+        self._loaded_comparison_path: Path | None = None
+
+        # Splitter state remembered across a Hide-results / Show-results
+        # round trip, so Show restores exactly what was on screen before
+        # Hide — including whether Maximize was active — instead of always
+        # resetting to the default 30/70 split.
+        self._pre_hide_sizes:     list[int] | None = None
+        self._pre_hide_maximized: bool             = False
+
         self._build_ui()
 
         s = QSettings("SOCAR", "CTRGenerator")
@@ -677,47 +719,24 @@ class MainWindow(QMainWindow):
         sep.setStyleSheet(f"color: {BORDER};")
         _crl.addWidget(sep)
 
-        # Main vertical splitter
-        self._splitter = QSplitter(Qt.Orientation.Vertical)
-        _crl.addWidget(self._splitter)
+        # ── Pinned action row: hint + Compare + Load Comparison ────────────
+        # Always visible, regardless of how long the MR/CTR file lists below
+        # get (or how the splitter/results panel is sized) — previously this
+        # lived inside the scrollable controls pane and could get pushed
+        # below the visible viewport after loading a comparison with many
+        # files, with no obvious way to scroll back to it.
+        pinned = QWidget()
+        pinned_l = QVBoxLayout(pinned)
+        pinned_l.setContentsMargins(2, 4, 2, 0)
+        pinned_l.setSpacing(6)
+        _crl.addWidget(pinned)
 
-        # ── Top: scrollable controls ───────────────────────────────────────
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.Shape.NoFrame)
-        ctrl = QWidget()
-        ctrl.setStyleSheet("background: transparent;")
-        cl = QVBoxLayout(ctrl)
-        cl.setSpacing(10)
-        cl.setContentsMargins(2, 4, 2, 4)
-        scroll.setWidget(ctrl)
-        self._splitter.addWidget(scroll)
-
-        # 2-column area: MR (left) | CTR (right)
-        two_col = QHBoxLayout()
-        two_col.setSpacing(14)
-        cl.addLayout(two_col)
-
-        self._mr_file_list,  self._mr_table_list,  \
-        self._mr_preview = self._add_side_column(
-            two_col, "mr", MR_COLOR,
-            file_tip  = "Select one or more MR Excel files (.xlsx / .xlsm).",
-            table_tip = "Check the sheets to include.\nUncheck any you want to exclude.",
-        )
-        self._ctr_file_list, self._ctr_table_list, \
-        self._ctr_preview = self._add_side_column(
-            two_col, "ctr", CTR_COLOR,
-            file_tip  = "Select one or more CTR Excel files (.xlsx / .xlsm).",
-            table_tip = "Check the sheets to include.\nUncheck any you want to exclude.",
-        )
-
-        # Hint + Compare button (full width, below columns)
         self._compare_hint = QLabel(
             "Upload at least one MR and one CTR file to continue."
         )
         self._compare_hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._compare_hint.setStyleSheet(f"color: {MUTED}; font-size: 11px;")
-        cl.addWidget(self._compare_hint)
+        pinned_l.addWidget(self._compare_hint)
 
         self._compare_btn = QPushButton("Compare")
         self._compare_btn.setFixedHeight(44)
@@ -743,7 +762,7 @@ class MainWindow(QMainWindow):
             }}
         """)
         self._compare_btn.clicked.connect(self._run_compare)
-        cl.addWidget(self._compare_btn)
+        pinned_l.addWidget(self._compare_btn)
 
         # Alternative to uploading + comparing: reopen a past comparison
         # directly. Lives here (not with Download/Save below) so it works
@@ -751,7 +770,7 @@ class MainWindow(QMainWindow):
         or_lbl = QLabel("— or —")
         or_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         or_lbl.setStyleSheet(f"color: {MUTED}; font-size: 10px;")
-        cl.addWidget(or_lbl)
+        pinned_l.addWidget(or_lbl)
 
         self._load_btn = QPushButton("Load Comparison…")
         self._load_btn.setFixedHeight(36)
@@ -771,7 +790,47 @@ class MainWindow(QMainWindow):
             QPushButton:hover {{ background: {MR_LIGHT}; }}
         """)
         self._load_btn.clicked.connect(self._load_comparison)
-        cl.addWidget(self._load_btn)
+        pinned_l.addWidget(self._load_btn)
+
+        pinned_sep = QFrame()
+        pinned_sep.setFrameShape(QFrame.Shape.HLine)
+        pinned_sep.setStyleSheet(f"color: {BORDER};")
+        pinned_l.addWidget(pinned_sep)
+
+        # Main vertical splitter
+        self._splitter = QSplitter(Qt.Orientation.Vertical)
+        _crl.addWidget(self._splitter)
+
+        # ── Top: scrollable controls ───────────────────────────────────────
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        ctrl = QWidget()
+        ctrl.setStyleSheet("background: transparent;")
+        cl = QVBoxLayout(ctrl)
+        cl.setSpacing(10)
+        cl.setContentsMargins(2, 4, 2, 4)
+        scroll.setWidget(ctrl)
+        self._splitter.addWidget(scroll)
+        self._controls_scroll = scroll
+
+        # 2-column area: MR (left) | CTR (right)
+        two_col = QHBoxLayout()
+        two_col.setSpacing(14)
+        cl.addLayout(two_col)
+
+        self._mr_file_list,  self._mr_table_list,  \
+        self._mr_preview = self._add_side_column(
+            two_col, "mr", MR_COLOR,
+            file_tip  = "Select one or more MR Excel files (.xlsx / .xlsm).",
+            table_tip = "Check the sheets to include.\nUncheck any you want to exclude.",
+        )
+        self._ctr_file_list, self._ctr_table_list, \
+        self._ctr_preview = self._add_side_column(
+            two_col, "ctr", CTR_COLOR,
+            file_tip  = "Select one or more CTR Excel files (.xlsx / .xlsm).",
+            table_tip = "Check the sheets to include.\nUncheck any you want to exclude.",
+        )
 
         # ── Bottom: results (hidden until first compare) ───────────────────
         self._results_w = QWidget()
@@ -787,20 +846,44 @@ class MainWindow(QMainWindow):
         rf = res_title.font(); rf.setBold(True); rf.setPointSize(11)
         res_title.setFont(rf)
         res_title.setStyleSheet(f"color: {MUTED};")
-        collapse_btn = QPushButton("▲  Hide results")
-        collapse_btn.setFlat(True)
-        collapse_btn.setToolTip("Collapse the results panel.")
-        collapse_btn.setStyleSheet(f"color: {MUTED}; font-size: 11px;")
-        collapse_btn.clicked.connect(self._collapse_results)
+
+        self._maximize_btn = QPushButton("⛶  Maximize")
+        self._maximize_btn.setCheckable(True)
+        self._maximize_btn.setFlat(True)
+        self._maximize_btn.setToolTip(
+            "Expand the results panel to take up most of the window.")
+        self._maximize_btn.setStyleSheet(f"color: {MUTED}; font-size: 11px;")
+        self._maximize_btn.toggled.connect(self._toggle_maximize_results)
+
+        self._collapse_btn = QPushButton("▲  Hide results")
+        self._collapse_btn.setCheckable(True)
+        self._collapse_btn.setFlat(True)
+        self._collapse_btn.setToolTip(
+            "Hide the results panel without losing them — click again to "
+            "bring them back, no need to re-run Compare.")
+        self._collapse_btn.setStyleSheet(f"color: {MUTED}; font-size: 11px;")
+        self._collapse_btn.toggled.connect(self._toggle_results_visibility)
+
         res_header.addWidget(res_title)
         res_header.addStretch()
-        res_header.addWidget(collapse_btn)
+        res_header.addWidget(self._maximize_btn)
+        res_header.addWidget(self._collapse_btn)
         res_l.addLayout(res_header)
+
+        # Everything below the header lives in its own widget so "Hide
+        # results" can hide just this — the header (and its Show-results
+        # button) stays visible, otherwise there'd be no way back without
+        # re-running Compare.
+        self._results_body_w = QWidget()
+        body_l = QVBoxLayout(self._results_body_w)
+        body_l.setContentsMargins(0, 0, 0, 0)
+        body_l.setSpacing(6)
+        res_l.addWidget(self._results_body_w)
 
         hline = QFrame()
         hline.setFrameShape(QFrame.Shape.HLine)
         hline.setStyleSheet(f"color: {BORDER};")
-        res_l.addWidget(hline)
+        body_l.addWidget(hline)
 
         # Metrics (hidden until first compare)
         self._metrics_w = QWidget()
@@ -825,7 +908,7 @@ class MainWindow(QMainWindow):
             "Items present in CTR but not found in any MR document.")
         mrow.addWidget(b)
         self._metrics_w.setVisible(False)
-        res_l.addWidget(self._metrics_w)
+        body_l.addWidget(self._metrics_w)
 
         # Result tabs with empty states
         self._tabs = QTabWidget()
@@ -931,15 +1014,38 @@ class MainWindow(QMainWindow):
         """)
         self._combined_btn.toggled.connect(self._apply_combined_view)
 
+        self._show_docs_btn = QPushButton("Show Document Names")
+        self._show_docs_btn.setCheckable(True)
+        self._show_docs_btn.setChecked(False)
+        self._show_docs_btn.setToolTip(
+            "Show which MR/CTR file each row came from.\n"
+            "Hidden by default to keep the table compact.")
+        self._show_docs_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: white; color: {MUTED};
+                border: 1px solid {BORDER}; border-radius: 4px;
+                padding: 2px 10px; font-size: 11px;
+                min-height: 24px;
+            }}
+            QPushButton:checked {{
+                background: #ECEFF1; color: #263238;
+                border: 1.5px solid #607D8B; font-weight: bold;
+            }}
+            QPushButton:disabled {{ color: {BORDER}; border-color: {BORDER}; }}
+        """)
+        self._show_docs_btn.toggled.connect(self._apply_doc_column_visibility)
+
         _cl.addWidget(self._prev_mm_btn)
         _cl.addWidget(self._next_mm_btn)
         _cl.addSpacing(4)
         _cl.addWidget(self._compare_vals_btn)
         _cl.addSpacing(4)
         _cl.addWidget(self._combined_btn)
+        _cl.addSpacing(4)
+        _cl.addWidget(self._show_docs_btn)
         self._tabs.setCornerWidget(_corner)
 
-        res_l.addWidget(self._tabs)
+        body_l.addWidget(self._tabs)
 
         # Export / persist row: Excel report download, plus save a full
         # comparison snapshot for later. ("Load Comparison…" lives in the
@@ -982,7 +1088,7 @@ class MainWindow(QMainWindow):
         self._save_btn.clicked.connect(self._save_comparison)
         export_row.addWidget(self._save_btn)
 
-        res_l.addLayout(export_row)
+        body_l.addLayout(export_row)
 
         # ── Tab 1: CTR Generator ────────────────────────────────────────────
         self._ctr_gen = CTRGeneratorWidget(parent=self)
@@ -1094,6 +1200,10 @@ class MainWindow(QMainWindow):
             self._ctr_table_list.clear()
             self._ctr_tables = []
             self._ctr_df = pd.DataFrame()
+        # Clearing either side breaks the tie to whatever preload was open
+        # (if any) — a fresh Save from here should offer Save As, not
+        # silently overwrite a comparison this no longer matches.
+        self._loaded_comparison_path = None
         self._update_state()
 
     # ── Parsing ───────────────────────────────────────────────────────────────
@@ -1345,6 +1455,7 @@ class MainWindow(QMainWindow):
         _show_result(self._stack_matched,  self._tab_matched,  self._display_df)
         _show_result(self._stack_only_mr,  self._tab_only_mr,  self._omr_dl)
         _show_result(self._stack_only_ctr, self._tab_only_ctr, self._octr_dl)
+        self._apply_doc_column_visibility(self._show_docs_btn.isChecked())
 
         if not self._display_df.empty:
             self._tab_matched.model().sourceModel().set_highlights(
@@ -1372,9 +1483,22 @@ class MainWindow(QMainWindow):
         self._combined_btn.blockSignals(False)
         self._combined_btn.setEnabled(bool(self._combined_raw))
 
-        # Expand results panel to take ~70 % of the window height
-        if not self._results_w.isVisible():
-            self._results_w.setVisible(True)
+        # Expand results panel to take ~70 % of the window height, and drop
+        # any stale Hide/Maximize state from a previous set of results.
+        self._collapse_btn.blockSignals(True)
+        self._collapse_btn.setChecked(False)
+        self._collapse_btn.blockSignals(False)
+        self._collapse_btn.setText("▲  Hide results")
+        self._maximize_btn.setEnabled(True)
+
+        self._maximize_btn.blockSignals(True)
+        self._maximize_btn.setChecked(False)
+        self._maximize_btn.blockSignals(False)
+        self._maximize_btn.setText("⛶  Maximize")
+        self._controls_scroll.setVisible(True)
+
+        self._results_w.setVisible(True)
+        self._results_body_w.setVisible(True)
         total = self._splitter.height()
         self._splitter.setSizes([int(total * 0.30), int(total * 0.70)])
 
@@ -1687,6 +1811,27 @@ class MainWindow(QMainWindow):
         # _load_view above has no highlights, so reapply whichever state it
         # was already in for the view we just switched to.
         self._apply_value_highlights(self._compare_vals_btn.isChecked())
+        self._apply_doc_column_visibility(self._show_docs_btn.isChecked())
+
+    def _apply_doc_column_visibility(self, show: bool):
+        """MR/CTR 'source document' columns are hidden by default to keep
+        the comparison tables compact — this toggles them on the three
+        detail views (Combined view doesn't have these columns, so it's a
+        no-op there). Re-applied after every _load_view/_show_result call
+        since a fresh model doesn't necessarily keep the previous model's
+        hidden-column state."""
+        matched_df = self._combined_df if self._combined_btn.isChecked() else self._display_df
+        for view, df in (
+            (self._tab_matched,  matched_df),
+            (self._tab_only_mr,  self._omr_dl),
+            (self._tab_only_ctr, self._octr_dl),
+        ):
+            if view.model() is None:
+                continue
+            for col_name in ("MR Document", "CTR Document"):
+                if col_name in df.columns:
+                    idx = df.columns.get_loc(col_name)
+                    view.setColumnHidden(idx, not show)
 
     # ── Download ──────────────────────────────────────────────────────────────
 
@@ -1717,13 +1862,38 @@ class MainWindow(QMainWindow):
     # ── Comparison history ───────────────────────────────────────────────────
 
     def _save_comparison(self):
-        label = default_label(self._mr_files_used, self._ctr_files_used)
-        suggested = suggest_save_path(label)
-        path, _ = QFileDialog.getSaveFileName(
-            self, "Save Comparison", str(suggested), "JSON files (*.json)"
-        )
-        if not path:
-            return
+        path: str | None = None
+
+        # A preload was loaded (and possibly extended with more files) —
+        # ask whether to overwrite it in place or save as a separate file,
+        # instead of silently doing either.
+        if self._loaded_comparison_path is not None:
+            box = QMessageBox(self)
+            box.setWindowTitle("Save Comparison")
+            box.setText(
+                f"This comparison was loaded from:\n{self._loaded_comparison_path.name}\n\n"
+                "Save changes to that file, or save as a new comparison?"
+            )
+            overwrite_btn = box.addButton("Overwrite Existing", QMessageBox.ButtonRole.AcceptRole)
+            new_btn       = box.addButton("Save as New…",        QMessageBox.ButtonRole.ActionRole)
+            box.addButton(QMessageBox.StandardButton.Cancel)
+            box.setDefaultButton(overwrite_btn)
+            box.exec()
+            clicked = box.clickedButton()
+            if clicked is overwrite_btn:
+                path = str(self._loaded_comparison_path)
+            elif clicked is not new_btn:
+                return   # Cancel
+
+        if path is None:
+            label = default_label(self._mr_files_used, self._ctr_files_used)
+            suggested = suggest_save_path(label)
+            path, _ = QFileDialog.getSaveFileName(
+                self, "Save Comparison", str(suggested), "JSON files (*.json)"
+            )
+            if not path:
+                return
+
         try:
             save_comparison(
                 Path(path),
@@ -1735,7 +1905,10 @@ class MainWindow(QMainWindow):
                 octr_df=self._octr_dl,
                 combined_raw=self._combined_raw,
                 combined_decisions=self._combined_decisions,
+                mr_tables=self._mr_tables,
+                ctr_tables=self._ctr_tables,
             )
+            self._loaded_comparison_path = Path(path)
             log.info("Comparison saved: %s", path)
             QMessageBox.information(self, "Saved", f"Comparison saved:\n{path}")
         except Exception as exc:
@@ -1764,14 +1937,31 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Load error", str(exc))
             return
 
-        # A saved comparison is a complete, self-contained snapshot — it
-        # doesn't correspond to whatever is currently uploaded (if
-        # anything), so that gets wiped rather than left sitting stale next
-        # to results from a different comparison entirely.
+        # A saved comparison replaces whatever is currently uploaded (if
+        # anything), so that gets wiped first — but unlike before, the
+        # comparison's own raw per-sheet tables (if it has any — saves made
+        # before this was added won't) are restored right after, so more
+        # MR/CTR files can be added and merged in via the normal Browse
+        # flow instead of this being a read-only snapshot.
         self._clear("mr")
         self._clear("ctr")
         self._mr_preview.setModel(None)
         self._ctr_preview.setModel(None)
+
+        self._mr_tables  = data["mr_tables"]
+        self._ctr_tables = data["ctr_tables"]
+        for lw, tables in (
+            (self._mr_file_list,  self._mr_tables),
+            (self._ctr_file_list, self._ctr_tables),
+        ):
+            seen = []
+            for t in tables:
+                if t["source_file"] not in seen:
+                    seen.append(t["source_file"])
+                    lw.addItem(t["source_file"])
+        self._fill_table_list(self._mr_table_list,  self._mr_tables)
+        self._fill_table_list(self._ctr_table_list, self._ctr_tables)
+        self._on_table_sel_changed()   # rebuilds _mr_df/_ctr_df from the restored tables
 
         self._display_df                = data["display_df"]
         self._omr_dl                    = data["omr_df"]
@@ -1781,16 +1971,23 @@ class MainWindow(QMainWindow):
         self._mr_files_used             = data["mr_files"]
         self._ctr_files_used            = data["ctr_files"]
         self._rate_rech_mismatch_cells = _find_rate_rechargeable_mismatches(self._display_df)
+        self._loaded_comparison_path    = path
 
         self._present_compare_results()
 
         log.info("Comparison loaded: %s", path)
+        extend_note = (
+            "" if self._mr_tables or self._ctr_tables else
+            " (saved before file-adding support — upload fresh files and "
+            "Compare instead of extending this one)"
+        )
         self._set_status(
             f"Loaded comparison “{data['label']}” "
             f"(saved {data['timestamp'] or 'unknown time'}) — "
             f"{len(self._display_df)} matched · "
             f"{len(self._omr_dl)} only in MR · "
             f"{len(self._octr_dl)} only in CTR."
+            f"{extend_note}"
         )
 
     # ── CTR Generator ─────────────────────────────────────────────────────────
@@ -1800,8 +1997,62 @@ class MainWindow(QMainWindow):
 
     # ── Utility ───────────────────────────────────────────────────────────────
 
-    def _collapse_results(self):
-        self._results_w.setVisible(False)
+    _RESULTS_HEADER_H = 44   # just enough for the title + Maximize/Hide row
+
+    def _toggle_results_visibility(self, hidden: bool):
+        """Hides/shows the results body in place — the header (with this
+        very button) stays visible so there's always a way back. The
+        underlying _display_df/_omr_dl/_octr_dl/etc. are untouched, so this
+        never forces a recompute. Re-running Compare is the only thing that
+        recomputes.
+
+        Shrinks the results pane down to just the header row (handing the
+        freed space to the upload/controls pane above) instead of leaving a
+        blank gap the same size as the old results table. Whatever the
+        split looked like right before hiding — including Maximize — is
+        remembered and restored exactly on Show, instead of always
+        snapping back to the default 30/70."""
+        if hidden:
+            self._pre_hide_sizes     = self._splitter.sizes()
+            self._pre_hide_maximized = self._maximize_btn.isChecked()
+            if self._pre_hide_maximized:
+                self._maximize_btn.blockSignals(True)
+                self._maximize_btn.setChecked(False)
+                self._maximize_btn.blockSignals(False)
+                self._maximize_btn.setText("⛶  Maximize")
+                self._controls_scroll.setVisible(True)
+
+        self._results_body_w.setVisible(not hidden)
+        self._collapse_btn.setText("▼  Show results" if hidden else "▲  Hide results")
+        # Maximizing an empty (header-only) results pane isn't meaningful.
+        self._maximize_btn.setEnabled(not hidden)
+
+        total = self._splitter.height()
+        if hidden:
+            self._splitter.setSizes(
+                [total - self._RESULTS_HEADER_H, self._RESULTS_HEADER_H])
+        elif self._pre_hide_maximized:
+            # Reuse the Maximize toggle itself so controls-pane visibility,
+            # button text, and splitter sizing all end up consistent —
+            # rather than re-deriving that logic here.
+            self._pre_hide_maximized = False
+            self._maximize_btn.setChecked(True)
+        elif self._pre_hide_sizes is not None:
+            self._splitter.setSizes(self._pre_hide_sizes)
+        else:
+            self._splitter.setSizes([int(total * 0.30), int(total * 0.70)])
+
+    def _toggle_maximize_results(self, maximized: bool):
+        """Hides the upload/controls pane so the results panel takes up
+        nearly the whole tab. Restoring brings the controls pane back and
+        re-applies the normal ~30/70 split."""
+        self._controls_scroll.setVisible(not maximized)
+        self._maximize_btn.setText("⤡  Restore" if maximized else "⛶  Maximize")
+        total = self._splitter.height()
+        if maximized:
+            self._splitter.setSizes([0, total])
+        else:
+            self._splitter.setSizes([int(total * 0.30), int(total * 0.70)])
 
     def _set_status(self, msg: str):
         self.statusBar().showMessage(msg)
