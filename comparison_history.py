@@ -7,8 +7,12 @@ see ctr_generator/paths.py), so a past comparison can be reopened exactly
 as it was reviewed and decided — even if the original MR/CTR source files
 have since been edited, renamed, or moved. This snapshots the *results*
 (the Matched/Only-in-MR/Only-in-CTR tables, the Combined-view aggregates,
-and any unit-conflict Approve/Reject decisions), not the source files
-themselves — nothing is re-parsed or re-compared on load.
+and any unit-conflict Approve/Reject decisions) as well as the raw
+per-sheet MR/CTR tables behind them (schema version 2+), so a reopened
+comparison can have more MR/CTR files added and be re-compared, instead of
+being purely a read-only snapshot. Nothing is re-parsed or re-compared on
+load itself, though — that only happens if the user adds files and runs
+Compare again.
 
 Public API
 ----------
@@ -18,8 +22,10 @@ Public API
     path = suggest_save_path(default_label(mr_files, ctr_files))
     save_comparison(path, label=..., mr_files=..., ctr_files=...,
                      display_df=..., omr_df=..., octr_df=...,
-                     combined_raw=..., combined_decisions=...)
+                     combined_raw=..., combined_decisions=...,
+                     mr_tables=..., ctr_tables=...)
     data = load_comparison(path)  # -> dict of the fields above, as DataFrames
+                                   #    (mr_tables/ctr_tables as list[dict])
     entries = list_saved_comparisons()  # -> [{path, label, timestamp, mr_files, ctr_files}, ...]
 """
 
@@ -35,7 +41,7 @@ import pandas as pd
 
 from ctr_generator.paths import comparisons_data_dir
 
-_SCHEMA_VERSION = 1
+_SCHEMA_VERSION = 2
 
 # A module attribute (not just a function return value) so tests can
 # sandbox it the same way as _PRESETS_PATH/_ALIASES_PATH/_DESC_RENAMES_PATH
@@ -99,6 +105,34 @@ def _json_default(obj):
     return str(obj)
 
 
+def _tables_to_json(tables: list[dict]) -> list[dict]:
+    """Encodes the raw per-sheet parsed tables (source_file/source_sheet/
+    table_name/data) the same way the upload flow holds them in memory, so
+    a loaded comparison can be extended with more files later — see
+    _tables_from_json."""
+    return [
+        {
+            "source_file":  t["source_file"],
+            "source_sheet": t["source_sheet"],
+            "table_name":   t["table_name"],
+            "data":         t["data"].to_dict(orient="records"),
+        }
+        for t in tables
+    ]
+
+
+def _tables_from_json(raw: list[dict]) -> list[dict]:
+    return [
+        {
+            "source_file":  t["source_file"],
+            "source_sheet": t["source_sheet"],
+            "table_name":   t["table_name"],
+            "data":         pd.DataFrame(t["data"]),
+        }
+        for t in raw
+    ]
+
+
 def save_comparison(
     path: Path,
     *,
@@ -110,6 +144,8 @@ def save_comparison(
     octr_df: pd.DataFrame,
     combined_raw: dict,
     combined_decisions: dict,
+    mr_tables: list[dict] | None = None,
+    ctr_tables: list[dict] | None = None,
 ) -> None:
     data = {
         "version":             _SCHEMA_VERSION,
@@ -122,6 +158,12 @@ def save_comparison(
         "octr_df":             octr_df.to_dict(orient="records"),
         "combined_raw":        combined_raw,
         "combined_decisions":  combined_decisions,
+        # Raw per-sheet tables (as parsed, before merge) — lets a reopened
+        # comparison have more MR/CTR files added and be re-compared,
+        # instead of being a read-only snapshot. Absent/empty on saves
+        # made before this was added (schema version 1).
+        "mr_tables":           _tables_to_json(mr_tables or []),
+        "ctr_tables":          _tables_to_json(ctr_tables or []),
     }
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -143,6 +185,10 @@ def load_comparison(path: Path) -> dict:
         "octr_df":             pd.DataFrame(data.get("octr_df") or []),
         "combined_raw":        data.get("combined_raw", {}),
         "combined_decisions":  data.get("combined_decisions", {}),
+        # Empty for comparisons saved before schema version 2 — those can
+        # still be reopened, just not extended with more MR/CTR files.
+        "mr_tables":           _tables_from_json(data.get("mr_tables") or []),
+        "ctr_tables":          _tables_from_json(data.get("ctr_tables") or []),
     }
 
 
