@@ -1,5 +1,5 @@
 """
-ctr_generator/naming.py
+ctr_tools/naming.py
 
 Builds the output filename for a generated CTR — shared by builder_azn.py
 and builder_usd.py so both currencies follow the same convention:

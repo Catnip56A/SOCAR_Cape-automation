@@ -1,5 +1,5 @@
 """
-ctr_generator/aliases.py
+ctr_tools/aliases.py
 
 Persists user-taught name mappings between CTR Request descriptions and
 pricebook/SAGE descriptions, since the same item is often named differently
@@ -19,9 +19,12 @@ types.
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 
-from ctr_generator.paths import user_data_dir
+from ctr_tools.paths import user_data_dir
+
+log = logging.getLogger(__name__)
 
 _ALIASES_PATH = user_data_dir() / "match_aliases.json"
 _BUNDLED_DEFAULT_PATH = Path(__file__).parent / "match_aliases.json"
@@ -39,8 +42,8 @@ def _seed_from_bundled_default() -> None:
         _ALIASES_PATH.write_text(
             _BUNDLED_DEFAULT_PATH.read_text(encoding="utf-8"), encoding="utf-8"
         )
-    except OSError:
-        pass
+    except OSError as exc:
+        log.warning("Failed to seed %s from bundled default: %s", _ALIASES_PATH, exc)
 
 
 def load_aliases() -> dict:
@@ -50,7 +53,8 @@ def load_aliases() -> dict:
     if _ALIASES_PATH.exists():
         try:
             data = json.loads(_ALIASES_PATH.read_text())
-        except (json.JSONDecodeError, OSError):
+        except (json.JSONDecodeError, OSError) as exc:
+            log.warning("Failed to load %s, starting empty: %s", _ALIASES_PATH, exc)
             data = {}
     return {cat: dict(data.get(cat, {})) for cat in _CATEGORIES}
 
@@ -58,8 +62,11 @@ def load_aliases() -> dict:
 def save_aliases(aliases: dict) -> None:
     try:
         _ALIASES_PATH.write_text(json.dumps(aliases, indent=2, ensure_ascii=False))
-    except OSError:
-        pass  # non-fatal — renames just won't persist across sessions
+    except OSError as exc:
+        # non-fatal — renames just won't persist across sessions — but
+        # worth a trail, since this otherwise discards a user's typed-in
+        # rename with zero feedback anywhere.
+        log.warning("Failed to save %s: %s", _ALIASES_PATH, exc)
 
 
 def get_alias(aliases: dict, category: str, requested_desc: str) -> str | None:
@@ -74,7 +81,10 @@ def set_alias(aliases: dict, category: str, requested_desc: str, match_key: str)
     match_key = (match_key or "").strip()
     if not key or not match_key:
         return
-    aliases.setdefault(category, {})[key] = match_key
+    bucket = aliases.setdefault(category, {})
+    if bucket.get(key) == match_key:
+        return   # already stored — skip the full-file rewrite
+    bucket[key] = match_key
     save_aliases(aliases)
 
 

@@ -1,9 +1,9 @@
 """
-ctr_generator/builder_usd.py
+ctr_tools/builder_usd.py
 
 Copies the USD CTR template and writes equipment + consumable rows.
 
-Row/column positions are read from ctr_generator/template_config.json
+Row/column positions are read from ctr_tools/template_config.json
 (section "usd_template") so they can be adjusted without touching this
 file when a new template version shifts the layout.
 
@@ -95,8 +95,8 @@ from openpyxl.utils import column_index_from_string as _col_idx
 from openpyxl.utils import get_column_letter as _col_letter
 from openpyxl.worksheet.properties import PageSetupProperties
 
-from ctr_generator.config import CFG
-from ctr_generator.naming import ctr_output_filename
+from ctr_tools.config import CFG
+from ctr_tools.naming import ctr_output_filename
 
 _usd = CFG["usd_template"]
 
@@ -448,7 +448,7 @@ def build_usd(
         overwrite the corresponding template cell — leaving a field blank
         preserves whatever the template already has, except contract_no
         and comments which are always written. location and scope are also
-        used to build the output filename (see ctr_generator.naming).
+        used to build the output filename (see ctr_tools.naming).
 
     markup_rate: consumables markup as a fraction (e.g. 0.065 for 6.5%).
         Defaults to usd_template.markup_rate from template_config.json

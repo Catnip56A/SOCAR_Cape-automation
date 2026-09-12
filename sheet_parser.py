@@ -23,11 +23,14 @@ Public API
     # → list of {"source_file", "source_sheet", "table_name", "data": DataFrame}
 """
 
+import logging
 import re
 import pandas as pd
 from pathlib import Path
 from io import BytesIO
 import openpyxl
+
+log = logging.getLogger(__name__)
 from openpyxl.utils import column_index_from_string
 
 
@@ -181,6 +184,7 @@ def _collect_named_range_refs(wb) -> dict:
     try:
         name_list = list(wb.defined_names)
     except Exception:
+        log.debug("Could not read workbook defined names", exc_info=True)
         return result
 
     for name in name_list:
@@ -197,6 +201,7 @@ def _collect_named_range_refs(wb) -> dict:
                         result[sheet_title] = {}
                     result[sheet_title][name] = (row, col)
         except Exception:
+            log.debug("Could not resolve defined name %r", name, exc_info=True)
             continue
     return result
 
@@ -407,7 +412,7 @@ def _detect_format(file, sheet_name: str) -> str | None:
         if any("STOCKCODE" in str(c).upper() for c in probe.columns):
             return "mr"
     except Exception:
-        pass
+        log.debug("MR-format probe failed for sheet %r", sheet_name, exc_info=True)
     try:
         raw10 = pd.read_excel(file, sheet_name=sheet_name, header=None, nrows=10)
         for i in range(len(raw10)):
@@ -415,7 +420,7 @@ def _detect_format(file, sheet_name: str) -> str | None:
             if "pricing schedule" in text:
                 return "ctr_pricing"
     except Exception:
-        pass
+        log.debug("CTR-pricing-format probe failed for sheet %r", sheet_name, exc_info=True)
     return None
 
 
@@ -463,7 +468,10 @@ def parse_workbook(path, sheet_names=None, filename=None) -> list:
         if results:
             return results
     except Exception:
-        pass
+        log.debug(
+            "Named-range parsing failed for %r, falling back to sheet-based "
+            "keyword detection", display_name, exc_info=True,
+        )
 
     # ---- Method 2: Sheet-based keyword detection (fallback) ----
     file_ref = _make_file()
@@ -511,6 +519,13 @@ def parse_workbook(path, sheet_names=None, filename=None) -> list:
             else:
                 df = _parse_ctr_pricing_sheet(_make_file(), sn, display_name)
         except Exception:
+            # Unlike the format-detection probes above, this drops a sheet
+            # that *did* look parseable — worth a real warning, since it's
+            # otherwise a silent, undiagnosable gap in the parsed results.
+            log.warning(
+                "Failed to parse sheet %r (detected as %r) in %r — "
+                "skipping it", sn, fmt, display_name, exc_info=True,
+            )
             continue
 
         if df.empty:

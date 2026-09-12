@@ -1,9 +1,9 @@
 """
-ctr_generator/builder_azn.py
+ctr_tools/builder_azn.py
 
 Copies the AZN CTR template and writes labor rows into sheet "Main AZN".
 
-Row/column positions are read from ctr_generator/template_config.json
+Row/column positions are read from ctr_tools/template_config.json
 (section "azn_template") so they can be adjusted without touching this
 file when a new template version shifts the layout.
 
@@ -66,8 +66,8 @@ from openpyxl.utils import column_index_from_string as _col_idx
 from openpyxl.utils import get_column_letter as _col_letter
 from openpyxl.worksheet.properties import PageSetupProperties
 
-from ctr_generator.config import CFG
-from ctr_generator.naming import ctr_output_filename
+from ctr_tools.config import CFG
+from ctr_tools.naming import ctr_output_filename
 
 _azn = CFG["azn_template"]
 
@@ -338,9 +338,13 @@ def _fit_to_page_width(ws) -> None:
 
 
 def _safe_float(value, default: float = 0.0) -> float:
-    """Best-effort float conversion; `default` for blanks and non-numbers."""
+    """Best-effort float conversion; `default` for blanks, non-numbers, and
+    NaN (a NaN here would otherwise format as the literal text "nan" inside
+    an Excel formula string — e.g. the Third Party section's
+    qty*rate*duration*(1+markup) — producing a broken formula on open)."""
     try:
-        return float(value)
+        f = float(value)
+        return f if f == f else default   # NaN guard
     except (TypeError, ValueError):
         return default
 
@@ -540,7 +544,7 @@ def build_azn(
         the other header fields, has no dedicated template cell to fall
         back to — a blank/missing value defaults to "Offshore Activities".
         location and scope are also used to build the output filename
-        (see ctr_generator.naming). required_info (a list of Additional
+        (see ctr_tools.naming). required_info (a list of Additional
         Information items the CTR Request marked "Required") is appended to
         that same row-21 header — see activities_label.
 

@@ -9,13 +9,13 @@ import os
 # don't exist, but bundling any current copy means user renames/presets
 # carry over into the freshly built exe automatically.
 _DATA_FILES = [
-    ("ctr_generator/template_config.json", "ctr_generator"),
+    ("ctr_tools/template_config.json", "ctr_tools"),
     ("VERSION", "."),
 ]
 for _fname in ("match_aliases.json", "ctr_presets.json"):
-    _src = os.path.join("ctr_generator", _fname)
+    _src = os.path.join("ctr_tools", _fname)
     if os.path.exists(_src):
-        _DATA_FILES.append((_src, "ctr_generator"))
+        _DATA_FILES.append((_src, "ctr_tools"))
 
 a = Analysis(
     ["app.py"],
@@ -30,8 +30,19 @@ a = Analysis(
         "PySide6.QtCore",
         "PySide6.QtGui",
         "PySide6.QtWidgets",
-        "ctr_generator.presets",
-        "ctr_generator.config",
+        "ctr_tools.presets",
+        "ctr_tools.config",
+        # CTR Tracker's "Add as separate revision" row-insertion path
+        # (ctr_tools/tracker_xlwings.py) drives real Excel via COM —
+        # xlwings and its pywin32 dependencies aren't otherwise reachable
+        # from a static import scan on a machine without them installed,
+        # so list them explicitly rather than relying on PyInstaller's
+        # own xlwings hook always being present/complete.
+        "xlwings",
+        "win32com",
+        "win32com.client",
+        "pythoncom",
+        "pywintypes",
     ],
     hookspath=[],
     hooksconfig={},

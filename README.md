@@ -107,7 +107,7 @@ C:\Program Files (x86)\SOCAR Cape automation\Commercial-automation\logs\
 
 (Press `Win+R`, paste that path, press Enter — resolves to `C:\Users\<username>\AppData\Local\Temp\socar_cape_automation_logs`.)
 
-This is separate from the app's **data** folder (saved presets/renames), which always lives at `%APPDATA%\SOCAR\CTRGenerator` (`ctr_generator/paths.py`) regardless of install location.
+This is separate from the app's **data** folder (saved presets/renames), which always lives at `%APPDATA%\SOCAR\CTRGenerator` (`ctr_tools/paths.py`) regardless of install location.
 
 ---
 

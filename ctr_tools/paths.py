@@ -1,5 +1,5 @@
 """
-ctr_generator/paths.py
+ctr_tools/paths.py
 
 Resolves a stable, per-user, writable directory for data that must survive
 between runs of the packaged .exe — presets and saved renames.

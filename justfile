@@ -11,10 +11,6 @@ set windows-shell := ["powershell.exe", "-NoLogo", "-Command"]
 run:
     uv run python app.py
 
-# Run the legacy Streamlit app (kept for reference only — use `just run` instead)
-legacy:
-    uv run streamlit run legacy_streamlit.py
-
 # Set up the dev environment (installs all deps including dev extras)
 setup:
     uv sync --all-extras

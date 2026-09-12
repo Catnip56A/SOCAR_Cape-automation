@@ -1,5 +1,5 @@
 """
-ctr_generator/tracker_fast.py
+ctr_tools/tracker_fast.py
 
 Fast path for writing CTR Tracker entries.
 
@@ -46,9 +46,9 @@ from pathlib import Path
 
 from lxml import etree
 
-from ctr_generator.config import CFG
-from ctr_generator.tracker import CTREntry, backup_tracker
-from ctr_generator import tracker_xlwings
+from ctr_tools.config import CFG
+from ctr_tools.tracker import CTREntry, backup_tracker
+from ctr_tools import tracker_xlwings
 
 log = logging.getLogger(__name__)
 
@@ -57,6 +57,14 @@ _NS_REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 _M = f"{{{_NS_MAIN}}}"
 
 _EXCEL_EPOCH = date(1899, 12, 30)
+
+# Stable, greppable marker substring for the "another entry earlier in
+# this same batch already claims this exact CTR number + currency" skip
+# reason (see _plan_insertions) — callers (tracker_window.py) match on
+# this to offer an automatic retry in a follow-up batch, where the same
+# entries resolve correctly against the first write's now-real on-disk
+# row instead of colliding mid-batch.
+IN_BATCH_CONFLICT_MARKER = "already has a pending write earlier in this same batch"
 
 # Matches a trailing " AZN" / " USD" currency tag on a CTR ref, e.g. the
 # "CTR-26-217 AZN" a generated CTR file's Ref field carries — the tracker
@@ -215,6 +223,90 @@ def _set_formula_cell(c_elem, formula: str) -> None:
     etree.SubElement(c_elem, f"{_M}v")   # empty cached value — Excel recalculates on open
 
 
+_A1_CELL_RE = re.compile(r"^([A-Z]+)(\d+)$")
+
+
+def _sqref_token_range(token: str) -> tuple[str, int, str, int] | None:
+    """Parses one whitespace-separated piece of a conditionalFormatting
+    sqref attribute — "P7929:P7931" or a single cell "P7859" — into
+    (start_col, start_row, end_col, end_row). None if it isn't a plain
+    cell/range reference (nothing in this file's own sqref values isn't,
+    but a truly malformed one shouldn't crash a write over it)."""
+    parts = token.split(":")
+    if len(parts) not in (1, 2):
+        return None
+    m1 = _A1_CELL_RE.match(parts[0])
+    if not m1:
+        return None
+    if len(parts) == 1:
+        return (m1.group(1), int(m1.group(2)), m1.group(1), int(m1.group(2)))
+    m2 = _A1_CELL_RE.match(parts[1])
+    if not m2:
+        return None
+    return (m1.group(1), int(m1.group(2)), m2.group(1), int(m2.group(2)))
+
+
+def _ensure_duplicate_check_coverage(sheet_root, col_letter: str, row: int) -> None:
+    """Makes sure `row`'s cell in `col_letter` is covered by some
+    duplicateValues conditionalFormatting rule — the real tracker's own
+    "flag repeated Descriptions" convention (see CTR Tracker feature
+    notes). The real file's rule for column P has been split by Excel
+    itself, from years of manual row insertions, into 100+ separate
+    range fragments — some covering a single row — rather than one clean
+    range, and a handful of rows have ended up with no fragment covering
+    them at all (from an insertion Excel didn't extend the rule across
+    cleanly). Called on every write to col_letter, this is a no-op when
+    coverage already exists.
+
+    A duplicateValues rule only ever compares cells *within its own
+    sqref* — never against a different conditionalFormatting element,
+    even one sharing the same dxfId, and never against the column as a
+    whole (confirmed against the OOXML spec, not assumed). A brand-new
+    single-cell rule for just this row would therefore have nothing to
+    compare the cell against and could never actually highlight it —
+    "covered" in name only. So instead of creating one, this appends the
+    row as one more token onto whichever existing duplicateValues rule
+    on this column already covers the most cells — its sqref is already
+    a union of many disjoint ranges (that's exactly how the original,
+    unfragmented rule would have looked), so adding one more token is
+    consistent with its own existing shape, and the row is now genuinely
+    compared against everything else in that rule's — the largest
+    available — comparison set. This also heals any pre-existing gap the
+    row happened to already have, the next time this code touches it.
+
+    A sheet with no duplicateValues rule on this column at all (nothing
+    to extend) is left alone — there's no existing style/rule to attach
+    to, and inventing one here would be presuming a convention the real
+    file doesn't actually have.
+    """
+    covered = False
+    best_cf = None
+    best_size = -1
+    for cf in sheet_root.findall(f"{_M}conditionalFormatting"):
+        rules = [r for r in cf.findall(f"{_M}cfRule") if r.get("type") == "duplicateValues"]
+        if not rules:
+            continue
+        tokens = (cf.get("sqref") or "").split()
+        ranges = [_sqref_token_range(t) for t in tokens]
+        ranges = [r for r in ranges if r is not None and r[0] == col_letter and r[2] == col_letter]
+        if not ranges:
+            continue
+
+        if any(r[1] <= row <= r[3] for r in ranges):
+            covered = True
+            break
+
+        size = sum(r[3] - r[1] + 1 for r in ranges)
+        if size > best_size:
+            best_size, best_cf = size, cf
+
+    if covered or best_cf is None:
+        return
+
+    existing_sqref = best_cf.get("sqref") or ""
+    best_cf.set("sqref", f"{existing_sqref} {col_letter}{row}".strip())
+
+
 # Entry attribute -> config column key, for the plain-string fields this
 # writes. CTR number (col_ctr_number) is deliberately excluded — it's the
 # search key a human already filled in, never written by this code.
@@ -235,6 +327,7 @@ _SOFT_STRING_FIELDS = {
     "col_client":       "client",
     "col_location":     "tracker_location",
     "col_project_code": "project_code",
+    "col_job_type":     "job_type",
 }
 
 
@@ -558,16 +651,46 @@ def _plan_insertions(
     }
     probe_used: set[int] = set()
 
-    # (idx, insert_at_row, base_ctr_number), in the order entries are
-    # walked below — turned into to_insert/final_row_for_idx afterward.
-    raw_insertions: list[tuple[int, int, str]] = []
+    # (idx, insert_at_row, base_ctr_number, flexible), in the order
+    # entries are walked below — turned into to_insert/final_row_for_idx
+    # afterward. flexible is True for a currency's brand-new first row
+    # (wrong_currency below) — it has no revision to order against, just
+    # "somewhere in this CTR's block" — and False for a revision insert,
+    # which has a specific position it must land at relative to its own
+    # currency's existing rows. See the tie-break note below for why this
+    # distinction matters.
+    raw_insertions: list[tuple[int, int, str, bool]] = []
     pre_skip: dict[int, str] = {}
+
+    # (base_ctr_number, currency) -> the entries[] idx that already claims
+    # it, earlier in this same batch. A second entry for the exact same
+    # pair is deliberately refused here rather than routed through
+    # _classify_target_row/_insertion_row_for_revision: both of those only
+    # ever see this pass's single on-disk snapshot, so they can't tell an
+    # entry apart from a sibling that's about to occupy the very row it
+    # would need to compare itself against — the earlier entry's revision
+    # isn't "real" yet as far as this snapshot is concerned. Skipping here
+    # keeps the entry in the batch table (see tracker_window.py) so it can
+    # be retried in a later batch, once the first write is genuinely on
+    # disk and ordering can be computed correctly against it.
+    claimed_currency: dict[tuple[str, str], int] = {}
 
     for idx, entry in enumerate(entries):
         base, reason = _validated_base(entry)
         if base is None:
             pre_skip[idx] = reason
             continue
+
+        currency_key = (base, (entry.currency or "").strip().upper())
+        prior_idx = claimed_currency.get(currency_key)
+        if prior_idx is not None:
+            pre_skip[idx] = (
+                f'CTR number "{base}" ({entry.currency or "no currency set"}) '
+                f"{IN_BATCH_CONFLICT_MARKER} (entry #{prior_idx + 1}) — write it in a "
+                "separate batch afterward."
+            )
+            continue
+        claimed_currency[currency_key] = idx
 
         kind, row, _, _ = _classify_target_row(
             probe_row_by_num, probe_strings, cfg, base, entry.currency, probe_used,
@@ -580,7 +703,7 @@ def _plan_insertions(
             # block already exists, so the two stay grouped together.
             last_row = _last_row_for_ctr(probe_row_by_num, probe_strings, cfg, base)
             if last_row is not None:
-                raw_insertions.append((idx, last_row + 1, base))
+                raw_insertions.append((idx, last_row + 1, base, True))
             continue
 
         if kind is None:
@@ -634,7 +757,7 @@ def _plan_insertions(
                 probe_row_by_num, probe_strings, cfg, base,
                 entry.currency, entry.revision, set(),
             )
-            raw_insertions.append((idx, insert_at, base))
+            raw_insertions.append((idx, insert_at, base, False))
 
     # Simulate the cumulative shift each insertion causes on the others,
     # processed from the top of the sheet down: an insertion at row X
@@ -643,15 +766,27 @@ def _plan_insertions(
     # such earlier (lower-numbered) insertion that lands before it. This
     # exactly predicts what tracker_xlwings.insert_revision_rows actually
     # produces (it applies them bottom-up so it can use these same raw
-    # row numbers directly, without needing to track shifts itself) —
-    # ties (two insertions computed at the identical raw row) are broken
-    # by original entries[] order, both here and in the list passed to
-    # insert_revision_rows below, so the two stay consistent.
-    ordered = sorted(raw_insertions, key=lambda t: t[1])
+    # row numbers directly, without needing to track shifts itself).
+    #
+    # Ties (two insertions computed at the identical raw row) are broken
+    # by putting a revision insert (flexible=False) before a currency's
+    # brand-new first row (flexible=True) rather than by original
+    # entries[] order — a batch adding both a CTR's first-ever row for one
+    # currency and a new revision for its *other*, already-existing
+    # currency can compute the exact same raw row for both (right after
+    # that currency's own last existing row happens to be right after the
+    # other currency's block). The revision insert has one correct place
+    # to land, relative to its own currency's existing rows; the new
+    # currency's first row has no such constraint — it just needs to be
+    # somewhere in this CTR's block — so it's the one that should absorb
+    # the tie and get pushed one row further down, not the other way
+    # around. Two ties of the same flexibility fall back to entries[]
+    # order, same as before.
+    ordered = sorted(raw_insertions, key=lambda t: (t[1], t[3]))
     to_insert: list[tuple[int, str]] = []
     final_row_for_idx: dict[int, int] = {}
     shift = 0
-    for idx, insert_at, base in ordered:
+    for idx, insert_at, base, _flexible in ordered:
         final_row_for_idx[idx] = insert_at + shift
         to_insert.append((insert_at, base))
         shift += 1
@@ -665,13 +800,18 @@ def write_entries_fast(
     make_backup: bool = False,
     allow_overwrite: bool = False,
     revision_mode: str = "overwrite",
-) -> tuple[list[tuple[str, int]], list[tuple[str, str]], Path | None]:
+) -> tuple[list[tuple[int, str, int]], list[tuple[int, str, str]], Path | None]:
     """Writes each entry into the existing tracker row reserved for its
     CTR number (see module docstring), backs up if requested, and saves
     the workbook in place. Returns (written, skipped, backup_path):
-    written is [(ctr_number, row), ...] for entries actually written;
-    skipped is [(ctr_number, reason), ...] for entries that couldn't be
-    placed. The file is only touched if at least one entry was written.
+    written is [(entries_idx, ctr_number, row), ...] for entries actually
+    written; skipped is [(entries_idx, ctr_number, reason), ...] for
+    entries that couldn't be placed. entries_idx is this call's own
+    position in `entries` — the only unambiguous way for a caller to map
+    a result back to the entry it came from, since two entries can share
+    the same CTR number (e.g. two revisions of one CTR in one batch — see
+    IN_BATCH_CONFLICT_MARKER). The file is only touched if at least one
+    entry was written.
 
     allow_overwrite (off by default) lets a match land on a row whose
     core data fields already have something in them, instead of treating
@@ -726,8 +866,6 @@ def write_entries_fast(
                 tracker_path, cfg["sheet_name"],
                 [(insert_at, base, cfg["col_ctr_number"]) for insert_at, base in to_insert],
                 row_local_formulas=[tuple(pair) for pair in cfg.get("row_local_formulas", [])],
-                col_row_counter=cfg.get("col_row_counter"),
-                row_counter_formula=cfg.get("row_counter_formula"),
             )
         except (tracker_xlwings.ExcelAutomationUnavailable, RuntimeError) as exc:
             for idx in final_row_for_idx:
@@ -747,9 +885,9 @@ def write_entries_fast(
     }
     default_styles = _col_default_styles(sheet_root)
 
-    written: list[tuple[str, int]] = []
-    skipped: list[tuple[str, str]] = [
-        (entries[idx].ctr_number, reason) for idx, reason in pre_skip.items()
+    written: list[tuple[int, str, int]] = []
+    skipped: list[tuple[int, str, str]] = [
+        (idx, entries[idx].ctr_number, reason) for idx, reason in pre_skip.items()
     ]
     used_rows: set[int] = set()
 
@@ -759,7 +897,7 @@ def write_entries_fast(
 
         base, reason = _validated_base(entry)
         if base is None:
-            skipped.append((entry.ctr_number or "(blank CTR number)", reason))
+            skipped.append((idx, entry.ctr_number or "(blank CTR number)", reason))
             continue
 
         if idx in final_row_for_idx:
@@ -777,7 +915,7 @@ def write_entries_fast(
                 row_by_num, shared_strings, cfg, base, entry.currency, used_rows,
             )
             if kind is None:
-                skipped.append((entry.ctr_number, reason))
+                skipped.append((idx, entry.ctr_number, reason))
                 continue
             if kind == "wrong_currency":
                 # The planning pass should have resolved this via
@@ -787,7 +925,7 @@ def write_entries_fast(
                 # happened, which shouldn't occur; skip rather than
                 # silently doing nothing with it.
                 skipped.append((
-                    entry.ctr_number,
+                    idx, entry.ctr_number,
                     f'a row with CTR number "{base}" exists but never had one for '
                     f'currency "{entry.currency}", and no row could be created for it',
                 ))
@@ -795,7 +933,7 @@ def write_entries_fast(
             if kind == "filled":
                 if not allow_overwrite:
                     skipped.append((
-                        entry.ctr_number,
+                        idx, entry.ctr_number,
                         f'a row with CTR number "{base}" exists but is already filled in',
                     ))
                     continue
@@ -813,7 +951,7 @@ def write_entries_fast(
                     # unresolved rather than silently overwriting a row
                     # the user explicitly chose not to touch.
                     skipped.append((
-                        entry.ctr_number,
+                        idx, entry.ctr_number,
                         f'a row with CTR number "{base}" already has data and no spare or '
                         "inserted row was available for it",
                     ))
@@ -835,6 +973,8 @@ def write_entries_fast(
             value = getattr(entry, attr)
             if value:
                 _set_string_cell(_cell(cfg[cfg_key]), value)
+                if cfg_key == "col_description":
+                    _ensure_duplicate_check_coverage(sheet_root, cfg[cfg_key], row)
 
         for cfg_key, attr in _SOFT_STRING_FIELDS.items():
             value = getattr(entry, attr)
@@ -904,7 +1044,7 @@ def write_entries_fast(
             total_formula = cfg["total_usd_formula"].format(row=row)
             _set_formula_cell(_cell(cfg["col_total_usd"]), total_formula)
 
-        written.append((entry.ctr_number, row))
+        written.append((idx, entry.ctr_number, row))
 
     if written:
         new_sheet_xml = etree.tostring(

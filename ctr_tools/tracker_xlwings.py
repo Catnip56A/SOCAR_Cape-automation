@@ -1,5 +1,5 @@
 """
-ctr_generator/tracker_xlwings.py
+ctr_tools/tracker_xlwings.py
 
 Structural row insertion for the CTR Tracker, via real Excel automation
 (xlwings/COM on Windows, xlwings/AppleScript on macOS) — used only for the
@@ -56,8 +56,6 @@ def insert_revision_rows(
     insertions: list[tuple[int, str, str]],
     *,
     row_local_formulas: list[tuple[str, str]] | None = None,
-    col_row_counter: str | None = None,
-    row_counter_formula: str | None = None,
 ) -> None:
     """
     Inserts one blank row for each (insert_at_row, ctr_number, col_ctr_number)
@@ -80,17 +78,12 @@ def insert_revision_rows(
         correctly on every row that *shifts*, so nothing else needs doing
         for them.
 
-      col_row_counter / row_counter_formula: a running counter formula
-        that instead references the row *above* it (e.g. "B{prev_row}+1")
-        — {prev_row} is filled in with insert_at_row - 1 and seeded onto
-        the new row, same idea. But the row pushed down by the insert (the
-        one now at insert_at_row + 1) keeps *its* original formula
-        unchanged, because that formula's own reference (to the row above
-        the insertion point) never moved — Excel only rewrites references
-        to cells that actually shifted, and that source cell didn't. Left
-        alone, the pushed-down row would end up duplicating the new row's
-        count instead of continuing it. So if that row already has a
-        formula there, it's rewritten too, now pointing at the new row.
+    Column B ("No", a running row-count formula referencing the row
+    *above* it) is deliberately left blank on the new row rather than
+    seeded — it isn't needed and a formula there would also require
+    repairing the pushed-down row's now-stale reference, since that row's
+    own formula (pointing at the row above the insertion point) never
+    moved and Excel only rewrites references to cells that actually shifted.
 
     insertions is processed from the highest insert_at_row to the lowest,
     so earlier insertions in the list don't shift the row numbers later
@@ -156,20 +149,6 @@ def insert_revision_rows(
                     sheet.range(f"{col}{insert_at_row}").formula = (
                         "=" + template.format(row=insert_at_row)
                     )
-
-                if col_row_counter and row_counter_formula:
-                    sheet.range(f"{col_row_counter}{insert_at_row}").formula = (
-                        "=" + row_counter_formula.format(prev_row=insert_at_row - 1)
-                    )
-                    # Repair the pushed-down row's now-stale counter (see
-                    # docstring above) — only if it actually had one, so a
-                    # genuinely blank trailing row past the real data stays
-                    # blank rather than gaining a formula it never had.
-                    pushed_down_cell = sheet.range(f"{col_row_counter}{insert_at_row + 1}")
-                    if pushed_down_cell.formula:
-                        pushed_down_cell.formula = (
-                            "=" + row_counter_formula.format(prev_row=insert_at_row)
-                        )
             book.save()
         finally:
             book.close()

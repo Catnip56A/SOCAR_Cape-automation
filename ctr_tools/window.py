@@ -1,5 +1,5 @@
 """
-ctr_generator/window.py
+ctr_tools/window.py
 
 CTR Generator dialog for the SOCAR Cape desktop app.
 
@@ -38,7 +38,7 @@ from datetime import date as _date
 from pathlib import Path
 
 import pandas as pd
-from ctr_generator import __version__ as _VERSION
+from ctr_tools import __version__ as _VERSION
 from PySide6.QtCore import Qt, QObject, QRunnable, QSettings, QThread, QThreadPool, Signal
 from PySide6.QtGui import QBrush, QColor
 from PySide6.QtWidgets import (
@@ -48,27 +48,27 @@ from PySide6.QtWidgets import (
     QSizePolicy, QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget,
 )
 
-from ctr_generator.aliases import (
+from ctr_tools.aliases import (
     load_aliases, get_alias, set_alias, delete_alias, save_aliases,
 )
-from ctr_generator.desc_renames import (
+from ctr_tools.desc_renames import (
     load_desc_renames, get_desc_rename, set_desc_rename, delete_desc_rename,
     save_desc_renames,
 )
-from ctr_generator.config import CFG
-from ctr_generator.presets import load_presets, save_presets, _PRESET_FIELDS
-from ctr_generator.builder_azn import (
+from ctr_tools.config import CFG
+from ctr_tools.presets import load_presets, save_presets, _PRESET_FIELDS
+from ctr_tools.builder_azn import (
     activities_label,
     build_azn,
     is_support_manpower,
     strip_support_keyword,
 )
-from ctr_generator.builder_usd import build_usd
-from ctr_generator.parser import (
+from ctr_tools.builder_usd import build_usd
+from ctr_tools.parser import (
     parse_azn_pricebook, parse_usd_pricebook, parse_sage,
     parse_ctr_request, parse_equip_names_db,
 )
-from ctr_generator.pdf_exporter import export_to_pdf
+from ctr_tools.pdf_exporter import export_to_pdf
 
 log = logging.getLogger(__name__)
 
@@ -400,10 +400,20 @@ def _set_row_tint(tbl: QTableWidget, row: int, key: str | None) -> None:
 
 
 def _on_table_selection_changed(tbl: QTableWidget) -> None:
-    """Re-applies every row's tint so it switches between background (not
-    selected) and font colour (selected) as the selection changes."""
+    """Re-applies tint for rows that switch between background (not
+    selected) and font colour (selected) as the selection changes.
+
+    Only rows carrying an actual warning tint need this: for an untinted
+    row, _apply_row_tint's two branches both just clear the brushes
+    regardless of selected state, so Qt's own native selection highlight
+    already handles it with no work from us. Repainting every row here on
+    every single click — the previous behaviour — was the main source of
+    UI lag on large tables, since almost every row in a well-matched
+    table has no tint at all."""
     for row in range(tbl.rowCount()):
-        _apply_row_tint(tbl, row)
+        col0 = tbl.item(row, 0)
+        if col0 and col0.data(_ROW_TINT_ROLE):
+            _apply_row_tint(tbl, row)
 
 
 def _highlight_row(tbl: QTableWidget, row: int, matched: bool) -> None:
@@ -577,7 +587,7 @@ def _sage_non_recharge(sage_df: pd.DataFrame, key: str) -> bool | None:
 # shift-type suffix scheme, so it's stripped before lookup.
 #
 # Configurable via the "azn_shift_prefixes" section of template_config.json
-# (see ctr_generator/config.py) — add a prefix there, no code change needed,
+# (see ctr_tools/config.py) — add a prefix there, no code change needed,
 # if the pricebook introduces one this doesn't cover yet. An unrecognized
 # prefix makes manpower matching refuse to guess (see
 # _decode_manpower_encoding_full / _match_azn_labor) rather than silently
@@ -2408,7 +2418,13 @@ class CTRGeneratorWidget(QWidget):
         tbl.setItem(r, _MP_MDESC,     _ro_item(""))
         tbl.setItem(r, _MP_NUMEMP,    QTableWidgetItem(str(num_emp)))
         tbl.setItem(r, _MP_QTY,       QTableWidgetItem(str(qty)))
+        # blockSignals: setData on an item already in the table fires
+        # cellChanged same as a real edit would — without this, stashing
+        # working_days here would immediately trip _on_manpower_changed's
+        # "manual Quantity edit" handling and clear the very value just set.
+        tbl.blockSignals(True)
         tbl.item(r, _MP_QTY).setData(Qt.UserRole, working_days)
+        tbl.blockSignals(False)
         tbl.setItem(r, _MP_UOM,       _ro_item("Hours"))
         tbl.setItem(r, _MP_RATE,      QTableWidgetItem("0.00"))
         tbl.setItem(r, _MP_TOTAL,     _ro_item("0.00"))
@@ -2451,6 +2467,21 @@ class CTRGeneratorWidget(QWidget):
         if col in (_MP_TYPE, _MP_SHIFT, _MP_SHIFTTYPE, _MP_MATCH):
             self._rematch_manpower_row(row)
         elif col in (_MP_NUMEMP, _MP_QTY, _MP_RATE):
+            if col == _MP_QTY:
+                # A direct manual edit means this Quantity is no longer
+                # derived from the request's working-day count — clear the
+                # stash so a later Shift/Type/Match rematch treats it as a
+                # plain hours entry instead of silently recomputing over
+                # what was just typed in (see _rematch_manpower_row).
+                # blockSignals: setData on an item already in the table
+                # re-fires cellChanged for *any* role, not just user edits
+                # — without this it would immediately re-enter this same
+                # handler for the very setData call clearing the stash.
+                item = self._req_manpower_tbl.item(row, _MP_QTY)
+                if item is not None:
+                    self._req_manpower_tbl.blockSignals(True)
+                    item.setData(Qt.UserRole, None)
+                    self._req_manpower_tbl.blockSignals(False)
             self._recalc_manpower_row(row)
         if col in (_MP_TYPE, _MP_SHIFT, _MP_SHIFTTYPE, _MP_MATCH, _MP_NUMEMP, _MP_QTY, _MP_RATE):
             self._recalc_azn_totals()
@@ -2503,14 +2534,23 @@ class CTRGeneratorWidget(QWidget):
 
     def _recalc_manpower_row(self, row: int):
         tbl = self._req_manpower_tbl
+        # blockSignals covers the whole function, not just the final
+        # setItem below: _val's setToolTip on a malformed cell fires
+        # cellChanged the same as a real edit would, which would otherwise
+        # re-enter _on_manpower_changed and recurse back into this method.
+        tbl.blockSignals(True)
         def _val(c):
             item = tbl.item(row, c)
-            try:
-                return float(item.text()) if item else 0.0
-            except ValueError:
+            if not item:
                 return 0.0
+            try:
+                v = float(item.text())
+            except ValueError:
+                item.setToolTip(f'"{item.text()}" is not a valid number — treated as 0 here.')
+                return 0.0
+            item.setToolTip("")
+            return v
         total = _val(_MP_NUMEMP) * _val(_MP_QTY) * _val(_MP_RATE)
-        tbl.blockSignals(True)
         tbl.setItem(row, _MP_TOTAL, _ro_item(f"{total:.2f}"))
         tbl.blockSignals(False)
 
@@ -2577,9 +2617,16 @@ class CTRGeneratorWidget(QWidget):
                     qty_item.setText(str(float(working_days) * float(effective_hours)))
                 except (TypeError, ValueError):
                     pass
+        # _highlight_row colours every cell in the row (including Quantity)
+        # via setBackground/setForeground, which fires cellChanged the same
+        # as a real edit would — blockSignals only suppresses that signal,
+        # not the actual repaint, so calling it before unblocking is free
+        # and avoids spuriously re-entering _on_manpower_changed for every
+        # column (which, for Quantity, would wrongly look like a manual
+        # edit and clear the working_days stash above).
+        _highlight_row(tbl, row, bool(match))
         tbl.blockSignals(False)
         self._recalc_manpower_row(row)
-        _highlight_row(tbl, row, bool(match))
 
         # Learn the rename if Match By differs from the requested description
         # — remembered so future CTR Requests auto-fill the same correction.
@@ -2707,14 +2754,19 @@ class CTRGeneratorWidget(QWidget):
 
     def _recalc_equip_row(self, row: int):
         tbl = self._req_equip_tbl
+        tbl.blockSignals(True)
         def _val(c):
             item = tbl.item(row, c)
-            try:
-                return float(item.text()) if item else 0.0
-            except ValueError:
+            if not item:
                 return 0.0
+            try:
+                v = float(item.text())
+            except ValueError:
+                item.setToolTip(f'"{item.text()}" is not a valid number — treated as 0 here.')
+                return 0.0
+            item.setToolTip("")
+            return v
         total = _val(_EQ_QTY) * _val(_EQ_RATE) * _val(_EQ_DAYS)
-        tbl.blockSignals(True)
         tbl.setItem(row, _EQ_TOTAL, _ro_item(f"{total:.2f}"))
         tbl.blockSignals(False)
 
@@ -2910,14 +2962,19 @@ class CTRGeneratorWidget(QWidget):
 
     def _recalc_cons_row(self, row: int):
         tbl = self._req_cons_tbl
+        tbl.blockSignals(True)
         def _val(c):
             item = tbl.item(row, c)
-            try:
-                return float(item.text()) if item else 0.0
-            except ValueError:
+            if not item:
                 return 0.0
+            try:
+                v = float(item.text())
+            except ValueError:
+                item.setToolTip(f'"{item.text()}" is not a valid number — treated as 0 here.')
+                return 0.0
+            item.setToolTip("")
+            return v
         total = _val(_CS_QTY) * _val(_CS_PRICE)
-        tbl.blockSignals(True)
         tbl.setItem(row, _CS_TOTAL, _ro_item(f"{total:.2f}"))
         tbl.blockSignals(False)
 
