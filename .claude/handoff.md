@@ -1,126 +1,103 @@
-# Handoff — 2026-09-04
+# Handoff — 2026-09-12
 
 ## Working on
-v1.0.10: three subsystems touched in one long session — MR vs CTR Comparator
-(Combined View, Rate/Rechargeable mismatch check, Save/Load Comparison),
-CTR Generator (AZN manpower Comment now states Shift/Shift Type), and CTR
-Tracker (company-based Project Code overrides, currency-aware row matching,
-Overwrite-vs-Separate-Revision write mode with real Excel row insertion).
-Also fixed the SessionStart hook to point at this file live instead of
-embedding a truncated preview.
+v1.0.13, just committed locally as a single clean commit (`14498ff`) after
+squashing two mislabeled outgoing commits (see "Key decisions" below). My
+own direct work this session was entirely on the MR vs CTR Comparator
+(`app.py`): a Hide/Show results toggle that doesn't force a recompute, a
+Maximize toggle that now covers the whole comparator tab (step indicator +
+pinned Compare/Load row too, not just the file-list area), Combined View
+"MR Document"/"CTR Document" columns, per-table delete (✕) buttons in
+Step 2 distinct from the existing skip-via-checkbox, a red/warning file
+marker when all of a file's tables get deleted, a preview-pane sync fix,
+and a root-caused fix for popups rendering with a solid black background.
 
-**Everything is committed** — `1934b7b "v.1.0.10"`, working tree clean. The
-CHANGELOG's `[1.0.10]` section is accurate and complete; read it for the
-full feature list instead of re-deriving it here. This file covers only
-reasoning and state that CHANGELOG/git log don't carry.
+The CTR Tracker substantive changes bundled into the same v1.0.13 commit
+(Job Type dropdown, batch insertion tie-break fix, same-CTR+currency
+in-batch conflict retry, duplicate-check coverage healing) were **not**
+made by me in this conversation — they appeared as already-modified files
+via git-status/CHANGELOG diffs partway through the session, meaning
+another session or the user did that work directly. I have not reviewed
+that code myself and can't vouch for its reasoning the way I can for the
+Comparator work.
 
 ## Key decisions (with reasoning)
-- **Revision info goes in the row itself (position + AI column), never
-  written into the Comment/Y column.** The plan briefly included writing
-  the revision number into Comment; the user reversed that explicitly
-  ("we will insert revision number to the revision column, while only
-  writing numbers there") — that write path and its config (`col_comment`)
-  were added, then fully removed.
-- **Same revision number → always overwrite in place, regardless of the
-  Overwrite/Separate-Revision choice.** "Separate revision" only reaches
-  for a spare/inserted row when the revision genuinely differs from what's
-  already in the matched row. User confirmed this twice, explicitly.
-- **Spare-row reuse requires the spare to be explicitly labeled with the
-  target currency, once that currency already has ≥1 revision written.**
-  An unlabeled blank spare is more likely the tracker's own reserved slot
-  for the CTR's *other* currency (a real pre-creation convention seen in
-  the actual file) than a free-for-all row — reusing it wrongly would
-  clobber that pairing.
-- **Missing-currency row creation ignores the Overwrite checkbox entirely.**
-  If a CTR number has rows for only one currency, the other currency's row
-  is always created — there's nothing existing to protect, so the checkbox
-  doesn't apply. Placed immediately after the existing currency's block,
-  not a fixed AZN/USD order.
-- **Real Excel automation (`tracker_xlwings.py`, xlwings/COM) only for the
-  rare "no spare available" insertion case** — not the normal write path,
-  which stays on the fast raw-XML writer. Chosen after auditing the real
-  tracker file (no merged cells, no Excel Tables, no data validation, every
-  formula row-local except one running counter) confirmed openpyxl's
-  `insert_rows()` would technically be safe today, but real Excel gets
-  conditional-formatting/AutoFilter-range shifting correct "for free" the
-  way a human inserting a row would, rather than relying on that audit
-  staying true forever.
-- **`_plan_insertions` pre-computes every batch entry's exact final row
-  via cumulative-shift simulation before any writing happens**, rather
-  than letting the write pass re-discover targets row-by-row. Two
-  newly-inserted blank placeholder rows for the same CTR number are
-  otherwise indistinguishable to the write pass, which was silently
-  scrambling currency/revision order (see Fixed bullets in CHANGELOG).
-- **Revision ordering is negative → blank ("no value") → zero-and-positive**,
-  with any embedded number extracted via regex from arbitrary text for
-  *comparison only* — the row's Revision cell always keeps the original
-  typed text. This was a direct correction from the user after the first
-  ordering rule (blank/non-numeric always last) proved wrong on real data.
+- **Black-popup-background bug root-caused to `ctrl.setStyleSheet(
+  "background: transparent;")`** in `app.py`'s `_build_ui` (the widget
+  inside the Comparator's scroll area, wrapping Step 1/Step 2). Applying
+  *any* stylesheet to a widget switches Qt to its CSS engine for that
+  widget's entire descendant subtree, which broke `QToolTip` rendering for
+  everything inside it while tooltips outside it were fine — exactly the
+  boundary the user found ("only below Load Comparison"). Fixed via
+  `ctrl.setAutoFillBackground(False)` instead, which achieves the same
+  visual effect via Qt's own default (a plain `QWidget` doesn't autofill
+  its background anyway) without invoking the CSS engine. This took ~5
+  rounds of hypothesis-testing first — a QSS-only fix, then a
+  palette+colour-scheme fix, then two separate synthetic reproduction
+  scripts (a plain button tooltip; a list-item tooltip combined with a
+  widget-level tooltip on the same list) — and **both synthetic repros
+  failed to reproduce the bug** even using the exact same widget types as
+  the real one. Only the user's own structural observation (which part of
+  the UI was affected vs. not) actually pinpointed it. Confirmed fixed by
+  the user on real Windows + WSL.
+- **Combined View's new doc-name columns are scoped to the Combined tab
+  only** — not Needs Review/Error Data — an explicit scope decision the
+  user confirmed after I asked, rather than assumed.
+- **Table-list "remove" (✕) is genuinely destructive removal**, distinct
+  from the pre-existing checkbox (which only skips a table from Compare
+  without deleting it). The user explicitly corrected me toward this when
+  I initially offered "a new Clear All button" as the interpretation of
+  their request — they wanted real deletion, checkboxes already handle
+  skip/include.
+- **File-list red/warning styling fires only on full deletion of every
+  table from that file**, never on unchecking — kept deliberately narrow
+  to match the literal request, and to stay consistent with the
+  skip-vs-delete distinction above.
+- **Squashed the two most recent outgoing commits** (`7ff15b2`, a pure
+  `ctr_generator→ctr_tools` rename with 0 content changes, and `fb6c0d7`,
+  all the actual v1.0.13 substance) — both carried the *identical*
+  "v1.0.13 - CTR Tracker batch/Job Type fixes..." commit message, which
+  actually described `fb6c0d7`'s content, not the rename `7ff15b2` itself
+  contained. Safe to squash since neither had been pushed (`ahead 2` →
+  `ahead 1` after, now sitting as `14498ff`).
 
 ## Current state
-- All CTR Tracker logic verified via synthetic openpyxl workbooks matching
-  the real column layout, plus two full rounds of genuine Windows/Excel
-  testing (via the user relaying prompts to a remote sub-agent), which
-  found and confirmed-fixed two real `tracker_xlwings.py` bugs: a stale
-  running-counter formula on the row pushed down by an insertion, and the
-  BA/BB row-local helper formulas never being seeded on newly inserted
-  rows.
-- **However**, three later correctness fixes — the multi-entry-same-CTR
-  batch bug, the cross-currency/multi-revision interleaving bug (the
-  `_plan_insertions` rewrite), and the blank-revision same-revision-match
-  bug — were made *after* that second Windows round and have only been
-  regression-tested on Linux with mocked/synthetic data, never against
-  real Excel on Windows. `tracker_xlwings.py` itself still carries its
-  original "untested by the author" docstring caveat (no Windows/macOS/
-  Excel in this dev environment) — it has been exercised only through
-  fakes.
-- The MR vs CTR Comparator's Combined View, Rate/Rechargeable mismatch
-  check, and Save/Load Comparison were built and manually reasoned through
-  but not verified against a live PySide6 UI session in this environment
-  (no browser/GUI harness available here) — worth a real click-through
-  before calling that subsystem done, per CLAUDE.md's UI verification rule.
-- `TEST_Files/CTR tracker/Issues/CTR-Tracker copy.xlsm` was inspected
-  read-only to diagnose the interleaving bug from real scrambled data; the
-  root-cause mechanism was confirmed, but the exact historical sequence of
-  clicks/code-versions that produced that specific file was not fully
-  reconstructed (it likely spans several pre-fix code states) — not
-  expected to matter now that the fix is in, just noting it's not fully
-  explained.
-- The `app.spec`/PyInstaller investigation (whether `xlwings`/`pywin32`
-  need explicit hidden-imports for the installer build) was started twice
-  and interrupted both times before any conclusion — genuinely unresolved,
-  not just undocumented.
+- v1.0.13 is fully committed locally as one commit, **one commit ahead of
+  `origin/main`, not yet pushed**.
+- All my `app.py` Comparator changes were verified via headless/offscreen
+  PySide6 tests in this Linux/WSL sandbox (can't render real pixels here)
+  — actual visual confirmation came from the user's own screenshots and
+  manual testing on their real Windows+WSL setup, which did confirm the
+  black-popup fix specifically.
+- Per `project_tracker_xlwings_verified.md` (memory), the CTR Tracker's
+  `tracker_xlwings.py` changes bundled into this same v1.0.13 commit (the
+  column-B running-counter write was removed; insert-row selection logic
+  in `tracker_fast.py:_plan_insertions` changed) are **unverified against
+  real Excel** — only exercised via openpyxl/raw-XML sandboxed tests on
+  Linux, which can't drive the actual COM automation path at all.
 
 ## Open questions
-- User asked, near the end of the session, to confirm whether the
-  same-revision check works with "any string or number" in the Revision
-  column. Answer given: ordering (`_revision_sort_key`) extracts embedded
-  numbers via regex so text like "Rev2" vs "Rev10" sorts correctly, but
-  flagged that dotted version-style text ("v2.10" vs "v2.5") reads as
-  decimals (2.10 < 2.5), not semantic versions. Separately, the
-  same-revision *match* check is plain case-sensitive text equality after
-  trimming — "2" and "2.0" are currently treated as *different* revisions.
-  I offered to make that check numeric-equivalent instead; **the user has
-  not responded to that offer** — do not implement it unprompted.
-- Whether/when the user wants the `app.spec` PyInstaller hidden-imports
-  question resolved — they said "let me build it now as an installer,
-  install it and test it myself" twice, suggesting they intend to do this
-  themselves, but never explicitly closed the loop on whether they still
-  want my help with it.
+- Whether the CTR Tracker changes bundled into this commit (made outside
+  this visible conversation) have been verified on real Windows/Excel at
+  all — not established either way in this session.
+- Whether the user wants v1.0.13 pushed to `origin` now that the commit
+  history is clean, or wants to hold off pending that Tracker
+  verification.
+- Combined View's new "MR Document"/"CTR Document" columns are always
+  included in the exported Excel report regardless of the "Show Document
+  Names" UI toggle, matching the pre-existing convention for the other
+  three tabs — never explicitly re-confirmed with the user that this is
+  still the desired behavior now that Combined View has doc columns too,
+  though nothing has been raised as a complaint.
 
 ## Files changed
-See `git show 1934b7b --stat` for the full list (app.py, comparison_history.py
-[new], ctr_generator/{builder_azn,config,paths,tracker,tracker_fast,
-tracker_window,window}.py, ctr_generator/tracker_xlwings.py [new],
-ctr_generator/template_config.json, pyproject.toml, CHANGELOG.md, VERSION)
-plus `sheet_parser.py` and `.claude/hooks/session_start_handoff.py` from
-earlier in the session. All are on `main`, already committed.
+See `git show 14498ff --stat` for the full list (30 files: the
+`ctr_generator`→`ctr_tools` rename plus substantive changes to `app.py`,
+`comparison_history.py`, `sheet_parser.py`, and most of `ctr_tools/*`).
+`CHANGELOG.md`'s `[1.0.13]` section documents the full feature/fix list.
 
 ## Next step
-Nothing is currently in flight or requested. If resuming proactively, the
-highest-value next step is a real Windows/Excel re-test of the three
-post-second-round tracker fixes (multi-entry batch, interleaving/
-`_plan_insertions`, blank-revision match) plus `tracker_xlwings.py` itself,
-since those have only ever run against mocks on Linux. Otherwise wait for
-the user's direction — including whether they want the numeric-revision-
-equality change from Open Questions.
+Nothing is currently in flight. If resuming proactively: confirm whether
+v1.0.13's bundled CTR Tracker changes need real-Excel verification before
+this gets pushed/released, ask whether to push the now-clean commit to
+`origin`, and otherwise wait for direction.
