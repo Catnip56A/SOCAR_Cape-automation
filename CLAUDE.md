@@ -1,7 +1,7 @@
 # SOCAR Cape automation — CTR generator & MR/CTR comparator
 
-Python + PySide6 desktop app. Source lives in `ctr_generator/`; template
-layout positions are config, not code — see `ctr_generator/template_config.json`.
+Python + PySide6 desktop app. Source lives in `ctr_tools/`; template
+layout positions are config, not code — see `ctr_tools/template_config.json`.
 
 ## Testing Safety
 
@@ -13,14 +13,14 @@ state which path you are writing to before running.
 Paths that are off-limits to test runs:
 
 - `~/.local/share/SOCAR/CTRGenerator/` (and the Windows/macOS equivalents
-  returned by `ctr_generator/paths.py:user_data_dir`) — `match_aliases.json`,
+  returned by `ctr_tools/paths.py:user_data_dir`) — `match_aliases.json`,
   `desc_renames.json`, `ctr_presets.json`
 - `TEST_Files/**/Output/` — real generated CTRs and the user's own templates
 
 To sandbox a run, redirect the persistence paths before importing the window:
 
 ```python
-import ctr_generator.aliases as A, ctr_generator.desc_renames as D, ctr_generator.presets as P
+import ctr_tools.aliases as A, ctr_tools.desc_renames as D, ctr_tools.presets as P
 A._ALIASES_PATH = TMP / "match_aliases.json"
 A._BUNDLED_DEFAULT_PATH = TMP / "nonexistent.json"
 D._DESC_RENAMES_PATH = TMP / "desc_renames.json"

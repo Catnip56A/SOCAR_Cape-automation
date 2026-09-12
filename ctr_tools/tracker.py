@@ -1,5 +1,5 @@
 """
-ctr_generator/tracker.py
+ctr_tools/tracker.py
 
 Backend for the CTR Tracker tab: reads header fields off a generated CTR
 output file (AZN or USD template — both share the same header cell layout,
@@ -22,7 +22,7 @@ from pathlib import Path
 import openpyxl
 from openpyxl.utils import column_index_from_string as _col_idx
 
-from ctr_generator.config import CFG
+from ctr_tools.config import CFG
 
 log = logging.getLogger(__name__)
 
@@ -43,6 +43,7 @@ class CTREntry:
     site:         str = ""          # key into ctr_tracker_locations, once resolved/confirmed
     project_code: str = ""
     tracker_location: str = ""      # "Onshore" / "Offshore" / "Georgia"
+    job_type:     str = ""          # one of ctr_tracker_job_types — user-picked, not read from the CTR file
     value_is_estimate: bool = False  # True if the value cell had no cached
                                       # number and had to be left for manual entry
 
@@ -64,6 +65,11 @@ class CTREntry:
 def location_options() -> dict[str, dict]:
     """Site name -> {project_code, tracker_location}, from config."""
     return CFG.get("ctr_tracker_locations", {})
+
+
+def job_type_options() -> list[str]:
+    """Choices offered in the Job Type dropdown, from config."""
+    return CFG.get("ctr_tracker_job_types", [])
 
 
 def match_site(site_hint: str) -> str | None:
@@ -103,6 +109,12 @@ def _main_sheet(wb) -> "openpyxl.worksheet.worksheet.Worksheet":
         return wb[azn_name]
     if usd_name in wb.sheetnames:
         return wb[usd_name]
+    log.warning(
+        "Neither the AZN main sheet (%r) nor the USD main sheet (%r) was "
+        "found among %r — falling back to the first sheet (%r), which may "
+        "not carry the expected header layout and could read blank/wrong "
+        "values.", azn_name, usd_name, wb.sheetnames, wb.sheetnames[0],
+    )
     return wb[wb.sheetnames[0]]
 
 

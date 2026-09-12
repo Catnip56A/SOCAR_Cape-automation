@@ -13,12 +13,10 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
-    "streamlit>=1.35",
     "pyinstaller>=6.0",
 ]
 
 [tool.uv]
 dev-dependencies = [
-    "streamlit>=1.35",
     "pyinstaller>=6.0",
 ]

@@ -3,7 +3,7 @@ comparison_history.py — Save/restore full MR vs CTR comparison results.
 
 Each comparison is saved as its own JSON file under comparisons_data_dir()
 (a sibling of the CTR Generator's own data folder, not nested inside it —
-see ctr_generator/paths.py), so a past comparison can be reopened exactly
+see ctr_tools/paths.py), so a past comparison can be reopened exactly
 as it was reviewed and decided — even if the original MR/CTR source files
 have since been edited, renamed, or moved. This snapshots the *results*
 (the Matched/Only-in-MR/Only-in-CTR tables, the Combined-view aggregates,
@@ -39,7 +39,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from ctr_generator.paths import comparisons_data_dir
+from ctr_tools.paths import comparisons_data_dir
 
 _SCHEMA_VERSION = 2
 
@@ -171,6 +171,27 @@ def save_comparison(
         json.dumps(data, indent=2, ensure_ascii=False, default=_json_default),
         encoding="utf-8",
     )
+    # Small sidecar carrying just the fields list_saved_comparisons() needs
+    # — without it, listing every saved comparison means fully parsing
+    # every comparison's JSON (including its potentially large table/
+    # dataframe payloads) just to read these four fields.
+    _write_meta_sidecar(path, data)
+
+
+def _meta_path(path: Path) -> Path:
+    return Path(path).with_suffix(".meta.json")
+
+
+def _write_meta_sidecar(path: Path, data: dict) -> None:
+    _meta_path(path).write_text(
+        json.dumps({
+            "label":     data["label"],
+            "timestamp": data["timestamp"],
+            "mr_files":  data["mr_files"],
+            "ctr_files": data["ctr_files"],
+        }, ensure_ascii=False),
+        encoding="utf-8",
+    )
 
 
 def load_comparison(path: Path) -> dict:
@@ -195,11 +216,23 @@ def load_comparison(path: Path) -> dict:
 def list_saved_comparisons() -> list[dict]:
     """Lightweight listing (no dataframes) of every saved comparison, newest
     first — for a picker UI, so the user chooses from what's actually there
-    instead of having to browse the filesystem for it."""
+    instead of having to browse the filesystem for it.
+
+    Reads each comparison's small .meta.json sidecar rather than the full
+    comparison file, which can be large (display/table data). A comparison
+    saved before the sidecar existed has none yet — its full file is read
+    once as a fallback, and the gap closes permanently the next time it's
+    saved again."""
     out = []
     for p in comparisons_dir().glob("*.json"):
+        if p.stem.endswith(".meta"):
+            continue   # a sidecar itself, not a comparison
+        meta_path = _meta_path(p)
         try:
-            data = json.loads(p.read_text(encoding="utf-8"))
+            if meta_path.exists():
+                data = json.loads(meta_path.read_text(encoding="utf-8"))
+            else:
+                data = json.loads(p.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
             continue
         out.append({

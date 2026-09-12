@@ -1,5 +1,5 @@
 """
-ctr_generator/pdf_exporter.py
+ctr_tools/pdf_exporter.py
 
 Converts an xlsx file to PDF using LibreOffice headless.
 Looks for soffice on PATH first, then falls back to the standard install

@@ -1,5 +1,5 @@
 """
-ctr_generator/presets.py
+ctr_tools/presets.py
 
 Named presets for the Generate section's input fields.
 Stored as JSON in a stable per-user data directory (see paths.py) so saved
@@ -22,9 +22,12 @@ way to avoid a conversion at the boundary.
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 
-from ctr_generator.paths import user_data_dir
+from ctr_tools.paths import user_data_dir
+
+log = logging.getLogger(__name__)
 
 _PRESETS_PATH = user_data_dir() / "ctr_presets.json"
 _BUNDLED_DEFAULT_PATH = Path(__file__).parent / "ctr_presets.json"
@@ -45,8 +48,8 @@ def _seed_from_bundled_default() -> None:
         _PRESETS_PATH.write_text(
             _BUNDLED_DEFAULT_PATH.read_text(encoding="utf-8"), encoding="utf-8"
         )
-    except OSError:
-        pass
+    except OSError as exc:
+        log.warning("Failed to seed %s from bundled default: %s", _PRESETS_PATH, exc)
 
 
 def load_presets() -> dict[str, dict]:
@@ -58,8 +61,8 @@ def load_presets() -> dict[str, dict]:
         data = json.loads(_PRESETS_PATH.read_text(encoding="utf-8"))
         if isinstance(data, dict):
             return {str(k): dict(v) for k, v in data.items() if isinstance(v, dict)}
-    except (json.JSONDecodeError, OSError):
-        pass
+    except (json.JSONDecodeError, OSError) as exc:
+        log.warning("Failed to load %s, starting empty: %s", _PRESETS_PATH, exc)
     return {}
 
 
@@ -68,5 +71,8 @@ def save_presets(presets: dict[str, dict]) -> None:
         _PRESETS_PATH.write_text(
             json.dumps(presets, indent=2, ensure_ascii=False), encoding="utf-8"
         )
-    except OSError:
-        pass
+    except OSError as exc:
+        # non-fatal — presets just won't persist across sessions — but
+        # worth a trail, since this otherwise discards a user's saved
+        # preset with zero feedback anywhere.
+        log.warning("Failed to save %s: %s", _PRESETS_PATH, exc)

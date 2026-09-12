@@ -1,5 +1,5 @@
 """
-ctr_generator/config.py
+ctr_tools/config.py
 
 Loads template layout positions from template_config.json.
 Edit that file to adjust row/column positions when templates change,
@@ -165,7 +165,7 @@ _DEFAULTS: dict = {
     # Maps an AZN labor stock code's shift-type prefix (the segment before
     # "-NAT-", e.g. "MSU" in "MSU-NAT-OFF-12") to [shift, shift_type].
     # A "GE" prefix (e.g. "GENOV-...") is stripped before lookup — see
-    # ctr_generator/window.py _decode_azn_stock_code. Add new prefixes here
+    # ctr_tools/window.py _decode_azn_stock_code. Add new prefixes here
     # (no code changes needed) if the pricebook introduces one this table
     # doesn't cover yet — an unrecognized prefix makes manpower matching
     # refuse to guess and surface the row as unmatched instead.
@@ -253,6 +253,7 @@ _DEFAULTS: dict = {
         "header_row":      4,
         "col_client":        "C",
         "col_ctr_number":    "D",
+        "col_job_type":      "K",
         "col_location":      "L",
         "col_date":          "N",
         "col_project_code":  "O",
@@ -267,20 +268,18 @@ _DEFAULTS: dict = {
         #
         # Confirmed against the real file's actual formulas (a full column
         # scan on Windows, not just this session's earlier sample): every
-        # data row carries exactly these four. Three (A, BA, BB) reference
-        # only cells in their own row, so a plain Excel row-insert renumbers
-        # them correctly on its own — row_local_formulas just needs to seed
-        # them on the brand-new row. The fourth, the running counter (B),
-        # references the row *above* it instead, which is why it's split
-        # out separately below — see tracker_xlwings.insert_revision_rows
-        # for the extra repair step that one needs and the other three don't.
+        # data row carries exactly these three, referencing only cells in
+        # their own row, so a plain Excel row-insert renumbers them
+        # correctly on its own — row_local_formulas just needs to seed
+        # them on the brand-new row. (Column B, "No", is a running counter
+        # that instead references the row *above* it and is deliberately
+        # left blank on inserted rows rather than reproduced here — see
+        # tracker_xlwings.insert_revision_rows.)
         "row_local_formulas": [
             ["A",  'IF(I{row}>0,H{row}&"-"&I{row},H{row})'],
             ["BA", 'D{row}&" "&AC{row}'],
             ["BB", "A{row}"],
         ],
-        "col_row_counter":       "B",
-        "row_counter_formula":   "B{prev_row}+1",
         # Total CTR value converted to USD — always rewritten with this
         "col_value_usd":     "AJ",
         # formula (AC/S are that row's own currency/value columns) using
@@ -319,6 +318,25 @@ _DEFAULTS: dict = {
         "consumables_markup_formula": "AT{row}*{rate}",
         "total_usd_formula":          "SUM(AL{row}:AW{row})-AS{row}",
     },
+
+    # Options offered in the CTR Tracker "Job Type" dropdown (column K,
+    # "Job type (Core Crew, Projects, FM, TAR)" in the real tracker's
+    # header). The real sheet's existing ~7,300 rows carry that field as
+    # free text with no data validation behind it — inconsistent casing
+    # (CORE CREW / Core Crew / Core crew, the header's own style, is the
+    # dominant one and is what's used here) and, alongside the header's
+    # own 4 categories, two FM sub-types and a TAR sub-type in real,
+    # repeated use (FM PROCESS, FM DRILLING, TAR & SHUTDOWN — 450+/70+/
+    # 118+ rows respectively). Kept as first-class options here rather
+    # than collapsed into their parent category. Plain "Drilling" (its
+    # own, much rarer casing — 5 rows, no consistent pattern with FM
+    # DRILLING's rows) is also included at the user's request despite
+    # being effectively noise. Edit/add entries here — no code changes
+    # needed.
+    "ctr_tracker_job_types": [
+        "CORE CREW", "PROJECTS", "FM", "FM PROCESS", "FM DRILLING",
+        "Drilling", "TAR", "TAR & SHUTDOWN",
+    ],
 
     # Site name -> (Project Code, tracker Location bucket) lookup offered
     # in the CTR Tracker "Location" dropdown. Selecting a site fills both
@@ -455,13 +473,23 @@ _DEFAULTS: dict = {
 }
 
 
+def _copy_default(value):
+    """Shallow-copies a _DEFAULTS section so callers can't mutate the
+    module-level defaults through the returned config."""
+    if isinstance(value, dict):
+        return dict(value)
+    if isinstance(value, list):
+        return list(value)
+    return value
+
+
 def load_config() -> dict:
     """
     Load template_config.json, merging file values over _DEFAULTS
     section by section. Unknown keys in the file are included as-is.
     """
     if not _CONFIG_PATH.exists():
-        return {k: dict(v) for k, v in _DEFAULTS.items()}
+        return {k: _copy_default(v) for k, v in _DEFAULTS.items()}
 
     try:
         with _CONFIG_PATH.open("r", encoding="utf-8") as fh:
@@ -470,11 +498,17 @@ def load_config() -> dict:
         log.warning(
             "Could not load %s (%s) — using built-in defaults.", _CONFIG_PATH, exc
         )
-        return {k: dict(v) for k, v in _DEFAULTS.items()}
+        return {k: _copy_default(v) for k, v in _DEFAULTS.items()}
 
     result: dict = {}
     for section, defaults in _DEFAULTS.items():
-        result[section] = {**defaults, **data.get(section, {})}
+        if isinstance(defaults, dict):
+            result[section] = {**defaults, **data.get(section, {})}
+        else:
+            # A list-shaped section (e.g. ctr_tracker_job_types) — the
+            # file's own list replaces the default outright rather than
+            # merging key-by-key, since a list has no keys to merge on.
+            result[section] = data[section] if section in data else _copy_default(defaults)
     # Pass through any extra top-level sections from the file
     for section, values in data.items():
         if section not in result and not section.startswith("_"):
@@ -482,5 +516,5 @@ def load_config() -> dict:
     return result
 
 
-# Module-level singleton — import as `from ctr_generator.config import CFG`
+# Module-level singleton — import as `from ctr_tools.config import CFG`
 CFG: dict = load_config()

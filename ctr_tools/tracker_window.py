@@ -1,5 +1,5 @@
 """
-ctr_generator/tracker_window.py
+ctr_tools/tracker_window.py
 
 CTR Tracker tab for the SOCAR Cape desktop app.
 
@@ -7,7 +7,7 @@ Workflow:
   1. Pick the CTR Tracker workbook (.xlsm) once — remembered across runs.
   2. For each CTR (up to 10): browse to its generated output file, "Load
      Fields" reads client / CTR number / date / revision / description /
-     value / currency straight off it (see ctr_generator.tracker). The
+     value / currency straight off it (see ctr_tools.tracker). The
      Location dropdown auto-selects when the file's site text (cell B4)
      matches a configured site name, filling Project Code and the
      tracker's Onshore/Offshore/Georgia bucket — otherwise it's picked by
@@ -19,7 +19,7 @@ Workflow:
      skipped with a warning shown after the write. Optionally writes a
      timestamped backup of the workbook next to it first. The write runs
      on a background thread (see _WriteWorker) using the fast raw-XML
-     patch in ctr_generator.tracker_fast — only the target sheet is
+     patch in ctr_tools.tracker_fast — only the target sheet is
      touched, everything else in the .xlsm is copied byte-for-byte.
 """
 
@@ -29,18 +29,19 @@ import logging
 from dataclasses import replace
 from datetime import date as _date
 
-from PySide6.QtCore import QSettings, QThread, Qt, Signal
+from PySide6.QtCore import QSettings, QThread, QTimer, Qt, Signal
 from PySide6.QtWidgets import (
     QButtonGroup, QCheckBox, QComboBox, QGroupBox, QHBoxLayout, QLabel,
     QLineEdit, QMessageBox, QProgressDialog, QPushButton, QRadioButton,
     QScrollArea, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
-from ctr_generator.tracker import (
-    CTREntry, company_project_code, extract_ctr_data, location_options, match_site,
+from ctr_tools.tracker import (
+    CTREntry, company_project_code, extract_ctr_data, job_type_options,
+    location_options, match_site,
 )
-from ctr_generator.tracker_fast import write_entries_fast
-from ctr_generator.window import _file_picker_row, _group_css, _highlight_row, _make_table, _ro_item
+from ctr_tools.tracker_fast import IN_BATCH_CONFLICT_MARKER, write_entries_fast
+from ctr_tools.window import _file_picker_row, _group_css, _highlight_row, _make_table, _ro_item
 
 log = logging.getLogger(__name__)
 
@@ -49,13 +50,15 @@ MUTED   = "#757575"
 BORDER  = "#E0E0E0"
 
 _MAX_BATCH = 10
+_RETRY_COUNTDOWN_SECONDS = 3
 
 _BATCH_HEADERS = [
     "Client", "CTR Number", "Date", "Location", "Project Code",
-    "Description", "Value", "Currency", "Revision", "",
+    "Job Type", "Description", "Value", "Currency", "Revision", "",
 ]
 _BC_CLIENT, _BC_CTR_NO, _BC_DATE, _BC_LOCATION, _BC_PROJECT, \
-    _BC_DESC, _BC_VALUE, _BC_CURRENCY, _BC_REVISION, _BC_REMOVE = range(10)
+    _BC_JOB_TYPE, _BC_DESC, _BC_VALUE, _BC_CURRENCY, _BC_REVISION, \
+    _BC_REMOVE = range(11)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -69,7 +72,7 @@ class _WriteWorker(QThread):
     workbook through openpyxl — ~3s instead of ~11s on the real tracker
     file, and it also stops openpyxl's data-validation/drawing/print-
     settings/calc-chain stripping on every save."""
-    finished_ok = Signal(list, list, object)   # written[(ctr_number, row)], skipped[(ctr_number, reason)], backup_path | None
+    finished_ok = Signal(list, list, object)   # written[(idx, ctr_number, row)], skipped[(idx, ctr_number, reason)], backup_path | None
     error       = Signal(str)
 
     def __init__(self, tracker_path: str, entries: list[CTREntry], make_backup: bool,
@@ -112,6 +115,12 @@ class CTRTrackerWidget(QWidget):
         self._current_entry: CTREntry | None = None
         self._locations = location_options()
         self._workers: list[_WriteWorker] = []
+        self._retry_tick_timer = QTimer(self)
+        self._retry_tick_timer.setInterval(1000)
+        self._retry_tick_timer.timeout.connect(self._on_retry_tick)
+        self._retry_seconds_left = 0
+        self._retry_round = 0
+        self._retry_conflict_ctrs: list[str] = []
         self._build_ui()
 
     # ── UI construction ─────────────────────────────────────────────────────
@@ -165,7 +174,12 @@ class CTRTrackerWidget(QWidget):
         gl.addWidget(info)
 
         self._backup_check = QCheckBox("Save a timestamped backup copy before writing")
-        self._backup_check.setChecked(False)
+        # Defaults on: a write can fall back to live Excel automation
+        # (tracker_xlwings.py) to insert a row when no spare one is
+        # available, and that path has no real-Excel verification behind
+        # it — a backup is the only safety net against it corrupting the
+        # shared tracker file.
+        self._backup_check.setChecked(True)
         self._backup_check.setStyleSheet("font-size: 11px;")
         gl.addWidget(self._backup_check)
 
@@ -271,6 +285,10 @@ class CTRTrackerWidget(QWidget):
         self._tracker_location_combo = QComboBox()
         self._tracker_location_combo.addItems(["Onshore", "Offshore", "Georgia"])
 
+        self._job_type_combo = QComboBox()
+        self._job_type_combo.addItem("(select a job type)")
+        self._job_type_combo.addItems(job_type_options())
+
         gl.addLayout(_hdr_row("Client:", self._client_edit))
         gl.addLayout(_hdr_row("CTR Number:", self._ctr_no_edit))
         gl.addLayout(_hdr_row("Date:", self._date_edit))
@@ -283,6 +301,7 @@ class CTRTrackerWidget(QWidget):
         gl.addLayout(_hdr_row("Location:", self._site_combo))
         gl.addLayout(_hdr_row("Project Code:", self._project_code_edit))
         gl.addLayout(_hdr_row("Tracker Location:", self._tracker_location_combo))
+        gl.addLayout(_hdr_row("Job Type:", self._job_type_combo))
 
         self._add_batch_btn = QPushButton("+ Add to Batch")
         self._add_batch_btn.setFixedHeight(34)
@@ -324,6 +343,18 @@ class CTRTrackerWidget(QWidget):
         """)
         self._write_btn.clicked.connect(self._write_batch)
         gl.addWidget(self._write_btn)
+
+        retry_row = QHBoxLayout()
+        self._retry_label = QLabel()
+        self._retry_label.setStyleSheet(f"color: {MUTED}; font-size: 11px;")
+        self._retry_label.setVisible(False)
+        self._retry_cancel_btn = QPushButton("Cancel")
+        self._retry_cancel_btn.setFixedHeight(22)
+        self._retry_cancel_btn.setVisible(False)
+        self._retry_cancel_btn.clicked.connect(self._cancel_retry_countdown)
+        retry_row.addWidget(self._retry_label, 1)
+        retry_row.addWidget(self._retry_cancel_btn)
+        gl.addLayout(retry_row)
 
         parent_layout.addWidget(grp)
 
@@ -400,6 +431,9 @@ class CTRTrackerWidget(QWidget):
         if self._site_combo.currentIndex() == 0:
             QMessageBox.warning(self, "Missing location", "Select a Location for this CTR.")
             return
+        if self._job_type_combo.currentIndex() == 0:
+            QMessageBox.warning(self, "Missing job type", "Select a Job Type for this CTR.")
+            return
 
         date_val = None
         date_txt = self._date_edit.text().strip()
@@ -432,13 +466,19 @@ class CTRTrackerWidget(QWidget):
             site=self._site_combo.currentText(),
             project_code=self._project_code_edit.text().strip(),
             tracker_location=self._tracker_location_combo.currentText(),
+            job_type=self._job_type_combo.currentText(),
         )
         self._batch.append(entry)
         self._append_batch_row(entry)
         self._refresh_batch_state()
 
-        # Reset the add form for the next CTR, keeping Location/Currency —
-        # most batches come from the same site/currency run.
+        # Reset the whole add form for the next CTR — nothing here is
+        # inferred well enough for one CTR's Location/Currency/Project
+        # Code/Job Type to be a safe guess for the next one, and only
+        # Site/Currency were ever refreshed by a later _load_fields
+        # anyway (Project Code, Tracker Location and Job Type would
+        # otherwise silently carry over unless the user noticed and
+        # changed them by hand).
         self._ctr_file_edit.setText("")
         self._client_edit.setText("")
         self._ctr_no_edit.setText("")
@@ -447,6 +487,11 @@ class CTRTrackerWidget(QWidget):
         self._desc_edit.setText("")
         self._value_edit.setText("")
         self._value_warning.setVisible(False)
+        self._currency_combo.setCurrentIndex(0)
+        self._site_combo.setCurrentIndex(0)
+        self._project_code_edit.setText("")
+        self._tracker_location_combo.setCurrentIndex(0)
+        self._job_type_combo.setCurrentIndex(0)
         self._current_entry = None
 
     # ── Batch table ──────────────────────────────────────────────────────────
@@ -460,6 +505,7 @@ class CTRTrackerWidget(QWidget):
         tbl.setItem(r, _BC_DATE,     QTableWidgetItem(entry.ctr_date.isoformat() if entry.ctr_date else ""))
         tbl.setItem(r, _BC_LOCATION, QTableWidgetItem(entry.tracker_location))
         tbl.setItem(r, _BC_PROJECT,  QTableWidgetItem(entry.project_code))
+        tbl.setItem(r, _BC_JOB_TYPE, QTableWidgetItem(entry.job_type))
         tbl.setItem(r, _BC_DESC,     QTableWidgetItem(entry.description))
         tbl.setItem(r, _BC_VALUE,    QTableWidgetItem("" if entry.value is None else f"{entry.value:g}"))
         tbl.setItem(r, _BC_CURRENCY, QTableWidgetItem(entry.currency))
@@ -484,15 +530,18 @@ class CTRTrackerWidget(QWidget):
                 break
         self._refresh_batch_state()
 
-    def _remove_written_from_batch(self, written: list[tuple[str, int]]) -> None:
-        """Drops only the entries that were actually written, by CTR
-        number — anything skipped stays in the batch so it's easy to fix
-        and retry (e.g. once a human adds the missing row)."""
-        remaining_ctr_numbers = [ctr_number for ctr_number, _row in written]
+    def _remove_written_from_batch(self, written: list[tuple[int, str, int]]) -> None:
+        """Drops only the entries that were actually written, by their
+        exact position in the batch that was submitted — anything skipped
+        stays in the batch so it's easy to fix and retry (e.g. once a
+        human adds the missing row). Matching by CTR number alone would
+        be ambiguous whenever two entries in the same batch share one
+        (e.g. two revisions of the same CTR — see IN_BATCH_CONFLICT_MARKER
+        in tracker_fast.py): it could just as easily drop the entry that
+        still needs writing and keep the one already written."""
+        written_indices = {idx for idx, _ctr_number, _row in written}
         for r in reversed(range(len(self._batch))):
-            ctr_number = self._batch[r].ctr_number
-            if ctr_number in remaining_ctr_numbers:
-                remaining_ctr_numbers.remove(ctr_number)
+            if r in written_indices:
                 del self._batch[r]
                 self._batch_tbl.removeRow(r)
 
@@ -505,6 +554,17 @@ class CTRTrackerWidget(QWidget):
     # ── Write ────────────────────────────────────────────────────────────────
 
     def _write_batch(self):
+        """The "Write Batch to Tracker…" button handler — always asks for
+        confirmation and always starts a fresh retry-round budget, since
+        this is the user explicitly choosing to write right now (as
+        opposed to _start_write(skip_confirm=True), the automatic
+        follow-up an in-batch conflict schedules for itself — see
+        _maybe_start_retry_countdown)."""
+        self._cancel_retry_countdown()
+        self._retry_round = 0
+        self._start_write(skip_confirm=False)
+
+    def _start_write(self, *, skip_confirm: bool):
         tracker_path = self._tracker_edit.text().strip()
         if not tracker_path:
             QMessageBox.warning(self, "No tracker selected", "Choose the CTR Tracker workbook first.")
@@ -516,33 +576,35 @@ class CTRTrackerWidget(QWidget):
         make_backup = self._backup_check.isChecked()
         allow_overwrite = self._overwrite_check.isChecked()
         revision_mode = self._revision_mode()
-        backup_note = (
-            "A timestamped backup will be saved next to the file first."
-            if make_backup else
-            "No backup copy will be made (enable the checkbox above to save one)."
-        )
-        if not allow_overwrite:
-            overwrite_note = ""
-        elif revision_mode == "overwrite":
-            overwrite_note = (
-                "\n\n⚠ Overwrite mode is ON — a matching row's existing data will be "
-                "replaced, its Revision and Comment updated."
+
+        if not skip_confirm:
+            backup_note = (
+                "A timestamped backup will be saved next to the file first."
+                if make_backup else
+                "No backup copy will be made (enable the checkbox above to save one)."
             )
-        else:
-            overwrite_note = (
-                "\n\n⚠ Overwrite mode is ON, \"Add as separate revision\" selected — a "
-                "matching row that already has data will be left alone, and this CTR "
-                "written into a spare row or a newly inserted one instead. A row insert "
-                "requires Excel to be installed on this machine."
+            if not allow_overwrite:
+                overwrite_note = ""
+            elif revision_mode == "overwrite":
+                overwrite_note = (
+                    "\n\n⚠ Overwrite mode is ON — a matching row's existing data will be "
+                    "replaced, its Revision and Comment updated."
+                )
+            else:
+                overwrite_note = (
+                    "\n\n⚠ Overwrite mode is ON, \"Add as separate revision\" selected — a "
+                    "matching row that already has data will be left alone, and this CTR "
+                    "written into a spare row or a newly inserted one instead. A row insert "
+                    "requires Excel to be installed on this machine."
+                )
+            reply = QMessageBox.question(
+                self, "Write to Tracker",
+                f"Write {n} CTR{'s' if n != 1 else ''} to:\n{tracker_path}\n\n{backup_note}"
+                f"{overwrite_note}\n\nContinue?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             )
-        reply = QMessageBox.question(
-            self, "Write to Tracker",
-            f"Write {n} CTR{'s' if n != 1 else ''} to:\n{tracker_path}\n\n{backup_note}"
-            f"{overwrite_note}\n\nContinue?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-        )
-        if reply != QMessageBox.StandardButton.Yes:
-            return
+            if reply != QMessageBox.StandardButton.Yes:
+                return
 
         dlg = QProgressDialog(
             "Writing to the tracker workbook…",
@@ -568,12 +630,12 @@ class CTRTrackerWidget(QWidget):
 
             n_written, n_total = len(written), len(written) + len(skipped)
             lines = [f"Wrote {n_written} of {n_total} CTR{'s' if n_total != 1 else ''}."]
-            for ctr_number, row in written:
+            for _idx, ctr_number, row in written:
                 lines.append(f"  • {ctr_number} → row {row}")
             if skipped:
                 lines.append("")
                 lines.append("Skipped (still in the batch — fix and retry):")
-                for ctr_number, reason in skipped:
+                for _idx, ctr_number, reason in skipped:
                     lines.append(f"  • {ctr_number}: {reason}")
             if backup_path is not None:
                 lines.append("")
@@ -582,6 +644,7 @@ class CTRTrackerWidget(QWidget):
 
             self._remove_written_from_batch(written)
             self._refresh_batch_state()
+            self._maybe_start_retry_countdown(skipped)
 
         def _err(message: str):
             dlg.close()
@@ -592,6 +655,66 @@ class CTRTrackerWidget(QWidget):
         worker.finished_ok.connect(_done)
         worker.error.connect(_err)
         worker.start()
+
+    # ── In-batch-conflict retry ─────────────────────────────────────────────
+    #
+    # Two entries in the same batch for the same CTR number + currency
+    # (e.g. two revisions of one AZN CTR) can't both be placed correctly
+    # in a single pass — see IN_BATCH_CONFLICT_MARKER and _plan_insertions
+    # in tracker_fast.py for why. The first is written normally; the rest
+    # are skipped and — since _remove_written_from_batch only drops what
+    # was actually written — are still sitting in the batch table
+    # afterward. Retrying them in a follow-up batch resolves correctly,
+    # because by then the first entry's data is genuinely on disk instead
+    # of only planned. A batch of N same-CTR-currency entries needs up to
+    # N-1 such rounds to fully resolve (round 2 can itself produce a new
+    # conflict between what round 1 left behind), so this keeps
+    # re-arming itself — capped by _retry_round so a persistent, unrelated
+    # failure can't retry forever.
+
+    def _maybe_start_retry_countdown(self, skipped: list[tuple[int, str, str]]):
+        conflict_ctrs = [
+            ctr_number for _idx, ctr_number, reason in skipped
+            if IN_BATCH_CONFLICT_MARKER in reason
+        ]
+        if not conflict_ctrs or self._retry_round >= _MAX_BATCH or not self._batch:
+            self._cancel_retry_countdown()
+            return
+
+        self._retry_round += 1
+        self._retry_conflict_ctrs = conflict_ctrs
+        self._retry_seconds_left = _RETRY_COUNTDOWN_SECONDS
+        self._update_retry_label()
+        self._retry_label.setVisible(True)
+        self._retry_cancel_btn.setVisible(True)
+        self._retry_tick_timer.start()
+
+    def _update_retry_label(self):
+        n = len(self._retry_conflict_ctrs)
+        names = ", ".join(self._retry_conflict_ctrs)
+        plural = "s" if n != 1 else ""
+        verb = "share" if n != 1 else "shares"
+        self._retry_label.setText(
+            f"{n} CTR{plural} ({names}) {verb} a CTR number + currency with one just "
+            f"written — retrying in {self._retry_seconds_left}s…"
+        )
+
+    def _on_retry_tick(self):
+        self._retry_seconds_left -= 1
+        if self._retry_seconds_left <= 0:
+            self._retry_tick_timer.stop()
+            self._retry_label.setVisible(False)
+            self._retry_cancel_btn.setVisible(False)
+            self._start_write(skip_confirm=True)
+        else:
+            self._update_retry_label()
+
+    def _cancel_retry_countdown(self):
+        self._retry_tick_timer.stop()
+        self._retry_label.setVisible(False)
+        self._retry_cancel_btn.setVisible(False)
+        self._retry_round = 0
+        self._retry_conflict_ctrs = []
 
     # ── Settings persistence ────────────────────────────────────────────────
 
@@ -604,7 +727,7 @@ class CTRTrackerWidget(QWidget):
         val = s.value("paths/ctr_tracker_workbook", "")
         if val:
             self._tracker_edit.setText(val)
-        self._backup_check.setChecked(s.value("ctr_tracker/make_backup", False, type=bool))
+        self._backup_check.setChecked(s.value("ctr_tracker/make_backup", True, type=bool))
         # Overwrite mode is deliberately NOT remembered across restarts — it should
         # always come up off, so it can never be silently left on from a prior session.
         self._refresh_batch_state()

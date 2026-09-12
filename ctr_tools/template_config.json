@@ -151,6 +151,7 @@
     "header_row":      4,
     "col_client":       "C",
     "col_ctr_number":   "D",
+    "col_job_type":     "K",
     "col_location":     "L",
     "col_date":         "N",
     "col_project_code": "O",
@@ -163,8 +164,6 @@
       ["BA", "D{row}&\" \"&AC{row}"],
       ["BB", "A{row}"]
     ],
-    "col_row_counter":     "B",
-    "row_counter_formula": "B{prev_row}+1",
     "col_value_usd":     "AJ",
     "value_usd_formula": "IF(AC{row}=\"USD\", S{row}, IF(AC{row}=\"AZN\", S{row}/{rate}, \"\"))",
     "value_style_by_currency": {"AZN": 72, "USD": 159},
@@ -181,6 +180,11 @@
     "consumables_markup_formula":  "AT{row}*{rate}",
     "total_usd_formula":           "SUM(AL{row}:AW{row})-AS{row}"
   },
+
+  "ctr_tracker_job_types": [
+    "CORE CREW", "PROJECTS", "FM", "FM PROCESS", "FM DRILLING",
+    "Drilling", "TAR", "TAR & SHUTDOWN"
+  ],
 
   "ctr_tracker_locations": {
     "Company Shared Costs":  {"project_code": "FMA-SHARE",        "tracker_location": "Offshore"},

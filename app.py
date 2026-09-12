@@ -17,7 +17,7 @@ from PySide6.QtCore import (
     QAbstractTableModel, QModelIndex, QSettings, QSortFilterProxyModel,
     Qt, QThread, Signal,
 )
-from PySide6.QtGui import QBrush, QColor, QFont, QPainter, QPen
+from PySide6.QtGui import QBrush, QColor, QFont, QPainter, QPalette, QPen
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QDialog, QDialogButtonBox,
     QFileDialog, QFormLayout, QFrame, QGroupBox, QHBoxLayout, QHeaderView,
@@ -33,9 +33,9 @@ from comparison_history import (
     comparisons_dir, default_label, list_saved_comparisons, load_comparison,
     save_comparison, suggest_save_path,
 )
-from ctr_generator import __version__ as _CTR_VERSION
-from ctr_generator.window import CTRGeneratorWidget
-from ctr_generator.tracker_window import CTRTrackerWidget
+from ctr_tools import __version__ as _CTR_VERSION
+from ctr_tools.window import CTRGeneratorWidget
+from ctr_tools.tracker_window import CTRTrackerWidget
 
 log = logging.getLogger(__name__)
 
@@ -115,13 +115,17 @@ def _find_rate_rechargeable_mismatches(display_df: pd.DataFrame) -> set[tuple[in
     cells: set[tuple[int, str]] = set()
     if "Rechargeable" not in display_df.columns or "Rate (CTR)" not in display_df.columns:
         return cells
-    for row_idx, row in display_df.iterrows():
-        rech = _norm_val(row["Rechargeable"]).upper()
-        if rech not in ("RECHARGE", "NONRECHARG"):
-            continue
-        rate_status = _rate_implied_status(row["Rate (CTR)"])
-        if rate_status is None or rate_status == rech:
-            continue
+    # .map() over just the two needed columns instead of .iterrows() over
+    # the whole frame — iterrows() reconstructs a full mixed-type row
+    # (every column) for every row just to read two values out of it.
+    rech = display_df["Rechargeable"].map(lambda v: _norm_val(v).upper())
+    rate_status = display_df["Rate (CTR)"].map(_rate_implied_status)
+    mismatch = (
+        rech.isin(("RECHARGE", "NONRECHARG"))
+        & rate_status.notna()
+        & (rate_status != rech)
+    )
+    for row_idx in display_df.index[mismatch]:
         cells.add((row_idx, "Rechargeable"))
         cells.add((row_idx, "Rate (CTR)"))
     return cells
@@ -138,10 +142,14 @@ def _aggregate_combined(
     matched_keys: set,
 ) -> dict[str, dict]:
     """Group MR and CTR rows by Stock Code (restricted to matched_keys) and
-    sum Qty per side. Returns {key: {"mr_qty", "mr_units", "ctr_qty",
-    "ctr_units"}} — *_units is the sorted set of distinct non-blank units
-    contributing to that side's total, so more than one entry signals a
-    unit conflict the caller must resolve before trusting the sum."""
+    sum Qty per side. Returns {key: {"mr_qty", "mr_units", "mr_docs",
+    "ctr_qty", "ctr_units", "ctr_docs"}} — *_units is the sorted set of
+    distinct non-blank units contributing to that side's total, so more
+    than one entry signals a unit conflict the caller must resolve before
+    trusting the sum. *_docs is the sorted set of distinct source
+    filenames contributing rows to that side's total (for the Combined
+    view's optional "Show Document Names" column, same source as the
+    detail tables')."""
 
     def _agg_side(df: pd.DataFrame, qty_col: str | None, unit_col: str | None) -> dict:
         result: dict = {}
@@ -157,7 +165,12 @@ def _aggregate_combined(
                 for u in (grp[unit_col] if unit_col and unit_col in grp.columns else [])
                 if _norm_val(u)
             })
-            result[key] = {"qty": qty_total, "units": units}
+            docs = sorted({
+                _norm_val(f)
+                for f in (grp["_SourceFile"] if "_SourceFile" in grp.columns else [])
+                if _norm_val(f)
+            })
+            result[key] = {"qty": qty_total, "units": units, "docs": docs}
         return result
 
     mr_agg  = _agg_side(mr,  qty_mr,  unit_mr)
@@ -165,11 +178,11 @@ def _aggregate_combined(
 
     raw: dict[str, dict] = {}
     for key in matched_keys:
-        m = mr_agg.get(key,  {"qty": None, "units": []})
-        c = ctr_agg.get(key, {"qty": None, "units": []})
+        m = mr_agg.get(key,  {"qty": None, "units": [], "docs": []})
+        c = ctr_agg.get(key, {"qty": None, "units": [], "docs": []})
         raw[key] = {
-            "mr_qty": m["qty"],   "mr_units":  m["units"],
-            "ctr_qty": c["qty"],  "ctr_units": c["units"],
+            "mr_qty": m["qty"],   "mr_units":  m["units"],  "mr_docs":  m["docs"],
+            "ctr_qty": c["qty"],  "ctr_units": c["units"],  "ctr_docs": c["docs"],
         }
     return raw
 
@@ -718,6 +731,7 @@ class MainWindow(QMainWindow):
         sep.setFrameShape(QFrame.Shape.HLine)
         sep.setStyleSheet(f"color: {BORDER};")
         _crl.addWidget(sep)
+        self._step_sep = sep
 
         # ── Pinned action row: hint + Compare + Load Comparison ────────────
         # Always visible, regardless of how long the MR/CTR file lists below
@@ -730,6 +744,7 @@ class MainWindow(QMainWindow):
         pinned_l.setContentsMargins(2, 4, 2, 0)
         pinned_l.setSpacing(6)
         _crl.addWidget(pinned)
+        self._pinned_row = pinned
 
         self._compare_hint = QLabel(
             "Upload at least one MR and one CTR file to continue."
@@ -806,7 +821,16 @@ class MainWindow(QMainWindow):
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         ctrl = QWidget()
-        ctrl.setStyleSheet("background: transparent;")
+        # A plain QWidget doesn't autofill its background by default, so
+        # this achieves the same "let the scroll area's own background
+        # show through" effect without a per-widget stylesheet — applying
+        # ANY QSS to a widget (even just this) switches Qt to its CSS
+        # engine for that whole subtree, which is what was producing a
+        # black background on tooltips from every widget inside here
+        # (Step 1/Step 2's file lists, table lists, previews) while
+        # tooltips outside this container (Compare, Load Comparison…)
+        # were unaffected.
+        ctrl.setAutoFillBackground(False)
         cl = QVBoxLayout(ctrl)
         cl.setSpacing(10)
         cl.setContentsMargins(2, 4, 2, 4)
@@ -1204,6 +1228,7 @@ class MainWindow(QMainWindow):
         # (if any) — a fresh Save from here should offer Save As, not
         # silently overwrite a comparison this no longer matches.
         self._loaded_comparison_path = None
+        self._refresh_inline_previews()
         self._update_state()
 
     # ── Parsing ───────────────────────────────────────────────────────────────
@@ -1220,11 +1245,12 @@ class MainWindow(QMainWindow):
             dlg.close()
             if side == "mr":
                 self._mr_tables.extend(tables)
-                self._fill_table_list(self._mr_table_list, self._mr_tables)
+                self._fill_table_list(self._mr_table_list, self._mr_tables, "mr")
             else:
                 self._ctr_tables.extend(tables)
-                self._fill_table_list(self._ctr_table_list, self._ctr_tables)
+                self._fill_table_list(self._ctr_table_list, self._ctr_tables, "ctr")
             self._on_table_sel_changed()
+            self._refresh_file_warnings(side)
 
         def _err(msg: str):
             dlg.close()
@@ -1235,9 +1261,9 @@ class MainWindow(QMainWindow):
         worker.error.connect(_err)
         worker.start()
 
-    def _fill_table_list(self, lw: QListWidget, tables: list):
+    def _fill_table_list(self, lw: QListWidget, tables: list, side: str):
         lw.clear()
-        for t in tables:
+        for i, t in enumerate(tables):
             stem  = Path(t["source_file"]).stem
             label = f"{stem} › {t['table_name']}  ({len(t['data'])} rows)"
             tip   = (f"File: {t['source_file']}\n"
@@ -1246,13 +1272,72 @@ class MainWindow(QMainWindow):
             item = QListWidgetItem()
             item.setFlags(Qt.ItemFlag.ItemIsEnabled)
             lw.addItem(item)
+
+            row_w = QWidget()
+            row_l = QHBoxLayout(row_w)
+            row_l.setContentsMargins(2, 0, 2, 0)
+            row_l.setSpacing(4)
+
             cb = QCheckBox(label)
             cb.setChecked(True)
-            cb.setToolTip(tip)
+            cb.setToolTip(tip + "\n\nUnchecking excludes it from Compare without "
+                                 "removing it — use the ✕ button to remove it entirely.")
             # connect after setChecked so the initial toggle doesn't fire yet
             cb.toggled.connect(lambda _: self._on_table_sel_changed())
-            lw.setItemWidget(item, cb)
-            item.setSizeHint(cb.sizeHint())
+            row_l.addWidget(cb, 1)
+
+            remove_btn = QPushButton("✕")
+            remove_btn.setFixedSize(20, 20)
+            remove_btn.setFlat(True)
+            remove_btn.setToolTip("Remove this table from the list entirely.")
+            remove_btn.setStyleSheet(f"""
+                QPushButton {{ color: {MUTED}; font-size: 12px; border: none; }}
+                QPushButton:hover {{ color: #C62828; }}
+            """)
+            remove_btn.clicked.connect(lambda _, idx=i: self._remove_table(side, idx))
+            row_l.addWidget(remove_btn)
+
+            row_w._checkbox = cb   # so _concat_checked can find it without a child search
+            lw.setItemWidget(item, row_w)
+            item.setSizeHint(row_w.sizeHint())
+
+    def _remove_table(self, side: str, index: int):
+        """Removes one table entirely (not just unchecking it) from the
+        Step 2 list — e.g. the wrong sheet got included and re-uploading
+        everything else for that side would be wasteful."""
+        tables = self._mr_tables if side == "mr" else self._ctr_tables
+        if not (0 <= index < len(tables)):
+            return
+        removed = tables.pop(index)
+        lw = self._mr_table_list if side == "mr" else self._ctr_table_list
+        self._fill_table_list(lw, tables, side)
+        self._on_table_sel_changed()
+        self._refresh_file_warnings(side)
+        self._set_status(
+            f"Removed {removed['table_name']!r} ({Path(removed['source_file']).name}) "
+            f"from {side.upper()} tables."
+        )
+
+    def _refresh_file_warnings(self, side: str):
+        """Marks a Step 1 file entry in red, with an explanatory tooltip,
+        once every table it contributed has been individually removed from
+        Step 2 — the file is still listed as "loaded", but none of its
+        data reaches Compare anymore, which is easy to miss otherwise."""
+        lw     = self._mr_file_list if side == "mr" else self._ctr_file_list
+        tables = self._mr_tables    if side == "mr" else self._ctr_tables
+        remaining_files = {t["source_file"] for t in tables}
+        for i in range(lw.count()):
+            item = lw.item(i)
+            if item.text() in remaining_files:
+                item.setForeground(QBrush())
+                item.setToolTip("")
+            else:
+                item.setForeground(QBrush(_MISMATCH_FG))
+                item.setToolTip(
+                    f'All tables from "{item.text()}" have been removed — '
+                    "none of its data will be included in Compare.\n"
+                    "Browse for it again to re-add it."
+                )
 
     # ── Table selection ───────────────────────────────────────────────────────
 
@@ -1265,8 +1350,9 @@ class MainWindow(QMainWindow):
     def _concat_checked(self, lw: QListWidget, tables: list) -> pd.DataFrame:
         parts = []
         for i in range(min(lw.count(), len(tables))):
-            w = lw.itemWidget(lw.item(i))
-            if isinstance(w, QCheckBox) and w.isChecked():
+            row_w = lw.itemWidget(lw.item(i))
+            cb = getattr(row_w, "_checkbox", None)
+            if isinstance(cb, QCheckBox) and cb.isChecked():
                 parts.append(tables[i]["data"])
         return pd.concat(parts, ignore_index=True, sort=False) if parts else pd.DataFrame()
 
@@ -1275,13 +1361,16 @@ class MainWindow(QMainWindow):
     # ── Inline previews ───────────────────────────────────────────────────────
 
     def _refresh_inline_previews(self):
+        """Keeps each side's preview in sync with its current _mr_df/
+        _ctr_df — always, not just when there's data, so unchecking or
+        removing the last table (or a table-list edit that empties it any
+        other way) clears the preview instead of leaving the previous
+        table's rows sitting there looking current."""
         def _vis(df: pd.DataFrame) -> pd.DataFrame:
             return df[[c for c in df.columns if not c.startswith("_")]]
 
-        if not self._mr_df.empty:
-            _load_view(self._mr_preview,  _vis(self._mr_df))
-        if not self._ctr_df.empty:
-            _load_view(self._ctr_preview, _vis(self._ctr_df))
+        _load_view(self._mr_preview,  _vis(self._mr_df))
+        _load_view(self._ctr_preview, _vis(self._ctr_df))
 
     # ── State machine: step indicator, hint, button, status ───────────────────
 
@@ -1495,7 +1584,7 @@ class MainWindow(QMainWindow):
         self._maximize_btn.setChecked(False)
         self._maximize_btn.blockSignals(False)
         self._maximize_btn.setText("⛶  Maximize")
-        self._controls_scroll.setVisible(True)
+        self._set_controls_chrome_visible(True)
 
         self._results_w.setVisible(True)
         self._results_body_w.setVisible(True)
@@ -1552,8 +1641,11 @@ class MainWindow(QMainWindow):
         for col_mr, col_ctr in [("Qty (MR)", "Qty (CTR)"), ("Unit (MR)", "Unit (CTR)")]:
             if col_mr not in df.columns or col_ctr not in df.columns:
                 continue
-            for row_idx in range(len(df)):
-                if _differs(df.iloc[row_idx][col_mr], df.iloc[row_idx][col_ctr]):
+            # Extract each column once and zip, instead of two separate
+            # df.iloc[row_idx][col] positional lookups per row — each
+            # .iloc[] call reconstructs that row from scratch.
+            for row_idx, val_mr, val_ctr in zip(df.index, df[col_mr], df[col_ctr]):
+                if _differs(val_mr, val_ctr):
                     mismatch_cells[(row_idx, col_mr)] = "mismatch"
                     mismatch_cells[(row_idx, col_ctr)] = "mismatch"
                     mismatch_row_set.add(row_idx)
@@ -1679,6 +1771,11 @@ class MainWindow(QMainWindow):
                 "Qty (CTR) Total": ctr_qty,
                 "Diff (CTR − MR)": diff,
                 "Unit":            " / ".join(all_units),
+                # .get(..., []) — combined_raw restored from a comparison
+                # saved before this column existed won't have these keys;
+                # degrade to blank rather than failing the whole load.
+                "MR Document":     ", ".join(agg.get("mr_docs", [])),
+                "CTR Document":    ", ".join(agg.get("ctr_docs", [])),
             }
 
             if not conflict:
@@ -1700,7 +1797,7 @@ class MainWindow(QMainWindow):
                 rows_review.append(base)
 
         combined_cols = ["Stock Code", "Qty (MR) Total", "Qty (CTR) Total",
-                          "Diff (CTR − MR)", "Unit", "Flag"]
+                          "Diff (CTR − MR)", "Unit", "MR Document", "CTR Document", "Flag"]
         review_cols   = ["Stock Code", "Qty (MR) Total", "Qty (CTR) Total",
                           "Diff (CTR − MR)", "Unit"]
         error_cols    = ["Stock Code", "Qty (MR) Total", "Qty (CTR) Total",
@@ -1816,10 +1913,11 @@ class MainWindow(QMainWindow):
     def _apply_doc_column_visibility(self, show: bool):
         """MR/CTR 'source document' columns are hidden by default to keep
         the comparison tables compact — this toggles them on the three
-        detail views (Combined view doesn't have these columns, so it's a
-        no-op there). Re-applied after every _load_view/_show_result call
-        since a fresh model doesn't necessarily keep the previous model's
-        hidden-column state."""
+        detail views and, when active, on the Combined view too (its MR/CTR
+        Document columns list every file that contributed to that row's
+        totals, comma-joined). Re-applied after every _load_view/
+        _show_result call since a fresh model doesn't necessarily keep the
+        previous model's hidden-column state."""
         matched_df = self._combined_df if self._combined_btn.isChecked() else self._display_df
         for view, df in (
             (self._tab_matched,  matched_df),
@@ -1943,37 +2041,74 @@ class MainWindow(QMainWindow):
         # before this was added won't) are restored right after, so more
         # MR/CTR files can be added and merged in via the normal Browse
         # flow instead of this being a read-only snapshot.
-        self._clear("mr")
-        self._clear("ctr")
-        self._mr_preview.setModel(None)
-        self._ctr_preview.setModel(None)
+        #
+        # Everything below is wrapped in one try/except: load_comparison()
+        # succeeding only means the JSON parsed — a hand-edited or
+        # otherwise malformed file can still have the wrong shape inside
+        # (e.g. a combined_raw entry missing mr_qty/mr_units), which would
+        # previously throw partway through this sequence and leave the UI
+        # half-reset (already cleared, nothing restored) instead of either
+        # fully loading or cleanly failing.
+        try:
+            self._clear("mr")
+            self._clear("ctr")
+            self._mr_preview.setModel(None)
+            self._ctr_preview.setModel(None)
 
-        self._mr_tables  = data["mr_tables"]
-        self._ctr_tables = data["ctr_tables"]
-        for lw, tables in (
-            (self._mr_file_list,  self._mr_tables),
-            (self._ctr_file_list, self._ctr_tables),
-        ):
-            seen = []
-            for t in tables:
-                if t["source_file"] not in seen:
-                    seen.append(t["source_file"])
-                    lw.addItem(t["source_file"])
-        self._fill_table_list(self._mr_table_list,  self._mr_tables)
-        self._fill_table_list(self._ctr_table_list, self._ctr_tables)
-        self._on_table_sel_changed()   # rebuilds _mr_df/_ctr_df from the restored tables
+            self._mr_tables  = data["mr_tables"]
+            self._ctr_tables = data["ctr_tables"]
+            for lw, tables in (
+                (self._mr_file_list,  self._mr_tables),
+                (self._ctr_file_list, self._ctr_tables),
+            ):
+                seen = []
+                for t in tables:
+                    if t["source_file"] not in seen:
+                        seen.append(t["source_file"])
+                        lw.addItem(t["source_file"])
+            self._fill_table_list(self._mr_table_list,  self._mr_tables,  "mr")
+            self._fill_table_list(self._ctr_table_list, self._ctr_tables, "ctr")
+            self._on_table_sel_changed()   # rebuilds _mr_df/_ctr_df from the restored tables
+            self._refresh_file_warnings("mr")
+            self._refresh_file_warnings("ctr")
 
-        self._display_df                = data["display_df"]
-        self._omr_dl                    = data["omr_df"]
-        self._octr_dl                   = data["octr_df"]
-        self._combined_raw              = data["combined_raw"]
-        self._combined_decisions        = data["combined_decisions"]
-        self._mr_files_used             = data["mr_files"]
-        self._ctr_files_used            = data["ctr_files"]
-        self._rate_rech_mismatch_cells = _find_rate_rechargeable_mismatches(self._display_df)
-        self._loaded_comparison_path    = path
+            self._display_df                = data["display_df"]
+            self._omr_dl                    = data["omr_df"]
+            self._octr_dl                   = data["octr_df"]
+            self._combined_raw              = data["combined_raw"]
+            self._combined_decisions        = data["combined_decisions"]
+            self._mr_files_used             = data["mr_files"]
+            self._ctr_files_used            = data["ctr_files"]
+            self._rate_rech_mismatch_cells = _find_rate_rechargeable_mismatches(self._display_df)
+            self._loaded_comparison_path    = path
 
-        self._present_compare_results()
+            self._present_compare_results()
+        except Exception as exc:
+            log.exception("Failed to restore comparison: %s", path)
+            # Roll all the way back to the same clean, empty state as a
+            # fresh app launch, rather than leaving whatever partially
+            # applied before the exception sitting on screen.
+            self._clear("mr")
+            self._clear("ctr")
+            self._mr_preview.setModel(None)
+            self._ctr_preview.setModel(None)
+            self._display_df = pd.DataFrame()
+            self._omr_dl      = pd.DataFrame()
+            self._octr_dl     = pd.DataFrame()
+            self._combined_raw       = {}
+            self._combined_decisions = {}
+            self._rate_rech_mismatch_cells = set()
+            self._loaded_comparison_path   = None
+            self._results_w.setVisible(False)
+            self._metrics_w.setVisible(False)
+            self._download_btn.setEnabled(False)
+            self._save_btn.setEnabled(False)
+            QMessageBox.critical(
+                self, "Load error",
+                "This saved comparison appears to be corrupted or in an "
+                f"unexpected format and could not be loaded:\n\n{exc}"
+            )
+            return
 
         log.info("Comparison loaded: %s", path)
         extend_note = (
@@ -1992,7 +2127,7 @@ class MainWindow(QMainWindow):
 
     # ── CTR Generator ─────────────────────────────────────────────────────────
 
-    def _open_ctr_generator(self):
+    def _open_ctr_tools(self):
         self._main_tabs.setCurrentIndex(1)
 
     # ── Utility ───────────────────────────────────────────────────────────────
@@ -2020,7 +2155,7 @@ class MainWindow(QMainWindow):
                 self._maximize_btn.setChecked(False)
                 self._maximize_btn.blockSignals(False)
                 self._maximize_btn.setText("⛶  Maximize")
-                self._controls_scroll.setVisible(True)
+                self._set_controls_chrome_visible(True)
 
         self._results_body_w.setVisible(not hidden)
         self._collapse_btn.setText("▼  Show results" if hidden else "▲  Hide results")
@@ -2042,11 +2177,25 @@ class MainWindow(QMainWindow):
         else:
             self._splitter.setSizes([int(total * 0.30), int(total * 0.70)])
 
+    def _set_controls_chrome_visible(self, visible: bool):
+        """Toggles everything Maximize hides besides the results panel
+        itself — the step indicator, its separator line, the pinned
+        Compare/Load row, and the scrollable MR/CTR file-list pane — so
+        maximizing covers the whole tab, not just the file-list area.
+        Shared by the Maximize toggle itself and the two places that need
+        to restore this same "normal" chrome (Hide-results cancelling a
+        prior Maximize, and the post-Compare/Load state reset)."""
+        self._step_bar.setVisible(visible)
+        self._step_sep.setVisible(visible)
+        self._pinned_row.setVisible(visible)
+        self._controls_scroll.setVisible(visible)
+
     def _toggle_maximize_results(self, maximized: bool):
-        """Hides the upload/controls pane so the results panel takes up
-        nearly the whole tab. Restoring brings the controls pane back and
-        re-applies the normal ~30/70 split."""
-        self._controls_scroll.setVisible(not maximized)
+        """Hides the step indicator, pinned Compare/Load row, and upload/
+        controls pane so the results panel takes up the whole tab.
+        Restoring brings all of it back and re-applies the normal ~30/70
+        split."""
+        self._set_controls_chrome_visible(not maximized)
         self._maximize_btn.setText("⤡  Restore" if maximized else "⛶  Maximize")
         total = self._splitter.height()
         if maximized:
@@ -2069,17 +2218,68 @@ if __name__ == "__main__":
 
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
-    # Suppress the black shadow artifact that appears on X11/WSL without a
-    # compositor. Setting an explicit stylesheet disables Qt's drop-shadow
-    # and gives the tooltip a clean, solid border instead.
+
+    # Force a light palette/colour scheme explicitly, rather than letting
+    # Qt inherit whatever the OS reports, as one layer of defense against
+    # popups (tooltips, QMessageBox, QDialog, combo-box dropdowns)
+    # rendering with a dark/black palette on a system in dark mode.
+    app.styleHints().setColorScheme(Qt.ColorScheme.Light)
+    _palette = QPalette()
+    _palette.setColor(QPalette.ColorRole.Window,          QColor("#F0F0F0"))
+    _palette.setColor(QPalette.ColorRole.WindowText,      QColor("#212121"))
+    _palette.setColor(QPalette.ColorRole.Base,             QColor("#FFFFFF"))
+    _palette.setColor(QPalette.ColorRole.AlternateBase,   QColor("#F5F5F5"))
+    _palette.setColor(QPalette.ColorRole.Text,             QColor("#212121"))
+    _palette.setColor(QPalette.ColorRole.Button,           QColor("#F0F0F0"))
+    _palette.setColor(QPalette.ColorRole.ButtonText,      QColor("#212121"))
+    _palette.setColor(QPalette.ColorRole.ToolTipBase,     QColor("#FAFAFA"))
+    _palette.setColor(QPalette.ColorRole.ToolTipText,     QColor("#212121"))
+    _palette.setColor(QPalette.ColorRole.BrightText,      QColor("#FF0000"))
+    _palette.setColor(QPalette.ColorRole.Link,             QColor(PRIMARY))
+    _palette.setColor(QPalette.ColorRole.Highlight,       QColor(PRIMARY))
+    _palette.setColor(QPalette.ColorRole.HighlightedText, QColor("#FFFFFF"))
+    app.setPalette(_palette)
+
+    # Explicit backgrounds for every kind of popup/floating widget too —
+    # belt-and-suspenders alongside the palette fix above, and this is
+    # also what actually gives tooltips/menus/dropdowns their border and
+    # padding (the palette alone only fixes the colour, not the shape).
+    #
+    # Deliberately no border-radius or opacity on QToolTip: either one
+    # makes Qt's stylesheet engine treat the popup as needing per-pixel
+    # alpha compositing (an ARGB top-level window, so rounded corners can
+    # show the desktop through them) instead of a plain opaque one. Seen
+    # in practice as the *entire* tooltip rendering solid black with none
+    # of this styling applied at all — happened identically for a native
+    # Windows-installed build and one run directly under WSL, which rules
+    # out a WSL/X11-without-compositor cause specifically and points at
+    # this instead: whatever's compositing ARGB windows in both of those
+    # environments doesn't handle it, so keep every popup rule here fully
+    # opaque (no border-radius, no opacity) to avoid needing it at all.
     app.setStyleSheet("""
         QToolTip {
             background-color: #FAFAFA;
             color: #212121;
             border: 1px solid #BDBDBD;
             padding: 4px 6px;
-            border-radius: 3px;
-            opacity: 255;
+        }
+        QMenu {
+            background-color: #FAFAFA;
+            color: #212121;
+            border: 1px solid #BDBDBD;
+        }
+        QMenu::item:selected {
+            background-color: #E3F2FD;
+        }
+        QComboBox QAbstractItemView {
+            background-color: #FAFAFA;
+            color: #212121;
+            border: 1px solid #BDBDBD;
+            selection-background-color: #E3F2FD;
+            outline: none;
+        }
+        QDialog, QMessageBox {
+            background-color: #F0F0F0;
         }
     """)
     win = MainWindow()

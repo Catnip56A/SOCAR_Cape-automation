@@ -1,5 +1,5 @@
 """
-ctr_generator/desc_renames.py
+ctr_tools/desc_renames.py
 
 Persists user-taught Description overrides — what a requested item's
 Description should *display* as in the generated CTR (e.g. the request
@@ -19,9 +19,12 @@ paths.py) so it survives restarts of the packaged .exe. Keyed by category
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 
-from ctr_generator.paths import user_data_dir
+from ctr_tools.paths import user_data_dir
+
+log = logging.getLogger(__name__)
 
 _DESC_RENAMES_PATH = user_data_dir() / "desc_renames.json"
 
@@ -34,7 +37,8 @@ def load_desc_renames() -> dict:
     if _DESC_RENAMES_PATH.exists():
         try:
             data = json.loads(_DESC_RENAMES_PATH.read_text())
-        except (json.JSONDecodeError, OSError):
+        except (json.JSONDecodeError, OSError) as exc:
+            log.warning("Failed to load %s, starting empty: %s", _DESC_RENAMES_PATH, exc)
             data = {}
     return {cat: dict(data.get(cat, {})) for cat in _CATEGORIES}
 
@@ -42,8 +46,11 @@ def load_desc_renames() -> dict:
 def save_desc_renames(renames: dict) -> None:
     try:
         _DESC_RENAMES_PATH.write_text(json.dumps(renames, indent=2, ensure_ascii=False))
-    except OSError:
-        pass  # non-fatal — renames just won't persist across sessions
+    except OSError as exc:
+        # non-fatal — renames just won't persist across sessions — but
+        # worth a trail, since this otherwise discards a user's typed-in
+        # rename with zero feedback anywhere.
+        log.warning("Failed to save %s: %s", _DESC_RENAMES_PATH, exc)
 
 
 def get_desc_rename(renames: dict, category: str, requested_desc: str) -> str | None:
@@ -58,7 +65,10 @@ def set_desc_rename(renames: dict, category: str, requested_desc: str, renamed_t
     renamed_to = (renamed_to or "").strip()
     if not key or not renamed_to:
         return
-    renames.setdefault(category, {})[key] = renamed_to
+    bucket = renames.setdefault(category, {})
+    if bucket.get(key) == renamed_to:
+        return   # already stored — skip the full-file rewrite
+    bucket[key] = renamed_to
     save_desc_renames(renames)
 
 

@@ -346,7 +346,7 @@ The **Additional Info & Transport — AZN** group shows what the request's extra
 
 **Additional Information.** Items marked *Required* are listed at the top of the group and appended to the AZN CTR's activities section header, e.g. `Offshore Activities : Accomadion, Per Diem required`. Nothing marked *Required* leaves the header as the plain `Onshore Activities` / `Offshore Activities` label.
 
-**Transport.** Each requested vehicle becomes one or more lines of the AZN CTR's **Third Party Activities** section (a section the template doesn't ship with — it's added only when there are transport lines, and the Summary block gains a matching *Total Other Activities* item). The request form only says which vehicle, how many, and for how long, so the **Description**, **Rate AZN**, **Mark Up %** and **Duration UOM** come from the transport rate table in `ctr_generator/template_config.json` and are editable in the table before generating:
+**Transport.** Each requested vehicle becomes one or more lines of the AZN CTR's **Third Party Activities** section (a section the template doesn't ship with — it's added only when there are transport lines, and the Summary block gains a matching *Total Other Activities* item). The request form only says which vehicle, how many, and for how long, so the **Description**, **Rate AZN**, **Mark Up %** and **Duration UOM** come from the transport rate table in `ctr_tools/template_config.json` and are editable in the table before generating:
 
 - one requested vehicle can bill as several lines — a minibus charges vehicle+driver and its fuel separately, and only the former carries mark-up;
 - a vehicle that isn't in the rate table still gets a line, at a 0.00 rate, so it's there to price by hand — generating warns about any line still priced at 0.00.
@@ -425,6 +425,6 @@ Output file names follow the pattern:
 
 ## Saved Renames
 
-When you fix a **Match By** value to get a ✓ match, the correction is remembered permanently in `ctr_generator/match_aliases.json`. Next time the same CTR Request description appears, the corrected search key is applied automatically.
+When you fix a **Match By** value to get a ✓ match, the correction is remembered permanently in `ctr_tools/match_aliases.json`. Next time the same CTR Request description appears, the corrected search key is applied automatically.
 
 To view, delete, or export saved renames: click the **Manage Saved Renames…** button in the Manpower section header. You can also use **Import…** and **Export…** to share a renames file between machines.

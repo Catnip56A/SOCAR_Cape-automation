@@ -1,5 +1,5 @@
 """
-ctr_generator/parser.py
+ctr_tools/parser.py
 
 Reads the source files for CTR generation:
   - AZN pricebook  (4410030127_*.xlsx)                — manpower rates
@@ -21,7 +21,7 @@ AZN and USD pricebooks share one layout (verified from 4410030127):
   parse_usd_pricebook.
 
 These indices (and sheet names / skip rows) are configurable via
-ctr_generator/template_config.json — see the "pricebook", "sage_export",
+ctr_tools/template_config.json — see the "pricebook", "sage_export",
 "names_db", and "ctr_request" sections.
 
 SAGE export layout:
@@ -79,7 +79,7 @@ from pathlib import Path
 import openpyxl
 import pandas as pd
 
-from ctr_generator.config import CFG
+from ctr_tools.config import CFG
 
 _pb     = CFG["pricebook"]
 _usd_pb = CFG["usd_pricebook"]
@@ -172,7 +172,7 @@ def _parse_pricebook(src, file_kind: str, cfg: dict) -> pd.DataFrame:
 
     Sheet name, header skip rows, and column positions all come from `cfg`
     (the "pricebook" or "usd_pricebook" section of template_config.json —
-    see ctr_generator/config.py), so a template layout change only needs a
+    see ctr_tools/config.py), so a template layout change only needs a
     config edit, not a code change. No filtering — caller decides which
     rows to use.
     """
