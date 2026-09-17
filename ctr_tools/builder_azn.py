@@ -21,20 +21,27 @@ Default layout (217_AZN template):
     request's project type (see activities_label), not fixed template text
   Row 22 : column headers for that section
   Rows 23–62: data rows for every manpower row NOT matched as "support"
-  Row 64 : G64 = total for that section
+  Rows 65–68: Comments box (merged A65:G68) — the CTR Request's required
+    Additional Information items (Floatel, Accommodation, Per Diem, …),
+    written here by _write_comments_extra; left as the template's plain
+    "Comments:" placeholder when nothing is required. See activities_label
+    for what used to happen instead (appended onto the row-21 header).
+  Row 69 : G69 = total for the Onshore/Offshore Activities section
   Optional "Third Party Activities" section, inserted right after that
     total when the CTR Request has transport / hired-service lines — the
     template ships without it (see _write_third_party_section), and the
     Summary block below gains a matching "Total Other Activities" line.
-  Summary (rows 66–71, before any of the above shifts them down):
-    G67 = total project support
-    G68 = total of the other section
-    G71 = estimated CTR total
+  Summary (rows 70–76, before any of the above shifts them down):
+    G72 = total project support
+    G73 = total of the other section
+    G76 = estimated CTR total
 
   Editable header fields (rows 3–6, shared layout with USD template):
     B3 = Client, C3 = Sub-Client, B4 = Location, E4 = Date,
     G4 = Contract No, E5 = Revision, A6 = Scope / description (merged A6:G6),
-    C1 = Comments, carried over from the CTR Request's own Comments box
+    C1 = Comments, carried over from the CTR Request's own free-text
+    Comments box — unrelated to the A65:G68 Comments box above, which
+    holds only the required Additional Information items
 
 Input values (comment, employees, quantity, rate, etc.) are written as
 plain Python values. Anything derived from another cell — row totals,
@@ -131,7 +138,7 @@ def strip_support_keyword(text: str) -> str:
     return stripped or text.strip()
 
 
-def activities_label(project_type: str, required_info: list[str] | None = None) -> str:
+def activities_label(project_type: str) -> str:
     """
     Section header text for the non-"support" manpower section (row 21/H21):
     "Onshore Activities" or "Offshore Activities", chosen from the CTR
@@ -139,27 +146,37 @@ def activities_label(project_type: str, required_info: list[str] | None = None) 
     template's original hardcoded text) when project_type is blank or
     doesn't recognize either word.
 
-    `required_info` are the CTR Request's Additional Information items
-    marked "Required" (Floatel, Accommodation, Per Diem, …). They're
-    appended to the header so the section itself says what the labor rates
-    still have to cover, e.g.:
-
-        Offshore Activities : Accomadion, Per Diem required
-
-    With nothing required the header is just the plain label, exactly as
-    before. Note that the CTR Tracker finds this section by the label it
-    starts with, not by the whole cell text (see tracker._find_activity_type)
-    — keep the label first if this format ever changes.
+    The CTR Request's required Additional Information items (Floatel,
+    Accommodation, Per Diem, …) used to be appended to this same header —
+    see _write_comments_extra for where that now lives instead, in its own
+    dedicated Comments box (A65:G68) rather than folded into this label.
     """
     if "onshore" in (project_type or "").lower():
-        label = _azn.get("label_onshore_activities", "Onshore Activities")
-    else:
-        label = _azn.get("label_offshore_activities", "Offshore Activities")
+        return _azn.get("label_onshore_activities", "Onshore Activities")
+    return _azn.get("label_offshore_activities", "Offshore Activities")
 
+
+def _write_comments_extra(ws, addr: str, row_shift: int, required_info: list[str] | None) -> None:
+    """
+    Writes the CTR Request's required Additional Information items (Floatel,
+    Accommodation, Per Diem, …) into the dedicated Comments box at `addr`
+    (A65:G68 by default) — see activities_label, which used to fold these
+    into the row-21 section header instead.
+
+    `addr` is a merged cell, so only its top-left anchor actually holds a
+    value; `row_shift` accounts for any support/offshore overflow rows
+    inserted above it (the merge itself shifts down with them). Left
+    untouched — keeping the template's plain "Comments:" placeholder —
+    when there's nothing required, the same way an optional header field
+    elsewhere in this module leaves the template's own value alone.
+    """
     items = [str(item).strip() for item in (required_info or []) if str(item).strip()]
     if not items:
-        return label
-    return f"{label} : {', '.join(items)} required"
+        return
+    row, col = _cell_row_col(addr)
+    cell = _anchor_cell(ws, row + row_shift, col)
+    if cell is not None:
+        cell.value = f"Comments:\n{', '.join(items)} required"
 
 
 def _cell_row_col(addr: str) -> tuple[int, int]:
@@ -545,8 +562,9 @@ def build_azn(
         back to — a blank/missing value defaults to "Offshore Activities".
         location and scope are also used to build the output filename
         (see ctr_tools.naming). required_info (a list of Additional
-        Information items the CTR Request marked "Required") is appended to
-        that same row-21 header — see activities_label.
+        Information items the CTR Request marked "Required") is written
+        into the dedicated Comments box at cell_comments_extra (A65:G68)
+        — see _write_comments_extra.
 
     third_party_rows: transport / hired-service lines for the "Third Party
         Activities" section, each a dict with keys comment, quantity,
@@ -650,12 +668,17 @@ def build_azn(
     #    section's shifted title row (2 rows above its data start), to both
     #    the merged A-column cell and its standalone H-column mirror. ────────
     other_title_row = other_start - 2
-    label = activities_label(
-        (header or {}).get("project_type", "") if header else "",
-        (header or {}).get("required_info") if header else None,
-    )
+    label = activities_label((header or {}).get("project_type", "") if header else "")
     ws.cell(row=other_title_row, column=1).value = label
     ws.cell(row=other_title_row, column=8).value = label
+
+    # ── Comments box (A65:G68 by default) — the CTR Request's required
+    #    Additional Information items, relocated here from the section
+    #    header above (see activities_label / _write_comments_extra). ──────
+    _write_comments_extra(
+        ws, _azn["cell_comments_extra"], _row_shift,
+        (header or {}).get("required_info") if header else None,
+    )
 
     # ── Write section helper (captures ws via closure) ─────────────────────────
     def _write_section(rows, start, eff_end, total_gap) -> int:

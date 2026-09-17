@@ -359,6 +359,11 @@ def _ro_item(text: str) -> QTableWidgetItem:
 
 _ROW_TINT_ROLE = Qt.UserRole + 1   # stores a row's warning colour key ("red"/"yellow"/None)
 _DESC_ANCHOR_ROLE = Qt.UserRole + 2   # stores a row's original (un-renamed) requested Description
+_SAGE_COST_ROLE = Qt.UserRole + 3   # stores a row's SAGE local_expect_cost (float) — independent
+                                     # of the billed rate/price shown in the cell, and unaffected
+                                     # by rechargeability, unlike that cell's "NONRECHARG" text.
+                                     # Feeds the Pricing sheet's internal "Total SC Eq/Mat Cost"
+                                     # column (build_usd's equip_rows/consump_rows "sage_cost" key).
 
 # (background, font) colours per warning key. A row's background tint is
 # swapped for a font colour while the row is selected — Qt's selection
@@ -1571,8 +1576,8 @@ class CTRGeneratorWidget(QWidget):
         self._required_info_lbl.setWordWrap(True)
         self._required_info_lbl.setStyleSheet(f"color: {MUTED}; font-size: 11px;")
         self._required_info_lbl.setToolTip(
-            "Items the CTR Request marked \"Required\". Appended to the AZN "
-            "CTR's Onshore/Offshore Activities section header."
+            "Items the CTR Request marked \"Required\". Written into the AZN "
+            "CTR's dedicated Comments box."
         )
         gl.addWidget(self._required_info_lbl)
 
@@ -2154,8 +2159,8 @@ class CTRGeneratorWidget(QWidget):
             extras.append(f"{n_tr} transport line(s) — check their rates")
         if self._required_info:
             extras.append(
-                f"\"{', '.join(self._required_info)}\" marked Required, appended "
-                f"to the AZN activities header"
+                f"\"{', '.join(self._required_info)}\" marked Required, written "
+                f"to the AZN CTR's Comments box"
             )
         self._ctr_req_status.setText(
             f"Loaded {n_mp} manpower, {n_eq} equipment, {n_cs} consumable "
@@ -2828,7 +2833,17 @@ class CTRGeneratorWidget(QWidget):
         request_tag = desc_item.data(Qt.UserRole) or ""
         mismatch = db_non_recharge is not None and _recharge_mismatch(request_tag, db_non_recharge)
 
+        # SAGE local_expect_cost, purely for the internal "Total SC Eq Cost"
+        # Pricing-sheet column (see _SAGE_COST_ROLE) — a separate lookup from
+        # the USD Pricebook match above, independent of matched_rate (what's
+        # actually billed) and unaffected by rechargeability. Same key and
+        # helper consumables already use for their own SAGE match.
+        sage_match = _match_lookup(
+            self._sage_df, "product", "long_description", "local_expect_cost", key)
+        sage_cost = sage_match[1] if sage_match else 0.0
+
         tbl.blockSignals(True)
+        desc_item.setData(_SAGE_COST_ROLE, sage_cost)
         if matched_name is not None:
             tbl.setItem(row, _EQ_MDESC, _ro_item(matched_name))
             rate_text = "NONRECHARG" if db_non_recharge else f"{matched_rate:.2f}"
@@ -3009,6 +3024,11 @@ class CTRGeneratorWidget(QWidget):
         tbl.blockSignals(True)
         if match:
             mdesc, price, _code = match
+            # Stashed before price_text below can replace the visible cell
+            # with the "NONRECHARG" sentinel — the internal "Total SC Mat
+            # Cost" column (see _SAGE_COST_ROLE) needs the real number on
+            # every row, rechargeable or not.
+            desc_item.setData(_SAGE_COST_ROLE, price)
             tbl.setItem(row, _CS_MDESC, _ro_item(mdesc))
             price_text = "NONRECHARG" if db_non_recharge else f"{price:.2f}"
             tbl.setItem(row, _CS_PRICE, QTableWidgetItem(price_text))
@@ -3017,6 +3037,7 @@ class CTRGeneratorWidget(QWidget):
                 status += "  ⚠ Rechargability mismatch vs. request sheet — using SAGE"
             tbl.setItem(row, _CS_STATUS, _ro_item(status))
         else:
+            desc_item.setData(_SAGE_COST_ROLE, 0.0)
             tbl.setItem(row, _CS_MDESC, _ro_item(""))
             tbl.setItem(row, _CS_STATUS, _ro_item(
                 "✓ Manual" if was_includable else "✗ No match — edit Match By or Description"))
@@ -3318,6 +3339,8 @@ class CTRGeneratorWidget(QWidget):
             # Request, not the matched pricebook name — "Matched Item" is
             # only an internal lookup key used to find the rate, and isn't
             # client-facing text.
+            eq_desc_item = self._req_equip_tbl.item(r, _EQ_DESC)
+            sage_cost = (eq_desc_item.data(_SAGE_COST_ROLE) if eq_desc_item else None) or 0.0
             equip_rows.append({
                 "description":  _etxt(_EQ_DESC),
                 "quantity":     qty,
@@ -3325,6 +3348,7 @@ class CTRGeneratorWidget(QWidget):
                 "rate_per_day": rate,
                 "days":         days,
                 "stock_code":   _etxt(_EQ_CODE),
+                "sage_cost":    sage_cost,
             })
 
         consump_rows = []
@@ -3350,12 +3374,15 @@ class CTRGeneratorWidget(QWidget):
                 price = price_txt
             # Same reasoning as equipment above — always show the requested
             # description, not the internal matched-item name.
+            cs_desc_item = self._req_cons_tbl.item(r, _CS_DESC)
+            sage_cost = (cs_desc_item.data(_SAGE_COST_ROLE) if cs_desc_item else None) or 0.0
             consump_rows.append({
                 "long_description":  _ctxt(_CS_DESC),
                 "local_expect_cost": price,
                 "unit_code":         _ctxt(_CS_UNIT) or "EA",
                 "product":           _ctxt(_CS_CODE),
                 "quantity":          qty,
+                "sage_cost":         sage_cost,
             })
 
         # Transport / hired services — the AZN CTR's "Third Party Activities"

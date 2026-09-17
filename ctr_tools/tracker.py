@@ -170,11 +170,12 @@ def _find_activity_type(ws_calc, cfg: dict) -> str:
     Activities" label, minus the " Activities" suffix. Empty string if not
     found (e.g. a CTR type without a manpower section).
 
-    Matched on what the cell *starts with*, not on the whole cell: the
-    generator appends the CTR Request's required Additional Information to
-    this header ("Offshore Activities : Per Diem required" — see
-    builder_azn.activities_label), and an exact-match test would read that
-    as no manpower section at all."""
+    Matched on what the cell *starts with*, not on the whole cell: CTRs
+    generated before builder_azn.activities_label moved required Additional
+    Information into its own Comments box instead had it appended right
+    onto this header ("Offshore Activities : Per Diem required"), and an
+    exact-match test would read one of those older files as no manpower
+    section at all."""
     labels = {label.strip().lower(): label for label in cfg["activity_labels"]}
     col = _col_idx(cfg["activity_label_col"])
     for row in range(1, cfg["search_max_row"] + 1):
