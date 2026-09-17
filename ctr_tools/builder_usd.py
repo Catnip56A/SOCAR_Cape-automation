@@ -56,7 +56,16 @@ Default layout (217_USD template):
       E is either a numeric rate or the literal "NONRECHARG" for
       non-rechargeable items; G is guarded with IF(ISNUMBER(...)) so a
       "NONRECHARG" row totals 0 instead of an Excel #VALUE! error.
-    Row 211      : G211=total_equipment, I211=total_equipment
+      I is a separate, internal-only figure — SAGE's local_expect_cost for
+      that item times quantity, independent of G (what's actually billed,
+      off the USD Pricebook) — see the "sage_cost" key on equip_rows below.
+      It sits outside the sheet's print area (column G is the last printed
+      column) and never reaches the PDF export, by construction of the
+      template rather than anything this module does.
+    Row 211      : G211=total_equipment, I211=SUM of the equipment I column
+      (each row's SAGE cost × quantity) — no rechargeable/non-rechargeable
+      split here; unlike consumables below, the template has no cells for
+      one, and it wasn't asked for.
 
     Row 215      : consumables header
     Rows 216–365 : consumables data
@@ -64,7 +73,22 @@ Default layout (217_USD template):
       E is either a numeric price or the literal "NONRECHARG" for
       non-rechargeable items; F is guarded with IF(ISNUMBER(...)) so a
       "NONRECHARG" row totals 0 instead of an Excel #VALUE! error.
+      I is the same kind of internal-only SAGE-cost-×-quantity figure as
+      equipment's I column above — see consump_rows' "sage_cost" key below.
+      Consumables' own price (E) already equals SAGE's local_expect_cost
+      when rechargeable, but for a non-rechargeable row E shows the
+      "NONRECHARG" sentinel instead of the real number, so I still needs
+      its own independent value to stay populated on those rows too.
     Row 366      : F366=total_consumables_raw
+    Row 367      : I367=Rechargeable SC Mat Cost total (SUM(I) minus the
+      non-rechargeable total below)
+    Row 368      : I368=Non-Rechargeable SC Mat Cost total (SUMIF on column
+      E's "NONRECHARG" text)
+    Row 369      : I369=Total SC Mat Cost (SUM of the whole I column)
+      Rows 367–369 are fixed template cells (already labelled "Rechargeable:"
+      / "Non-Rechargeable:" / "Total:" in column F) — not something this
+      module creates. The two GM% rows immediately below them (370–371) are
+      deliberately left untouched.
 
   Editable header fields (rows 3–6, shared layout with AZN template):
     B3 = Client, C3 = Sub-Client, B4 = Location, E4 = Date,
@@ -112,8 +136,10 @@ _LIST_ITEMS_ON_MAIN = bool(_usd.get("list_items_on_main", False))
 
 # Pricing-sheet column positions for section totals (template structure constants)
 _EQUIP_TOTAL_COL  = 7   # G — row total
-_EQUIP_TOTAL_COL2 = 9   # I — SC cost mirror
+_EQUIP_TOTAL_COL2 = 9   # I — SC cost total
 _CONS_TOTAL_COL   = 6   # F — row total
+_CONS_TOTAL_COL2  = 9   # I — SC cost total (Rechargeable/Non-Rechargeable/Total breakdown)
+_RATE_PRICE_COL   = 5   # E — numeric rate/price, or the literal "NONRECHARG" sentinel
 
 _DATE_FORMATS = ("%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y", "%d.%m.%Y")
 
@@ -322,6 +348,28 @@ def _set_cell(ws, row: int, col: int, value) -> None:
         cell.value = value
 
 
+def _apply_reference_style(ws, row: int, col: int, ref_cell) -> None:
+    """Same merged-cell guard as _set_cell, for overriding a cell's display
+    style (number format, font, alignment) independently of its value —
+    copied from a known-good reference cell rather than trusted from
+    whatever the cell being written already has.
+
+    Guards against a one-off styling mistake on a single template row
+    silently propagating onto every row generation writes into (confirmed
+    on this repo's own USD_TEMPLATE.xlsx: the very last row of both the
+    equipment and consumables blocks has a different currency format and
+    centre alignment instead of the rest of the section's "$" format and
+    right alignment — _copy_row_format would otherwise carry that onto any
+    overflow row inserted past it, and _set_cell never touches style at
+    all, so even a pre-existing template row keeps whatever it already had
+    forever)."""
+    cell = ws.cell(row=row, column=col)
+    if not isinstance(cell, MergedCell):
+        cell.number_format = ref_cell.number_format
+        cell.font          = copy(ref_cell.font)
+        cell.alignment     = copy(ref_cell.alignment)
+
+
 def _safe_float(v, default: float = 0.0) -> float:
     try:
         f = float(v)
@@ -437,11 +485,17 @@ def build_usd(
         description (str), quantity (float), unit (str),
         rate_per_day (float or 'NONRECHARG'), days (float, or "" to leave
         the cell blank for a line whose duration isn't known yet),
-        stock_code (str)
+        stock_code (str), sage_cost (float — SAGE's local_expect_cost for
+        this item, independent of rate_per_day; feeds the Pricing sheet's
+        internal "Total SC Eq Cost" column only, defaults to 0.0)
 
     consump_rows: list of dicts with keys:
         long_description (str), local_expect_cost (float or 'NONRECHARG'),
-        unit_code (str), product (str)
+        unit_code (str), product (str), quantity (float), sage_cost (float
+        — SAGE's local_expect_cost for this item; unlike local_expect_cost
+        above, always the real number even on a non-rechargeable row where
+        local_expect_cost has been replaced by 'NONRECHARG'; feeds the
+        Pricing sheet's internal "Total SC Mat Cost" column, defaults to 0.0)
 
     header: optional dict with keys client, sub_client, location, scope,
         date, contract_no, revision, comments. Only non-empty values
@@ -557,6 +611,12 @@ def build_usd(
     equip_cost_list: list[tuple[str, str]] = []
     cons_cost_list:  list[tuple[str, str]] = []
 
+    # Reference style for the Rate/Price column (E), read once from each
+    # section's first row rather than trusted from whatever's already on
+    # the row being written — see _apply_reference_style.
+    equip_rate_ref = ws_p.cell(row=_EQUIP_START, column=_RATE_PRICE_COL)
+    cons_price_ref = ws_p.cell(row=cons_start,   column=_RATE_PRICE_COL)
+
     for i, er in enumerate(equip_rows):
         r         = _EQUIP_START + i
         item_no   = i + 1
@@ -571,6 +631,7 @@ def build_usd(
         days_raw  = er.get("days", 30)
         days      = "" if days_raw in (None, "") else _safe_float(days_raw, 30.0)
         stock     = str(er.get("stock_code", ""))
+        sage_cost = round(_safe_float(er.get("sage_cost", 0), 0.0), 6)
 
         # A non-rechargeable item carries the "NONRECHARG" sentinel instead of
         # a numeric rate (set upstream once the pricebook/DB match marks it
@@ -589,11 +650,14 @@ def build_usd(
         _set_cell(ws_p, r, 3,  qty)
         _set_cell(ws_p, r, 4,  unit)
         _set_cell(ws_p, r, 5,  rate)
+        _apply_reference_style(ws_p, r, 5, equip_rate_ref)
         _set_cell(ws_p, r, 6,  days if days != "" else None)
         # Guarded so a "NONRECHARG" rate totals 0 instead of erroring (#VALUE!).
         _set_cell(ws_p, r, 7,  f"=IF(ISNUMBER(E{r}),C{r}*E{r}*F{r},0)")
         _set_cell(ws_p, r, 8,  f"=A{r}")
-        _set_cell(ws_p, r, 9,  f"=G{r}")
+        # Internal-only: SAGE's local_expect_cost × quantity, independent of
+        # this row's own billed total (G) — see the module docstring.
+        _set_cell(ws_p, r, 9,  f"=C{r}*{sage_cost}")
         _set_cell(ws_p, r, 10, stock)
 
     # Rows left blank because there were fewer items than the section's
@@ -623,7 +687,9 @@ def build_usd(
     equip_total_col_letter = _col_letter(_EQUIP_TOTAL_COL)
     _set_cell(ws_p, equip_total_row, _EQUIP_TOTAL_COL,
               f"=SUM({equip_total_col_letter}{_EQUIP_START}:{equip_total_col_letter}{equip_eff_end})")
-    _set_cell(ws_p, equip_total_row, _EQUIP_TOTAL_COL2, f"=G{equip_total_row}")
+    equip_sc_col_letter = _col_letter(_EQUIP_TOTAL_COL2)
+    _set_cell(ws_p, equip_total_row, _EQUIP_TOTAL_COL2,
+              f"=SUM({equip_sc_col_letter}{_EQUIP_START}:{equip_sc_col_letter}{equip_eff_end})")
 
     # ── Pricing sheet: clear and write consumables rows ───────────────────────
     cons_eff_end   = cons_end + cons_extra
@@ -640,6 +706,7 @@ def build_usd(
         unit      = str(cr.get("unit_code", "EA"))
         price_raw = cr.get("local_expect_cost", 0)
         product   = str(cr.get("product", ""))
+        sage_cost = round(_safe_float(cr.get("sage_cost", 0), 0.0), 6)
 
         # Same "NONRECHARG" sentinel handling as equipment above — preserved
         # verbatim so it prints instead of a misleading 0.00.
@@ -656,10 +723,14 @@ def build_usd(
         _set_cell(ws_p, r, 3,  qty)
         _set_cell(ws_p, r, 4,  unit)
         _set_cell(ws_p, r, 5,  price)
+        _apply_reference_style(ws_p, r, 5, cons_price_ref)
         # Guarded so a "NONRECHARG" price totals 0 instead of erroring (#VALUE!).
         _set_cell(ws_p, r, 6,  f"=IF(ISNUMBER(E{r}),C{r}*E{r},0)")
         _set_cell(ws_p, r, 8,  f"=A{r}")
-        _set_cell(ws_p, r, 9,  f"=F{r}")
+        # Internal-only: SAGE's local_expect_cost × quantity, independent of
+        # this row's own billed total (F) — see the module docstring. Unlike
+        # F, this stays populated on a "NONRECHARG" row too.
+        _set_cell(ws_p, r, 9,  f"=C{r}*{sage_cost}")
         _set_cell(ws_p, r, 10, product)
 
     # Same expand-used / contract-unused pass as the equipment section above.
@@ -674,6 +745,26 @@ def build_usd(
     _set_cell(ws_p, cons_total_row, _CONS_TOTAL_COL,
               f"=SUM({cons_total_col_letter}{cons_start}:{cons_total_col_letter}{cons_eff_end})")
 
+    # Rechargeable / Non-Rechargeable / Total SC Mat Cost breakdown — three
+    # fixed template rows immediately below the total row (already labelled
+    # "Rechargeable:" / "Non-Rechargeable:" / "Total:" in column F; this
+    # module only ever writes column I). Non-Rechargeable is a SUMIF keyed
+    # on column E's "NONRECHARG" text — the same sentinel every row's price
+    # cell already carries — and Rechargeable is the remainder, so the two
+    # always add up to the Total exactly.
+    cons_sc_col_letter    = _col_letter(_CONS_TOTAL_COL2)
+    cons_price_col_letter = _col_letter(_RATE_PRICE_COL)
+    cons_non_recharge_row = cons_total_row + 2
+    cons_sc_total_row     = cons_total_row + 3
+    cons_recharge_row     = cons_total_row + 1
+    _set_cell(ws_p, cons_non_recharge_row, _CONS_TOTAL_COL2,
+              f'=SUMIF({cons_price_col_letter}{cons_start}:{cons_price_col_letter}{cons_eff_end},'
+              f'"{_NONRECHARG}",{cons_sc_col_letter}{cons_start}:{cons_sc_col_letter}{cons_eff_end})')
+    _set_cell(ws_p, cons_sc_total_row, _CONS_TOTAL_COL2,
+              f"=SUM({cons_sc_col_letter}{cons_start}:{cons_sc_col_letter}{cons_eff_end})")
+    _set_cell(ws_p, cons_recharge_row, _CONS_TOTAL_COL2,
+              f"={cons_sc_col_letter}{cons_sc_total_row}-{cons_sc_col_letter}{cons_non_recharge_row}")
+
     # The sheet's own furniture is never spare capacity, so it is never
     # contracted: the two section totals, and everything sitting between
     # the equipment block and the consumables block — the spacer rows, the
@@ -683,7 +774,8 @@ def build_usd(
     # it while every row around it shows.
     for row in range(equip_total_row, cons_start):
         ws_p.row_dimensions[row].hidden = False
-    ws_p.row_dimensions[cons_total_row].hidden = False
+    for row in range(cons_total_row, cons_sc_total_row + 1):
+        ws_p.row_dimensions[row].hidden = False
 
     # ── Main sheet: item lists (optional, usd_template.list_items_on_main).
     #    When enabled, one row per item (name/cost) is written per section,
@@ -736,17 +828,52 @@ def build_usd(
     cons_markup_addr = _shift_cell(_usd["cell_total_cons_markup"], equip_shift)
     ws_m[cons_markup_addr] = f"={cons_raw_addr}*{cons_markup_rate_addr}"
 
+    # Transportation and Customs Clearance, and its own markup — both
+    # editable template inputs (always 0 for a USD CTR today, since
+    # transport is priced on the AZN document, but still real line items
+    # shown in the Materials/Consumables & Others block and left alone
+    # here rather than written) — must still be included in the section's
+    # own Total below, the same as General Consumables and its markup are.
+    cons_transport_addr = _shift_cell(_usd["cell_total_cons_transport"], equip_shift)
+    cons_services_markup_addr = _shift_cell(_usd["cell_total_cons_services_markup"], equip_shift)
+
+    # Total Material/Consumables/others = every line item shown above it in
+    # this block. The template's own formula here (=G115+G116) silently
+    # dropped Transportation and its markup — harmless while both are 0,
+    # but wrong the moment either is hand-edited.
     cons_total_addr = _shift_cell(_usd["cell_total_cons"], total_shift)
-    ws_m[cons_total_addr] = f"={cons_raw_addr}+{cons_markup_addr}"
+    ws_m[cons_total_addr] = (
+        f"={cons_raw_addr}+{cons_markup_addr}+{cons_transport_addr}+{cons_services_markup_addr}"
+    )
 
     summary_equip_addr = _shift_cell(_usd["cell_summary_equip"], total_shift)
     ws_m[summary_equip_addr] = f"={total_equip_addr}"
 
-    summary_cons_raw_addr = _shift_cell(_usd["cell_summary_cons_raw"], total_shift)
-    ws_m[summary_cons_raw_addr] = f"={cons_raw_addr}"
+    # Summary row 5 mirrors the section's own Total line exactly, so it can
+    # never disagree with "Total Material/Consumables/others" shown just
+    # above the Summary block — the template's own formula here referenced
+    # G115 (raw consumables only), silently dropping markup and transport
+    # from every generated CTR's Summary table.
+    summary_cons_addr = _shift_cell(_usd["cell_summary_cons_raw"], total_shift)
+    ws_m[summary_cons_addr] = f"={cons_total_addr}"
+
+    # The other four Summary rows (Project Support, Offshore Activities,
+    # Other Activities, Contingency) are never written by a USD CTR — see
+    # the main_unused_blocks handling above, all three activity sections
+    # are always 0 today — but Estimated CTR Total must still be a real
+    # sum of all six Summary rows so a manual edit to any of them (or a
+    # nonzero Contingency) actually flows through. The template's own
+    # formula here (=G126+G120) silently dropped the other four.
+    summary_support_addr  = _shift_cell(_usd["cell_summary_project_support"], total_shift)
+    summary_offshore_addr = _shift_cell(_usd["cell_summary_offshore"], total_shift)
+    summary_other_addr    = _shift_cell(_usd["cell_summary_other"], total_shift)
+    contingency_addr      = _shift_cell(_usd["cell_contingency"], total_shift)
 
     summary_grand_addr = _shift_cell(_usd["cell_summary_grand"], total_shift)
-    ws_m[summary_grand_addr] = f"={summary_equip_addr}+{cons_total_addr}"
+    ws_m[summary_grand_addr] = (
+        f"={summary_support_addr}+{summary_offshore_addr}+{summary_other_addr}"
+        f"+{summary_equip_addr}+{summary_cons_addr}+{contingency_addr}"
+    )
 
     # Every row inserted above moved each sheet's tail down by that much;
     # the print area has to follow or the bottom of the CTR silently stops
@@ -761,9 +888,22 @@ def build_usd(
     # row of them that is genuinely blank across the printed columns is
     # contracted, the same rule the data blocks follow. A row that does hold
     # something is left alone rather than guessed at.
+    #
+    # When a whole block is blank (the normal case for a USD CTR), one row
+    # is deliberately left visible under the header rather than contracting
+    # every row — a section with zero rows between its header and its Total
+    # reads as broken, not "nothing to report here".
     _printed_cols = _usd.get("main_printed_cols", 7)
     for _first, _last in _usd.get("main_unused_blocks", []):
-        for row in range(_first, _last + 1):
+        block_rows = range(_first, _last + 1)
+        all_blank = all(
+            ws_m.cell(row=row, column=c).value in (None, "")
+            for row in block_rows for c in range(1, _printed_cols + 1)
+        )
+        for row in block_rows:
+            if all_blank and row == _first:
+                ws_m.row_dimensions[row].hidden = False
+                continue
             if all(ws_m.cell(row=row, column=c).value in (None, "")
                    for c in range(1, _printed_cols + 1)):
                 ws_m.row_dimensions[row].hidden = True
