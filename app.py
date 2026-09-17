@@ -140,18 +140,22 @@ def _aggregate_combined(
     qty_mr: str | None, unit_mr: str | None,
     qty_ctr: str | None, unit_ctr: str | None,
     matched_keys: set,
+    desc_mr: str | None = None, desc_ctr: str | None = None,
 ) -> dict[str, dict]:
     """Group MR and CTR rows by Stock Code (restricted to matched_keys) and
     sum Qty per side. Returns {key: {"mr_qty", "mr_units", "mr_docs",
-    "ctr_qty", "ctr_units", "ctr_docs"}} — *_units is the sorted set of
-    distinct non-blank units contributing to that side's total, so more
-    than one entry signals a unit conflict the caller must resolve before
-    trusting the sum. *_docs is the sorted set of distinct source
-    filenames contributing rows to that side's total (for the Combined
-    view's optional "Show Document Names" column, same source as the
-    detail tables')."""
+    "mr_desc", "ctr_qty", "ctr_units", "ctr_docs", "ctr_desc"}} — *_units is
+    the sorted set of distinct non-blank units contributing to that side's
+    total, so more than one entry signals a unit conflict the caller must
+    resolve before trusting the sum. *_docs is the sorted set of distinct
+    source filenames contributing rows to that side's total (for the
+    Combined view's optional "Show Document Names" column, same source as
+    the detail tables'). *_desc is the first non-blank Description found
+    among that side's contributing rows, so the Combined view can show an
+    item name next to the Stock Code the same way the detail view does."""
 
-    def _agg_side(df: pd.DataFrame, qty_col: str | None, unit_col: str | None) -> dict:
+    def _agg_side(df: pd.DataFrame, qty_col: str | None, unit_col: str | None,
+                  desc_col: str | None) -> dict:
         result: dict = {}
         if qty_col is None or qty_col not in df.columns:
             return result
@@ -170,19 +174,22 @@ def _aggregate_combined(
                 for f in (grp["_SourceFile"] if "_SourceFile" in grp.columns else [])
                 if _norm_val(f)
             })
-            result[key] = {"qty": qty_total, "units": units, "docs": docs}
+            desc = ""
+            if desc_col and desc_col in grp.columns:
+                desc = next((v for v in (_norm_val(d) for d in grp[desc_col]) if v), "")
+            result[key] = {"qty": qty_total, "units": units, "docs": docs, "desc": desc}
         return result
 
-    mr_agg  = _agg_side(mr,  qty_mr,  unit_mr)
-    ctr_agg = _agg_side(ctr, qty_ctr, unit_ctr)
+    mr_agg  = _agg_side(mr,  qty_mr,  unit_mr,  desc_mr)
+    ctr_agg = _agg_side(ctr, qty_ctr, unit_ctr, desc_ctr)
 
     raw: dict[str, dict] = {}
     for key in matched_keys:
-        m = mr_agg.get(key,  {"qty": None, "units": [], "docs": []})
-        c = ctr_agg.get(key, {"qty": None, "units": [], "docs": []})
+        m = mr_agg.get(key,  {"qty": None, "units": [], "docs": [], "desc": ""})
+        c = ctr_agg.get(key, {"qty": None, "units": [], "docs": [], "desc": ""})
         raw[key] = {
-            "mr_qty": m["qty"],   "mr_units":  m["units"],  "mr_docs":  m["docs"],
-            "ctr_qty": c["qty"],  "ctr_units": c["units"],  "ctr_docs": c["docs"],
+            "mr_qty": m["qty"],   "mr_units":  m["units"],  "mr_docs":  m["docs"],  "mr_desc":  m["desc"],
+            "ctr_qty": c["qty"],  "ctr_units": c["units"],  "ctr_docs": c["docs"],  "ctr_desc": c["desc"],
         }
     return raw
 
@@ -298,19 +305,18 @@ _CTR_EMPTY = QColor("#EFF9F6")   # very light teal — CTR cell, no data
 # DataFrame → QTableView adapter
 # ─────────────────────────────────────────────────────────────────────────────
 
-_MISMATCH_BG = QColor("#FFCDD2")   # light red   — mismatched cell / negative diff
-_MISMATCH_FG = QColor("#B71C1C")   # dark red    — mismatched cell / negative diff text
-_POSITIVE_BG = QColor("#C8E6C9")   # light green — positive diff (Combined view)
-_POSITIVE_FG = QColor("#1B5E20")   # dark green  — positive diff text
+_MISMATCH_BG = QColor("#FFCDD2")   # light red    — mismatched cell
+_MISMATCH_FG = QColor("#B71C1C")   # dark red     — mismatched cell text
+_COMBINED_BG = QColor("#FFE0B2")   # light orange — Stock Code spans >1 document (Combined view)
+_COMBINED_FG = QColor("#E65100")   # dark orange  — Stock Code spans >1 document text
 
 # Highlight "kind" -> (background, foreground). A cell's highlight kind is
 # looked up in this map wherever a colour is actually needed, so adding a
-# new kind (e.g. the Combined view's Diff colouring) never touches the
-# mismatch-detection logic that decides *which* cells get one.
+# new kind (e.g. the Combined view's multi-document highlighting) never
+# touches the mismatch-detection logic that decides *which* cells get one.
 _HIGHLIGHT_COLORS = {
     "mismatch": (_MISMATCH_BG, _MISMATCH_FG),
-    "negative": (_MISMATCH_BG, _MISMATCH_FG),
-    "positive": (_POSITIVE_BG, _POSITIVE_FG),
+    "combined": (_COMBINED_BG, _COMBINED_FG),
 }
 
 
@@ -342,7 +348,7 @@ class PandasModel(QAbstractTableModel):
                 return ""
             return str(val) if val is not None else ""
 
-        # A highlight (mismatch, or a Combined-view Diff colour) overrides
+        # A highlight (mismatch, or a Combined-view multi-document colour) overrides
         # all other cell colours.
         kind = self._highlights.get((index.row(), col_name))
         if role == Qt.ItemDataRole.UserRole:
@@ -979,39 +985,22 @@ class MainWindow(QMainWindow):
             QPushButton:hover    {{ border-color: {PRIMARY}; color: {PRIMARY}; }}
             QPushButton:disabled {{ color: {BORDER}; }}
         """
+        # Tooltips are set by _set_compare_vals_mode() below, since they
+        # depend on whether Compare Values or Show Combined is active.
         self._prev_mm_btn = QPushButton("↑")
-        self._prev_mm_btn.setToolTip(
-            "Jump to previous mismatched row  (Qty, Unit, or Rate/Rechargeable differs)")
         self._prev_mm_btn.setStyleSheet(nav_css)
         self._prev_mm_btn.setEnabled(False)
         self._prev_mm_btn.clicked.connect(lambda: self._nav_mismatch(-1))
 
         self._next_mm_btn = QPushButton("↓")
-        self._next_mm_btn.setToolTip(
-            "Jump to next mismatched row  (Qty, Unit, or Rate/Rechargeable differs)")
         self._next_mm_btn.setStyleSheet(nav_css)
         self._next_mm_btn.setEnabled(False)
         self._next_mm_btn.clicked.connect(lambda: self._nav_mismatch(+1))
 
-        self._compare_vals_btn = QPushButton("Compare Values")
+        self._compare_vals_btn = QPushButton()
         self._compare_vals_btn.setCheckable(True)
         self._compare_vals_btn.setEnabled(False)
-        self._compare_vals_btn.setToolTip(
-            "Highlight rows where Qty or Unit differs between MR and CTR.\n"
-            "Use ↑ ↓ to jump between mismatches. Click again to clear.")
-        self._compare_vals_btn.setStyleSheet(f"""
-            QPushButton {{
-                background: white; color: {PRIMARY};
-                border: 1px solid {PRIMARY}; border-radius: 4px;
-                padding: 2px 10px; font-size: 11px;
-                min-height: 24px;
-            }}
-            QPushButton:checked {{
-                background: #FFEBEE; color: #C62828;
-                border: 1.5px solid #C62828; font-weight: bold;
-            }}
-            QPushButton:disabled {{ color: {BORDER}; border-color: {BORDER}; }}
-        """)
+        self._set_compare_vals_mode(combined=False)   # starts out as "Compare Values"
         self._compare_vals_btn.toggled.connect(self._apply_value_highlights)
 
         self._combined_btn = QPushButton("Combined View")
@@ -1497,12 +1486,15 @@ class MainWindow(QMainWindow):
         unit_mr_raw  = _find_col(mr,  "Unit")
         qty_ctr_raw  = _find_col(ctr, "Quantity", "Qty")
         unit_ctr_raw = _find_col(ctr, "Unit")
+        desc_mr_raw  = _find_col(mr,  "Description")
+        desc_ctr_raw = _find_col(ctr, "Description")
 
         # Fresh Compare = fresh decisions; a stock code approved/rejected
         # before this run no longer applies once the underlying data changed.
         matched_keys = set(matched["_KEY_"])
         self._combined_raw = _aggregate_combined(
-            mr, ctr, qty_mr_raw, unit_mr_raw, qty_ctr_raw, unit_ctr_raw, matched_keys)
+            mr, ctr, qty_mr_raw, unit_mr_raw, qty_ctr_raw, unit_ctr_raw, matched_keys,
+            desc_mr_raw, desc_ctr_raw)
         self._combined_decisions = {}
         self._mr_files_used  = sorted(mr["_SourceFile"].dropna().unique().tolist()) \
             if "_SourceFile" in mr.columns else []
@@ -1600,7 +1592,7 @@ class MainWindow(QMainWindow):
         source: PandasModel = proxy.sourceModel()
 
         if self._combined_btn.isChecked():
-            self._apply_combined_diff_highlights(source, active)
+            self._apply_combined_doc_highlights(source, active)
             return
 
         if not active or self._display_df.empty:
@@ -1677,56 +1669,63 @@ class MainWindow(QMainWindow):
             self._mismatch_lbl.setVisible(True)
             self._set_status("Compare Values — no Qty, Unit, or Rate/Rechargeable mismatches found.")
 
-    def _apply_combined_diff_highlights(self, source: "PandasModel", active: bool):
-        """Compare Values, applied to the Combined view: colours the Diff
-        column green where CTR's total is higher than MR's, red where it's
-        lower, instead of the detail view's Qty/Unit/Rate mismatch
-        highlighting. No row navigation here — the arrows stay tied to the
-        detail view's per-row mismatches."""
+    def _apply_combined_doc_highlights(self, source: "PandasModel", active: bool):
+        """Show Combined, the Combined-view replacement for Compare Values:
+        highlights every Stock Code whose combined total was built from more
+        than one MR or CTR source document (regardless of whether the MR/CTR
+        totals actually differ), and wires the ↑/↓ buttons to step between
+        those rows — unlike the old Diff-colouring behaviour this replaced,
+        which left row navigation dead in Combined view."""
         self._mismatch_rows = []
         self._mismatch_pos  = -1
         self._prev_mm_btn.setEnabled(False)
         self._next_mm_btn.setEnabled(False)
 
-        diff_col = "Diff (CTR − MR)"
-        if not active or self._combined_df.empty or diff_col not in self._combined_df.columns:
+        if not active or self._combined_df.empty:
             source.set_highlights({})
             self._mismatch_lbl.setVisible(False)
             return
 
         cells: dict[tuple[int, str], str] = {}
-        positive = negative = 0
-        for row_idx, val in enumerate(self._combined_df[diff_col]):
-            if val is None or (isinstance(val, float) and pd.isna(val)):
-                continue
-            if val > 0:
-                cells[(row_idx, diff_col)] = "positive"
-                positive += 1
-            elif val < 0:
-                cells[(row_idx, diff_col)] = "negative"
-                negative += 1
+        rows: list[int] = []
+        highlight_cols = [c for c in ("Stock Code", "Description (MR)", "Description (CTR)",
+                                       "MR Document", "CTR Document")
+                          if c in self._combined_df.columns]
+        for row_idx, key in enumerate(self._combined_df["Stock Code"]):
+            agg = self._combined_raw.get(key, {})
+            if len(agg.get("mr_docs", [])) > 1 or len(agg.get("ctr_docs", [])) > 1:
+                rows.append(row_idx)
+                for col in highlight_cols:
+                    cells[(row_idx, col)] = "combined"
 
         source.set_highlights(cells)
+        self._mismatch_rows = rows
+        self._mismatch_pos  = 0 if rows else -1
 
-        if positive or negative:
+        has = len(rows) > 0
+        self._prev_mm_btn.setEnabled(has)
+        self._next_mm_btn.setEnabled(has)
+
+        if has:
+            n = len(rows)
             self._mismatch_lbl.setText(
-                f'<span style="color:#1B5E20; font-size:11px;">'
-                f'&#9650; {positive} CTR &gt; MR</span>'
-                f'&nbsp;&nbsp;'
-                f'<span style="color:#C62828; font-size:11px;">'
-                f'&#9660; {negative} CTR &lt; MR</span>'
-            )
+                f'<span style="color:{_COMBINED_FG.name()}; font-size:11px;">'
+                f'&#9679;&nbsp; {n} Stock Code(s) span multiple MR/CTR documents'
+                f'</span>')
             self._mismatch_lbl.setVisible(True)
+            self._nav_mismatch(0, absolute=True)   # scroll to first match
             self._set_status(
-                f"Compare Values — Combined totals: {positive} Stock Code(s) with "
-                f"CTR higher than MR (green), {negative} with CTR lower than MR (red).")
+                f"Show Combined — {n} Stock Code(s) drew from more than one MR/CTR "
+                "document, highlighted in orange. Use ↑ ↓ to step through them.")
         else:
             self._mismatch_lbl.setText(
                 '<span style="color:#2E7D32; font-size:11px;">'
-                '&#10003;&nbsp; All combined totals match'
+                '&#10003;&nbsp; No Stock Code spans multiple documents'
                 '</span>')
             self._mismatch_lbl.setVisible(True)
-            self._set_status("Compare Values — no MR/CTR total differences in Combined view.")
+            self._set_status(
+                "Show Combined — every Stock Code came from a single MR and single "
+                "CTR document.")
 
     def _nav_mismatch(self, step: int, absolute: bool = False):
         if not self._mismatch_rows:
@@ -1746,9 +1745,13 @@ class MainWindow(QMainWindow):
         self._tab_matched.scrollTo(
             proxy_idx, QAbstractItemView.ScrollHint.PositionAtCenter)
         self._tab_matched.setCurrentIndex(proxy_idx)
+
+        combined    = self._combined_btn.isChecked()
+        active_df   = self._combined_df if combined else self._display_df
+        label       = "Combined item" if combined else "Mismatch"
         self._set_status(
-            f"Mismatch {self._mismatch_pos + 1} of {n}  — "
-            f"Stock Code: {self._display_df.iloc[src_row]['Stock Code']}")
+            f"{label} {self._mismatch_pos + 1} of {n}  — "
+            f"Stock Code: {active_df.iloc[src_row]['Stock Code']}")
 
     # ── Combined view ────────────────────────────────────────────────────────
 
@@ -1767,13 +1770,15 @@ class MainWindow(QMainWindow):
 
             base = {
                 "Stock Code":      key,
+                # .get(..., "") — combined_raw restored from a comparison
+                # saved before this column existed won't have these keys;
+                # degrade to blank rather than failing the whole load.
+                "Description (MR)":  agg.get("mr_desc", ""),
+                "Description (CTR)": agg.get("ctr_desc", ""),
                 "Qty (MR) Total":  mr_qty,
                 "Qty (CTR) Total": ctr_qty,
                 "Diff (CTR − MR)": diff,
                 "Unit":            " / ".join(all_units),
-                # .get(..., []) — combined_raw restored from a comparison
-                # saved before this column existed won't have these keys;
-                # degrade to blank rather than failing the whole load.
                 "MR Document":     ", ".join(agg.get("mr_docs", [])),
                 "CTR Document":    ", ".join(agg.get("ctr_docs", [])),
             }
@@ -1796,11 +1801,12 @@ class MainWindow(QMainWindow):
             else:
                 rows_review.append(base)
 
-        combined_cols = ["Stock Code", "Qty (MR) Total", "Qty (CTR) Total",
+        desc_cols     = ["Description (MR)", "Description (CTR)"]
+        combined_cols = ["Stock Code", *desc_cols, "Qty (MR) Total", "Qty (CTR) Total",
                           "Diff (CTR − MR)", "Unit", "MR Document", "CTR Document", "Flag"]
-        review_cols   = ["Stock Code", "Qty (MR) Total", "Qty (CTR) Total",
+        review_cols   = ["Stock Code", *desc_cols, "Qty (MR) Total", "Qty (CTR) Total",
                           "Diff (CTR − MR)", "Unit"]
-        error_cols    = ["Stock Code", "Qty (MR) Total", "Qty (CTR) Total",
+        error_cols    = ["Stock Code", *desc_cols, "Qty (MR) Total", "Qty (CTR) Total",
                           "Unit", "Reason"]
 
         self._combined_df = (
@@ -1825,8 +1831,8 @@ class MainWindow(QMainWindow):
 
         if self._combined_btn.isChecked():
             _load_view(self._tab_matched, self._combined_df)
-            # A fresh model has no highlights — reapply Compare Values'
-            # green/red Diff colouring if it was on before this rebuild.
+            # A fresh model has no highlights — reapply Show Combined's
+            # multi-document highlighting if it was on before this rebuild.
             self._apply_value_highlights(self._compare_vals_btn.isChecked())
 
     def _update_review_tab_badge(self):
@@ -1903,12 +1909,63 @@ class MainWindow(QMainWindow):
         if self._tab_matched.model() is None:
             return
         _load_view(self._tab_matched, self._combined_df if active else self._display_df)
-        # Compare Values works in both views (Qty/Unit/Rate mismatches in
-        # detail, green/red Diff colouring in Combined) — a fresh model from
-        # _load_view above has no highlights, so reapply whichever state it
-        # was already in for the view we just switched to.
+        # Compare Values doubles as Show Combined while this view is active —
+        # same button/checked-state, different label/behaviour.
+        self._set_compare_vals_mode(active)
+        # A fresh model from _load_view above has no highlights, so reapply
+        # whichever state the toggle was already in for the view we just
+        # switched to (Qty/Unit/Rate mismatches in detail, multi-document
+        # highlighting in Combined).
         self._apply_value_highlights(self._compare_vals_btn.isChecked())
         self._apply_doc_column_visibility(self._show_docs_btn.isChecked())
+
+    def _set_compare_vals_mode(self, combined: bool):
+        """Compare Values and Show Combined are the same button/state
+        (_compare_vals_btn.isChecked(), dispatched in _apply_value_highlights)
+        with a different label, tooltip, colour theme, and nav-arrow tooltips
+        depending on whether Combined View is active. Normal (detail) view
+        keeps 'Compare Values' exactly as it always has."""
+        if combined:
+            self._compare_vals_btn.setText("Show Combined")
+            self._compare_vals_btn.setToolTip(
+                "Highlight Stock Codes built from more than one MR/CTR document.\n"
+                "Use ↑ ↓ to jump between them. Click again to clear.")
+            self._compare_vals_btn.setStyleSheet(f"""
+                QPushButton {{
+                    background: white; color: #E65100;
+                    border: 1px solid #E65100; border-radius: 4px;
+                    padding: 2px 10px; font-size: 11px;
+                    min-height: 24px;
+                }}
+                QPushButton:checked {{
+                    background: #FFE0B2; color: #E65100;
+                    border: 1.5px solid #E65100; font-weight: bold;
+                }}
+                QPushButton:disabled {{ color: {BORDER}; border-color: {BORDER}; }}
+            """)
+            nav_desc = "Stock Code spanning multiple MR/CTR documents"
+        else:
+            self._compare_vals_btn.setText("Compare Values")
+            self._compare_vals_btn.setToolTip(
+                "Highlight rows where Qty or Unit differs between MR and CTR.\n"
+                "Use ↑ ↓ to jump between mismatches. Click again to clear.")
+            self._compare_vals_btn.setStyleSheet(f"""
+                QPushButton {{
+                    background: white; color: {PRIMARY};
+                    border: 1px solid {PRIMARY}; border-radius: 4px;
+                    padding: 2px 10px; font-size: 11px;
+                    min-height: 24px;
+                }}
+                QPushButton:checked {{
+                    background: #FFEBEE; color: #C62828;
+                    border: 1.5px solid #C62828; font-weight: bold;
+                }}
+                QPushButton:disabled {{ color: {BORDER}; border-color: {BORDER}; }}
+            """)
+            nav_desc = "mismatched row  (Qty, Unit, or Rate/Rechargeable differs)"
+
+        self._prev_mm_btn.setToolTip(f"Jump to previous {nav_desc}")
+        self._next_mm_btn.setToolTip(f"Jump to next {nav_desc}")
 
     def _apply_doc_column_visibility(self, show: bool):
         """MR/CTR 'source document' columns are hidden by default to keep
