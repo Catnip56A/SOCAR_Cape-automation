@@ -21,14 +21,14 @@ from PySide6.QtGui import QBrush, QColor, QFont, QPainter, QPalette, QPen
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QDialog, QDialogButtonBox,
     QFileDialog, QFormLayout, QFrame, QGroupBox, QHBoxLayout, QHeaderView,
-    QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow,
+    QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu,
     QMessageBox, QProgressDialog, QPushButton, QScrollArea,
     QSplitter, QStackedWidget, QStyle, QStyledItemDelegate, QTabWidget,
     QTableView, QVBoxLayout, QWidget,
 )
 
 sys.path.insert(0, str(Path(__file__).parent))
-from sheet_parser import parse_workbook
+from sheet_parser import is_cover_sheet, parse_workbook
 from comparison_history import (
     comparisons_dir, default_label, list_saved_comparisons, load_comparison,
     save_comparison, suggest_save_path,
@@ -432,15 +432,104 @@ def _make_view(compact: bool = False) -> QTableView:
     if compact:
         v.horizontalHeader().setSectionResizeMode(
             QHeaderView.ResizeMode.ResizeToContents)
+    _attach_column_hiding(v)
     return v
 
 
+# ── Visual-only column hiding ─────────────────────────────────────────────────
+# Right-click a column header → Hide. Purely a display choice: it never
+# touches the DataFrames, the Excel report or saved comparisons, and it is
+# not remembered — _load_view resets it whenever a table is (re)loaded.
+# Tracked separately from the "Show Document Names" toggle, which owns the
+# MR/CTR Document columns (see MainWindow._apply_doc_column_visibility).
+
+def _attach_column_hiding(view: QTableView):
+    view._user_hidden = {}          # {column index: column name}
+    view._on_hidden_changed = None  # optional callback, set by the owner
+    header = view.horizontalHeader()
+    header.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+    header.customContextMenuRequested.connect(
+        lambda pos, v=view: _header_menu(v, pos))
+
+
+def _column_name(view: QTableView, idx: int) -> str:
+    return str(view.model().headerData(idx, Qt.Orientation.Horizontal) or idx)
+
+
+def _notify_hidden_changed(view: QTableView):
+    if view._on_hidden_changed:
+        view._on_hidden_changed()
+
+
+def _header_menu(view: QTableView, pos):
+    model = view.model()
+    if model is None:
+        return
+    header = view.horizontalHeader()
+    idx    = header.logicalIndexAt(pos)
+    menu   = QMenu(view)
+    if idx >= 0 and not header.isSectionHidden(idx):
+        visible = sum(1 for i in range(model.columnCount())
+                      if not header.isSectionHidden(i))
+        act = menu.addAction(f"Hide column “{_column_name(view, idx)}”")
+        act.setEnabled(visible > 1)   # never hide the last visible column
+        act.triggered.connect(lambda _=False: _hide_column(view, idx))
+    if view._user_hidden:
+        act = menu.addAction(f"Unhide columns… ({len(view._user_hidden)})")
+        act.triggered.connect(lambda _=False: _unhide_dialog(view))
+    if not menu.isEmpty():
+        menu.exec(header.mapToGlobal(pos))
+
+
+def _hide_column(view: QTableView, idx: int):
+    view._user_hidden[idx] = _column_name(view, idx)
+    view.setColumnHidden(idx, True)
+    _notify_hidden_changed(view)
+
+
+def _unhide_dialog(view: QTableView):
+    """Pop-up listing the columns hidden by the user, to pick which to bring back."""
+    if not view._user_hidden:
+        return
+    dlg = QDialog(view)
+    dlg.setWindowTitle("Unhide columns")
+    lay = QVBoxLayout(dlg)
+    lay.addWidget(QLabel("Tick the columns to show again:"))
+    boxes = {}
+    for idx, name in sorted(view._user_hidden.items()):
+        cb = QCheckBox(name)
+        lay.addWidget(cb)
+        boxes[idx] = cb
+    all_cb = QCheckBox("Select all")
+    all_cb.toggled.connect(lambda on: [b.setChecked(on) for b in boxes.values()])
+    lay.addWidget(all_cb)
+    bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok
+                          | QDialogButtonBox.StandardButton.Cancel)
+    bb.button(QDialogButtonBox.StandardButton.Ok).setText("Unhide")
+    bb.accepted.connect(dlg.accept)
+    bb.rejected.connect(dlg.reject)
+    lay.addWidget(bb)
+    if dlg.exec() != QDialog.DialogCode.Accepted:
+        return
+    for idx, cb in boxes.items():
+        if cb.isChecked():
+            view.setColumnHidden(idx, False)
+            view._user_hidden.pop(idx, None)
+    _notify_hidden_changed(view)
+
+
 def _load_view(view: QTableView, df: pd.DataFrame):
+    # Hidden columns are deliberately not remembered across loads.
+    for idx in list(getattr(view, "_user_hidden", {})):
+        view.setColumnHidden(idx, False)
+    if getattr(view, "_user_hidden", None):
+        view._user_hidden = {}
     proxy = QSortFilterProxyModel()
     proxy.setSourceModel(PandasModel(df))
     proxy.setSortCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
     view.setModel(proxy)
     view.resizeColumnsToContents()
+    _notify_hidden_changed(view)
 
 
 def _show_result(stack: QStackedWidget, view: QTableView, df: pd.DataFrame):
@@ -608,9 +697,12 @@ def _metric_box(label: str, color: str,
     """)
     lbl = QLabel("—")
     lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-    f = lbl.font(); f.setPointSize(22); f.setBold(True); lbl.setFont(f)
+    f = lbl.font(); f.setPointSize(15); f.setBold(True); lbl.setFont(f)
     lbl.setStyleSheet(f"color: {color};")
-    QVBoxLayout(box).addWidget(lbl)
+    bl = QVBoxLayout(box)
+    bl.setContentsMargins(6, 2, 6, 2)
+    bl.setSpacing(0)
+    bl.addWidget(lbl)
     return box, lbl
 
 
@@ -622,16 +714,19 @@ class ParseWorker(QThread):
     finished = Signal(list)
     error    = Signal(str)
 
-    def __init__(self, payloads: list[tuple[str, bytes]], parent=None):
+    def __init__(self, payloads: list[tuple[str, bytes]], parent=None,
+                 include_cover: bool = False):
         super().__init__(parent)
         self._payloads = payloads
+        self._include_cover = include_cover   # MR side: also parse the Socar-Cape sheet
 
     def run(self):
         log.info("ParseWorker: parsing %d file(s)", len(self._payloads))
         try:
             results = []
             for name, data in self._payloads:
-                results.extend(parse_workbook(BytesIO(data), filename=name))
+                results.extend(parse_workbook(BytesIO(data), filename=name,
+                                              include_cover=self._include_cover))
             log.info("ParseWorker: produced %d table(s)", len(results))
             self.finished.emit(results)
         except Exception as exc:
@@ -973,7 +1068,7 @@ class MainWindow(QMainWindow):
         # Corner toolbar: navigate between mismatches + toggle highlight
         _corner = QWidget()
         _cl = QHBoxLayout(_corner)
-        _cl.setContentsMargins(0, 2, 6, 0)
+        _cl.setContentsMargins(0, 0, 0, 0)
         _cl.setSpacing(3)
 
         nav_css = f"""
@@ -1056,8 +1151,43 @@ class MainWindow(QMainWindow):
         _cl.addWidget(self._combined_btn)
         _cl.addSpacing(4)
         _cl.addWidget(self._show_docs_btn)
-        self._tabs.setCornerWidget(_corner)
 
+        self._cols_btn = QPushButton("Columns")
+        self._cols_btn.setToolTip(
+            "Choose which columns you hid (right-click a header → Hide) to show again.\n"
+            "Hiding is visual only — the Excel download always has every column.")
+        self._cols_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: white; color: {MUTED};
+                border: 1px solid {BORDER}; border-radius: 4px;
+                padding: 2px 8px; font-size: 11px;
+                min-height: 24px;
+            }}
+            QPushButton:enabled {{ color: #263238; border-color: #607D8B; }}
+            QPushButton:disabled {{ color: {BORDER}; border-color: {BORDER}; }}
+        """)
+        self._cols_btn.setEnabled(False)
+        self._cols_btn.clicked.connect(
+            lambda: (v := self._current_result_view()) and _unhide_dialog(v))
+        _cl.addSpacing(4)
+        _cl.addWidget(self._cols_btn)
+        for _v in (self._tab_matched, self._tab_only_mr, self._tab_only_ctr, self._tab_error):
+            _v._on_hidden_changed = self._refresh_cols_btn
+        self._tabs.currentChanged.connect(lambda _=0: self._refresh_cols_btn())
+        _cl.addStretch(1)   # left-aligned toolbar row above the tabs
+
+        # This button's label swaps between "Compare Values" and "Show
+        # Combined" (_set_compare_vals_mode) — reserve room for the longer
+        # one so the buttons to its right don't shift when it changes.
+        _keep = self._compare_vals_btn.text()
+        _w = 0
+        for _t in ("Compare Values", "Show Combined"):
+            self._compare_vals_btn.setText(_t)
+            _w = max(_w, self._compare_vals_btn.sizeHint().width())
+        self._compare_vals_btn.setText(_keep)
+        self._compare_vals_btn.setMinimumWidth(_w + 14)   # +bold when checked
+
+        body_l.addWidget(_corner)
         body_l.addWidget(self._tabs)
 
         # Export / persist row: Excel report download, plus save a full
@@ -1146,7 +1276,7 @@ class MainWindow(QMainWindow):
         btn_row.addWidget(clear_btn)
         fbl.addLayout(btn_row)
         file_lw = QListWidget()
-        file_lw.setFixedHeight(54)
+        file_lw.setFixedHeight(64)
         file_lw.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
         file_lw.setToolTip(f"Files loaded for {label}.")
         fbl.addWidget(file_lw)
@@ -1198,9 +1328,56 @@ class MainWindow(QMainWindow):
             return
         lw = self._mr_file_list if side == "mr" else self._ctr_file_list
         for name, _ in payloads:
-            lw.addItem(name)
+            self._add_file_row(lw, side, name)
         self._set_status(f"Parsing {side.upper()} files…")
         self._parse(side, payloads)
+
+    def _add_file_row(self, lw: QListWidget, side: str, name: str):
+        """One Step 1 entry: the file name plus a ✕ that removes just that
+        file. The name lives in the item's UserRole (not its text — the row
+        widget draws it) so other code reads it from there."""
+        item = QListWidgetItem()
+        item.setFlags(Qt.ItemFlag.ItemIsEnabled)
+        item.setData(Qt.ItemDataRole.UserRole, name)
+        lw.addItem(item)
+
+        row_w = QWidget()
+        row_l = QHBoxLayout(row_w)
+        row_l.setContentsMargins(2, 0, 2, 0)
+        row_l.setSpacing(4)
+        lbl = QLabel(name)
+        row_l.addWidget(lbl, 1)
+        remove_btn = QPushButton("✕")
+        remove_btn.setFixedSize(20, 20)
+        remove_btn.setFlat(True)
+        remove_btn.setToolTip(f"Remove {name} and all its tables from {side.upper()}.")
+        remove_btn.setStyleSheet(f"""
+            QPushButton {{ color: {MUTED}; font-size: 12px; border: none; }}
+            QPushButton:hover {{ color: #C62828; }}
+        """)
+        remove_btn.clicked.connect(lambda _, n=name: self._remove_file(side, n))
+        row_l.addWidget(remove_btn)
+        row_w._label = lbl
+        lw.setItemWidget(item, row_w)
+        item.setSizeHint(row_w.sizeHint())
+
+    def _remove_file(self, side: str, name: str):
+        """Removes one whole file: its Step 1 entry and every table it
+        contributed (including its Socar-Cape row). Different from
+        _remove_table, which drops a single sheet and leaves the file listed."""
+        tables = self._mr_tables if side == "mr" else self._ctr_tables
+        flw    = self._mr_file_list if side == "mr" else self._ctr_file_list
+        tlw    = self._mr_table_list if side == "mr" else self._ctr_table_list
+        tables[:] = [t for t in tables if t["source_file"] != name]
+        for k in reversed(range(flw.count())):
+            if flw.item(k).data(Qt.ItemDataRole.UserRole) == name:
+                flw.takeItem(k)
+        # A preload no longer matches what's loaded — same as _clear.
+        self._loaded_comparison_path = None
+        self._fill_table_list(tlw, tables, side)
+        self._on_table_sel_changed()
+        self._refresh_file_warnings(side)
+        self._set_status(f"Removed {name} from {side.upper()} files.")
 
     def _clear(self, side: str):
         if side == "mr":
@@ -1227,7 +1404,7 @@ class MainWindow(QMainWindow):
         dlg.setWindowModality(Qt.WindowModality.WindowModal)
         dlg.show()
 
-        worker = ParseWorker(payloads, parent=self)
+        worker = ParseWorker(payloads, parent=self, include_cover=(side == "mr"))
         self._workers.append(worker)
 
         def _done(tables: list):
@@ -1251,13 +1428,47 @@ class MainWindow(QMainWindow):
         worker.start()
 
     def _fill_table_list(self, lw: QListWidget, tables: list, side: str):
+        # Rebuilding wipes the row widgets, so carry the user's check state
+        # over — otherwise removing one table would silently re-check every
+        # other one (and switch the opt-in Socar-Cape toggle back on/off).
+        prev_checked = {}
+        for i in range(lw.count()):
+            old_w = lw.itemWidget(lw.item(i))
+            key = getattr(old_w, "_table_key", None)
+            if key is not None:
+                prev_checked[key] = old_w._checkbox.isChecked()
         lw.clear()
-        for i, t in enumerate(tables):
-            stem  = Path(t["source_file"]).stem
-            label = f"{stem} › {t['table_name']}  ({len(t['data'])} rows)"
-            tip   = (f"File: {t['source_file']}\n"
-                     f"Sheet: {t['source_sheet']}\n"
-                     f"Rows: {len(t['data'])}")
+
+        def _add_row(idx, t, file_name=None):
+            """idx=None + file_name → placeholder cover toggle (sheet absent)."""
+            cover  = t is None or is_cover_sheet(t["source_sheet"])
+            if t is not None:
+                stem  = Path(t["source_file"]).stem
+                label = f"{stem} › {t['table_name']}  ({len(t['data'])} rows)"
+                tip   = (f"File: {t['source_file']}\n"
+                         f"Sheet: {t['source_sheet']}\n"
+                         f"Rows: {len(t['data'])}")
+                key   = (t["source_file"], t["source_sheet"], t["table_name"])
+            else:
+                label = f"{Path(file_name).stem} › Socar-Cape sheet  (not found in this file)"
+                tip   = f"File: {file_name}\nThis file has no readable Socar-Cape sheet."
+                key   = None
+            highlight = False
+            if cover and t is not None:
+                label = f"{Path(t['source_file']).stem} › Socar-Cape sheet  ({len(t['data'])} rows)"
+                # No CH-*/NCH-* data left for this MR → point the user at the
+                # cover sheet. A hint only: they decide whether to tick it.
+                highlight = not any(
+                    o["source_file"] == t["source_file"] and not is_cover_sheet(o["source_sheet"])
+                    for o in tables
+                )
+                tip += ("\n\nMR cover sheet — same structure as the CH-*/NCH-* sheets "
+                        "but repeats the whole request. Use it instead of, or together "
+                        "with, them (both together double-count every row).")
+                if highlight:
+                    label += "  ⚠ no CH/NCH sheets"
+                    tip += "\n\nNo CH-*/NCH-* sheets with data were found in this MR."
+
             item = QListWidgetItem()
             item.setFlags(Qt.ItemFlag.ItemIsEnabled)
             lw.addItem(item)
@@ -1268,27 +1479,70 @@ class MainWindow(QMainWindow):
             row_l.setSpacing(4)
 
             cb = QCheckBox(label)
-            cb.setChecked(True)
-            cb.setToolTip(tip + "\n\nUnchecking excludes it from Compare without "
-                                 "removing it — use the ✕ button to remove it entirely.")
+            # Cover sheet is opt-in (off by default); everything else on.
+            cb.setChecked(prev_checked.get(key, not cover))
+            if t is None:
+                cb.setEnabled(False)
+                cb.setToolTip(tip)
+            else:
+                cb.setToolTip(tip + "\n\nUnchecking excludes it from Compare without "
+                                     "removing it — use the ✕ button to remove it entirely.")
+            if highlight:
+                # QPalette, not setStyleSheet — a stylesheet on a container
+                # breaks tooltips for its whole subtree.
+                pal = row_w.palette()
+                pal.setColor(row_w.backgroundRole(), QColor("#FFF3CD"))
+                pal.setColor(cb.backgroundRole(), QColor("#FFF3CD"))
+                pal.setColor(cb.foregroundRole(), QColor("#7A5200"))
+                row_w.setPalette(pal)
+                cb.setPalette(pal)
+                row_w.setAutoFillBackground(True)
+                cb.setAutoFillBackground(True)
+                f = cb.font(); f.setBold(True); cb.setFont(f)
             # connect after setChecked so the initial toggle doesn't fire yet
             cb.toggled.connect(lambda _: self._on_table_sel_changed())
             row_l.addWidget(cb, 1)
 
-            remove_btn = QPushButton("✕")
-            remove_btn.setFixedSize(20, 20)
-            remove_btn.setFlat(True)
-            remove_btn.setToolTip("Remove this table from the list entirely.")
-            remove_btn.setStyleSheet(f"""
-                QPushButton {{ color: {MUTED}; font-size: 12px; border: none; }}
-                QPushButton:hover {{ color: #C62828; }}
-            """)
-            remove_btn.clicked.connect(lambda _, idx=i: self._remove_table(side, idx))
-            row_l.addWidget(remove_btn)
+            if t is not None:
+                remove_btn = QPushButton("✕")
+                remove_btn.setFixedSize(20, 20)
+                remove_btn.setFlat(True)
+                remove_btn.setToolTip("Remove this table from the list entirely.")
+                remove_btn.setStyleSheet(f"""
+                    QPushButton {{ color: {MUTED}; font-size: 12px; border: none; }}
+                    QPushButton:hover {{ color: #C62828; }}
+                """)
+                remove_btn.clicked.connect(lambda _, idx=idx: self._remove_table(side, idx))
+                row_l.addWidget(remove_btn)
 
-            row_w._checkbox = cb   # so _concat_checked can find it without a child search
+            row_w._checkbox  = cb    # so _concat_checked can find it without a child search
+            row_w._table_idx = idx   # index into `tables`; None for a placeholder
+            row_w._table_key = key
             lw.setItemWidget(item, row_w)
             item.setSizeHint(row_w.sizeHint())
+
+        if side != "mr":
+            for i, t in enumerate(tables):
+                _add_row(i, t)
+            return
+
+        # MR: group per file, and always end each file with its Socar-Cape
+        # toggle (a disabled placeholder when that sheet wasn't found).
+        files = [self._mr_file_list.item(k).data(Qt.ItemDataRole.UserRole)
+                 for k in range(self._mr_file_list.count())]
+        for t in tables:
+            if t["source_file"] not in files:
+                files.append(t["source_file"])
+        for fname in files:
+            mine = [(i, t) for i, t in enumerate(tables) if t["source_file"] == fname]
+            for i, t in mine:
+                if not is_cover_sheet(t["source_sheet"]):
+                    _add_row(i, t)
+            covers = [(i, t) for i, t in mine if is_cover_sheet(t["source_sheet"])]
+            for i, t in covers:
+                _add_row(i, t)
+            if not covers:
+                _add_row(None, None, fname)
 
     def _remove_table(self, side: str, index: int):
         """Removes one table entirely (not just unchecking it) from the
@@ -1316,14 +1570,18 @@ class MainWindow(QMainWindow):
         tables = self._mr_tables    if side == "mr" else self._ctr_tables
         remaining_files = {t["source_file"] for t in tables}
         for i in range(lw.count()):
-            item = lw.item(i)
-            if item.text() in remaining_files:
-                item.setForeground(QBrush())
-                item.setToolTip("")
+            item  = lw.item(i)
+            name  = item.data(Qt.ItemDataRole.UserRole)
+            label = lw.itemWidget(item)._label
+            if name in remaining_files:
+                label.setPalette(QPalette())
+                label.setToolTip("")
             else:
-                item.setForeground(QBrush(_MISMATCH_FG))
-                item.setToolTip(
-                    f'All tables from "{item.text()}" have been removed — '
+                pal = label.palette()
+                pal.setColor(label.foregroundRole(), _MISMATCH_FG)
+                label.setPalette(pal)
+                label.setToolTip(
+                    f'All tables from "{name}" have been removed — '
                     "none of its data will be included in Compare.\n"
                     "Browse for it again to re-add it."
                 )
@@ -1338,11 +1596,13 @@ class MainWindow(QMainWindow):
 
     def _concat_checked(self, lw: QListWidget, tables: list) -> pd.DataFrame:
         parts = []
-        for i in range(min(lw.count(), len(tables))):
-            row_w = lw.itemWidget(lw.item(i))
-            cb = getattr(row_w, "_checkbox", None)
-            if isinstance(cb, QCheckBox) and cb.isChecked():
-                parts.append(tables[i]["data"])
+        for k in range(lw.count()):
+            row_w = lw.itemWidget(lw.item(k))
+            cb  = getattr(row_w, "_checkbox", None)
+            idx = getattr(row_w, "_table_idx", None)
+            if (isinstance(cb, QCheckBox) and cb.isChecked()
+                    and idx is not None and 0 <= idx < len(tables)):
+                parts.append(tables[idx]["data"])
         return pd.concat(parts, ignore_index=True, sort=False) if parts else pd.DataFrame()
 
     # ── Settings ──────────────────────────────────────────────────────────────
@@ -1967,6 +2227,19 @@ class MainWindow(QMainWindow):
         self._prev_mm_btn.setToolTip(f"Jump to previous {nav_desc}")
         self._next_mm_btn.setToolTip(f"Jump to next {nav_desc}")
 
+    def _current_result_view(self):
+        """The QTableView of the active result tab (None on Needs Review,
+        which is a list, not a table)."""
+        w = self._tabs.currentWidget()
+        v = w.widget(1) if isinstance(w, QStackedWidget) else None
+        return v if isinstance(v, QTableView) else None
+
+    def _refresh_cols_btn(self):
+        v = self._current_result_view()
+        n = len(v._user_hidden) if v is not None else 0
+        self._cols_btn.setEnabled(n > 0)
+        self._cols_btn.setText(f"Columns ({n})" if n else "Columns")
+
     def _apply_doc_column_visibility(self, show: bool):
         """MR/CTR 'source document' columns are hidden by default to keep
         the comparison tables compact — this toggles them on the three
@@ -2114,15 +2387,15 @@ class MainWindow(QMainWindow):
 
             self._mr_tables  = data["mr_tables"]
             self._ctr_tables = data["ctr_tables"]
-            for lw, tables in (
-                (self._mr_file_list,  self._mr_tables),
-                (self._ctr_file_list, self._ctr_tables),
+            for lw, tables, fside in (
+                (self._mr_file_list,  self._mr_tables,  "mr"),
+                (self._ctr_file_list, self._ctr_tables, "ctr"),
             ):
                 seen = []
                 for t in tables:
                     if t["source_file"] not in seen:
                         seen.append(t["source_file"])
-                        lw.addItem(t["source_file"])
+                        self._add_file_row(lw, fside, t["source_file"])
             self._fill_table_list(self._mr_table_list,  self._mr_tables,  "mr")
             self._fill_table_list(self._ctr_table_list, self._ctr_tables, "ctr")
             self._on_table_sel_changed()   # rebuilds _mr_df/_ctr_df from the restored tables

@@ -35,12 +35,12 @@ A progress indicator at the very top of the window shows which step you are on: 
 
 1. In the **MR column** (left side, blue border), click **Browse…**
 2. Select one or more Excel files that contain MR data. You can select multiple files at once.
-3. The file names appear in a list below the button.
+3. The file names appear in a list below the button, each with a **✕** button that removes just that file (and all its tables) without touching the others.
 4. Repeat the same process in the **CTR column** (right side, teal/green border).
 
 > You can upload multiple MR files and multiple CTR files. The app merges all checked tables from all files before comparing.
 
-To remove all loaded files from one side, click **Clear**.
+To remove all loaded files from one side at once, click **Clear**.
 
 ---
 
@@ -49,6 +49,8 @@ To remove all loaded files from one side, click **Clear**.
 After files are loaded, the app automatically detects tables inside each Excel file (using named ranges — see the Excel preparation section below).
 
 Each detected table appears as a **checkbox item** in the table list. Tables are checked by default. Uncheck any table you do not want to include in the comparison.
+
+**MR Socar-Cape sheet.** Each MR also gets a "Socar-Cape sheet" row at the end of its group. It is the MR's cover sheet, which has the same structure as the `CH-*`/`NCH-*` sheets but repeats the whole request, so it is **unticked by default**. Tick it when you need it — instead of, or together with, the `CH-*`/`NCH-*` sheets (using both counts every row twice). If an MR has no `CH-*`/`NCH-*` data, its row is highlighted amber as a hint; the decision is always yours. If a file has no readable cover sheet the row is shown greyed out. This applies to MR files only.
 
 Below the checklist is a **live preview** of the data that will be used (the combined rows from all checked tables). This updates automatically as you check or uncheck items.
 
@@ -97,6 +99,8 @@ Shows items present in MR but absent from CTR. The same column layout is used; C
 Shows items present in CTR but absent from MR. MR columns are empty (shown as blank blue cells).
 
 All tables are sortable — click any column header to sort.
+
+**Hiding columns.** Right-click a column header and choose **Hide column** to hide it from view (any result table). This is visual only — the downloaded Excel report always contains every column, and hidden columns reset when the table is reloaded (for example on a new Compare). To bring columns back, click the **Columns (n)** button in the toolbar above the tabs, or right-click a header and choose **Unhide columns…**, then tick the ones to show. The last visible column can't be hidden.
 
 ---
 

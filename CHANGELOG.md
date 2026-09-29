@@ -5,6 +5,16 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and version numbers come from the [VERSION](VERSION) file.
 
+## [1.0.15] - 2026-09-29
+### Added
+- MR vs CTR Comparator: every loaded MR now has a "Socar-Cape sheet" row at the end of its group in Step 2, so the MR's cover sheet — same table structure as the `CH-*`/`NCH-*` pages, but skipped until now — can be used when needed. It is unticked by default (nothing changes unless you tick it), can be used instead of or together with the `CH-*`/`NCH-*` sheets (both together count every row twice, and its tooltip says so), and is highlighted amber with "⚠ no CH/NCH sheets" when an MR has no `CH-*`/`NCH-*` data left — a hint only, the decision stays with the user. An MR without a readable cover sheet still shows the row, greyed out. `include_cover`/`is_cover_sheet` (`sheet_parser.py`); `ParseWorker`, `_fill_table_list` (`app.py`).
+- MR vs CTR Comparator: each file in Step 1 (MR and CTR) now has its own ✕ button that removes just that file — its list entry and every table it contributed — instead of only having Clear for the whole side. Also clears the link to an open preload, like Clear does. `_add_file_row`, `_remove_file` (`app.py`).
+- MR vs CTR Comparator: right-click any result table's column header (Matched, Only in MR, Only in CTR, Error Data, and the Step 2 previews) → "Hide column" to hide it. Purely visual: the data, the Excel report and saved comparisons keep every column, and hidden columns are not remembered — they reset whenever the table is reloaded. A "Columns (n)" button next to the toolbar (or "Unhide columns…" in the same right-click menu) opens a pop-up to choose which hidden columns to bring back. The last visible column can't be hidden. `_attach_column_hiding`, `_unhide_dialog` (`app.py`).
+
+### Changed
+- MR vs CTR Comparator: the toolbar buttons that used to sit in the result tabs' corner (↑/↓, Compare Values/Show Combined, Combined View, Show Document Names, Columns) moved to their own left-aligned row above the tabs, so the tab bar has the full width; the "Matched keys" / "Only in MR" / "Only in CTR" summary tiles are smaller. Compare Values reserves room for its longer "Show Combined" label so the buttons beside it don't shift when it swaps.
+- MR vs CTR Comparator: a table's ticked/unticked state in Step 2 now survives the list being rebuilt (e.g. after removing another table with its ✕) instead of every table being re-ticked. `_fill_table_list` (`app.py`).
+
 ## [1.0.14] - 2026-09-15
 ### Added
 - MR vs CTR Comparator: Combined View now shows "Description (MR)"/"Description (CTR)" columns right after Stock Code — previously only the detail/Matched view showed an item name, since Combined View's per-Stock-Code aggregation never carried Description through at all. `_aggregate_combined`/`_agg_side` now also pick the first non-blank Description found among each side's contributing rows (resolved against the raw pre-merge MR/CTR frames, the same way the existing Qty/Unit aggregation is), and the new columns appear on the Combined, Needs Review, and Error Data tables alike. A comparison saved before this existed still loads and shows blank in the new columns rather than failing. `_aggregate_combined`, `_agg_side`, `_refresh_combined_tables` (`app.py`).
