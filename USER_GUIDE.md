@@ -428,3 +428,87 @@ Output file names follow the pattern:
 When you fix a **Match By** value to get a ✓ match, the correction is remembered permanently in `ctr_tools/match_aliases.json`. Next time the same CTR Request description appears, the corrected search key is applied automatically.
 
 To view, delete, or export saved renames: click the **Manage Saved Renames…** button in the Manpower section header. You can also use **Import…** and **Export…** to share a renames file between machines.
+
+---
+
+---
+
+# CTR Tracker — User Guide
+
+---
+
+## What the CTR Tracker does
+
+The **CTR Tracker** tab writes a generated CTR's header fields and cost-breakdown totals into the master CTR Tracker workbook (the shared `.xlsm` file used to log every CTR). It reads the fields straight off a generated CTR file instead of you retyping them, lets you build up a batch of up to 10 CTRs and review/correct every field before anything is written, then writes the whole batch in one go.
+
+It does **not** create or reorder rows in the tracker on its normal path — each CTR is written into a row a human has already reserved for it by hand. The only exception is "Add as separate revision" when no spare row is available, which inserts one via Excel automation (see below).
+
+---
+
+## Required files
+
+| File | Purpose | Format |
+|---|---|---|
+| **CTR Tracker File** | The master tracker workbook — picked once and remembered across runs | `.xlsm` (or `.xlsx`) |
+| **CTR File** | A generated CTR output file (AZN or USD template) to read fields from | `.xlsx` |
+
+---
+
+## Step-by-step usage
+
+### 1. Select the tracker workbook
+
+In the **Tracker Workbook** group, browse to the CTR Tracker `.xlsm` file. This is remembered the next time you open the app.
+
+Two options live in this group:
+
+- **Save a timestamped backup copy before writing** — on by default. A row-insert (see "Add as separate revision" below) falls back to driving Excel directly via COM automation, which has no verification against real Excel behind it — the backup is the safety net against it corrupting the shared file.
+- **Overwrite rows that already have data** — off by default. When off, a matching row that already has any of Date/Description/Value/Currency/Revision filled in is skipped rather than touched. Turning it on reveals two further options (only meaningful once it's on):
+  - **Overwrite this row** (default) — replaces the existing row's data in place; its Revision and Comment columns are updated to this CTR's own revision.
+  - **Add as separate revision** — leaves the existing row untouched and writes this CTR into a spare pre-created row sharing the same CTR number, or, if none is available, inserts a new row directly below it via Excel automation (requires Excel installed on this machine).
+
+### 2. Add a CTR
+
+1. Browse to a **CTR File** (a generated AZN or USD output).
+2. Click **Load Fields From File** — this reads Client, CTR Number, Date, Revision, Description, Value, and Currency off the file.
+   - If the file has no cached computed total (e.g. it needs to be opened and saved in Excel first), a warning appears and Value must be entered by hand.
+3. **Location** auto-selects when the file's site text matches a configured site name, which also fills **Project Code** and the **Tracker Location** (Onshore / Offshore / Georgia) bucket. If it doesn't match, pick a Location by hand.
+   - Some clients (e.g. Turan Drilling, CDC) always use the same Project Code regardless of Location — picking such a client fills Project Code from the client instead, and picking a Location afterward won't override it.
+4. Every field is editable before adding to the batch.
+5. Select a **Job Type** — required, from a fixed list (Core Crew, Projects, FM, FM Process, FM Drilling, Drilling, TAR, TAR & Shutdown).
+6. Click **+ Add to Batch**. CTR Number, Location, and Job Type are required; the form then clears for the next CTR (nothing is assumed to carry over safely between CTRs).
+
+### 3. Review the batch
+
+The batch table (up to 10 CTRs) shows Client, CTR Number, Date, Location, Project Code, Job Type, Description, Value, Currency, and Revision for each queued entry. Click the **✕** on a row to remove it from the batch without writing it.
+
+### 4. Write to Tracker
+
+Click **Write Batch to Tracker…**. A confirmation dialog summarizes the backup and overwrite settings before anything is written. The write runs in the background (a raw-XML patch that touches only the target sheet — everything else in the `.xlsm`, including macros, is copied through untouched).
+
+Each CTR is matched to the existing tracker row whose CTR Number column already contains its base number (currency suffix stripped, so one contract's AZN and USD documents share one row reservation). A CTR is **skipped with a warning** instead of guessed at when:
+- no row with that CTR number exists and is still empty, or
+- the CTR's own Onshore/Offshore labor section doesn't match the selected Location.
+
+Skipped entries stay in the batch table so they're easy to fix and resubmit. Where available, cost-breakdown totals (Labor, Equipment, Consumables, Customs & Transportation, 3rd Party) are filled in from the CTR's own summary section.
+
+After writing, a summary lists what was written (with the row number) and what was skipped (with the reason), plus the backup file's name if one was made.
+
+### In-batch conflicts (two revisions of the same CTR)
+
+If a batch contains two entries for the same CTR number + currency (e.g. a CTR and a later revision of it, submitted together), only the first can be placed correctly in one pass — the second is skipped with a matchable reason, stays in the batch, and the app automatically counts down 3 seconds and retries it in a follow-up write (cancellable). By the second round the first entry is genuinely on disk and the conflict resolves correctly. A batch with more than two revisions of the same CTR + currency may need several such rounds.
+
+---
+
+## Common errors and fixes
+
+| Message | What it means | Fix |
+|---|---|---|
+| *"Choose the CTR Tracker workbook first."* | No tracker file selected | Browse to the tracker `.xlsm` in the Tracker Workbook group |
+| *"Choose a CTR file first."* | Load Fields clicked with no CTR File selected | Browse to a generated CTR output file |
+| *"Enter or load a CTR number first."* | CTR Number is blank when adding to the batch | Type it or use Load Fields From File |
+| *"Select a Location for this CTR."* | Location dropdown left on the placeholder | Pick a Location, or check that the file's site text matches a configured one |
+| *"Select a Job Type for this CTR."* | Job Type dropdown left on the placeholder | Pick one of the fixed Job Type options |
+| CTR skipped after writing, "no matching row" | No tracker row has that CTR number yet | Pre-create the row in the tracker by hand, then retry |
+| CTR skipped after writing, Location mismatch | The CTR's own Onshore/Offshore section doesn't match the selected Location | Confirm the correct Location for this CTR and resubmit |
+| Row insert requires Excel | "Add as separate revision" needed a new row and no spare one existed | Run this on a machine with a licensed Excel install, or pre-create a spare row by hand instead |
