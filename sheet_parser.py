@@ -41,6 +41,13 @@ from openpyxl.utils import column_index_from_string
 _SKIP_SHEETS: set = {"socar-cape"}  # admin/index sheet in MR workbooks, not comparison data
 
 
+def is_cover_sheet(sheet_name: str) -> bool:
+    """True for an MR's Socar-Cape cover sheet — same table structure as the
+    CH-*/NCH-* pages but repeats the whole request, so it's opt-in
+    (parse_workbook's include_cover) rather than parsed by default."""
+    return str(sheet_name).strip().lower() in _SKIP_SHEETS
+
+
 def _norm(v) -> str:
     if v is None:
         return ""
@@ -239,7 +246,7 @@ def _rows_to_df(rows: list, col_mapper, section: str) -> pd.DataFrame:
     return pd.DataFrame(data_rows) if data_rows else pd.DataFrame()
 
 
-def _parse_named_ranges(wb, display_name: str) -> list:
+def _parse_named_ranges(wb, display_name: str, include_cover: bool = False) -> list:
     """
     Extract tables from named ranges equip_start/equip_end and cons_start/cons_end.
     Returns list of result dicts compatible with parse_workbook output.
@@ -255,7 +262,7 @@ def _parse_named_ranges(wb, display_name: str) -> list:
         ranges = sheet_ranges.get(sheet_name)
         if not ranges:
             continue
-        if sheet_name.strip().lower() in _SKIP_SHEETS:
+        if is_cover_sheet(sheet_name) and not include_cover:
             continue
 
         ws = wb[sheet_name]
@@ -428,7 +435,7 @@ def _detect_format(file, sheet_name: str) -> str | None:
 # Public API
 # ---------------------------------------------------------------------------
 
-def parse_workbook(path, sheet_names=None, filename=None) -> list:
+def parse_workbook(path, sheet_names=None, filename=None, include_cover=False) -> list:
     """
     Parse one workbook and return all detected tables.
 
@@ -437,6 +444,8 @@ def parse_workbook(path, sheet_names=None, filename=None) -> list:
     path        : str, Path, or BytesIO
     sheet_names : list[str] or None  — if None, all non-admin sheets are tried
     filename    : str or None        — display name when path is BytesIO
+    include_cover : bool             — also parse the MR "Socar-Cape" cover sheet
+                    (skipped by default; the caller decides whether to use it)
 
     Returns
     -------
@@ -463,7 +472,7 @@ def parse_workbook(path, sheet_names=None, filename=None) -> list:
             read_only=True, data_only=True
         )
         visible_sheets = {s for s in wb.sheetnames if wb[s].sheet_state == "visible"}
-        results = _parse_named_ranges(wb, display_name)
+        results = _parse_named_ranges(wb, display_name, include_cover)
         wb.close()
         if results:
             return results
@@ -502,7 +511,8 @@ def parse_workbook(path, sheet_names=None, filename=None) -> list:
         all_sheets = [s for s in all_sheets if s in visible_sheets]
 
     if sheet_names is None:
-        sheet_names = [s for s in all_sheets if s.strip().lower() not in _SKIP_SHEETS]
+        sheet_names = [s for s in all_sheets
+                       if include_cover or not is_cover_sheet(s)]
 
     results = []
     for sn in sheet_names:

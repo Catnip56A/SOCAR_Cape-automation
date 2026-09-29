@@ -15,13 +15,13 @@ See [USER_GUIDE.md](USER_GUIDE.md) for full step-by-step usage of all three tool
 ### MR vs CTR Comparator
 - Upload multiple MR and/or CTR files at once
 - Automatic table detection via named ranges (`equip_start/end`, `cons_start/end`), with a keyword-based fallback when they're absent
-- Select which sheets to include per file using a checklist, with a live preview of the combined checked data
+- Select which sheets to include per file using a checklist, with a live preview of the combined checked data; an MR's Socar-Cape cover sheet is available as an opt-in toggle, and any loaded file can be removed individually with its ✕
 - Configurable join key (default Stock Code) and optional stock code filters, independently for each side
 - Comparison results across **Matched**, **Only in MR**, **Only in CTR**, **Needs Review**, and **Error Data** tabs
 - **Combined View** — aggregates matched rows to one line per Stock Code, summing Qty across every contributing document per side; Stock Codes whose rows disagree on Unit are held out for manual approval in Needs Review
 - **Compare Values** — highlights Qty/Unit mismatches (or, in Combined View, Stock Codes spanning more than one source document), with ↑/↓ navigation between them
 - Download a multi-sheet Excel report, and save/reload a full comparison later without the original files
-- Sortable result tables (click any column header)
+- Sortable result tables (click any column header); right-click a header to hide a column (visual only — the Excel report keeps every column)
 
 ### CTR Generator
 - Reads a CTR Request (Manpower, Plant & Equipment, Consumables, plus an Additional Info/Scaffold/Transport block) from a Combined DB workbook

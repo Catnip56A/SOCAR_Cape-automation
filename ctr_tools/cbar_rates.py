@@ -9,7 +9,7 @@ the same directory match_aliases.json / desc_renames.json / ctr_presets.json
 already live in.
 
 Not wired into the app yet — standalone for now, moved here (out of
-TEST_Files/) specifically so it isn't forgotten. The plan for v1.0.15 is to
+TEST_Files/) specifically so it isn't forgotten. The plan for a later release is to
 call fetch_and_save() on a periodic timer from inside the running app,
 rather than running this file directly.
 
