@@ -1,23 +1,41 @@
-# MR vs CTR Comparator — SOCAR Cape
+# SOCAR Cape Automation
 
-A desktop application for comparing **Material Requisition (MR)** and **Cost Time Resource (CTR)** Excel documents. Detects tables automatically using Excel named ranges — no manual row selection required.
+A PySide6 desktop application for the SOCAR Cape commercial team, combining three tools in one window:
+
+- **MR vs CTR Comparator** — compares **Material Requisition (MR)** and **Cost Time Resource (CTR)** Excel documents, detecting tables automatically via Excel named ranges (no manual row selection required).
+- **CTR Generator** — generates the AZN and USD CTR spreadsheets (plus PDF exports) from a CTR Request, matching manpower/equipment/consumables against pricebook and SAGE reference data.
+- **CTR Tracker** — writes a generated CTR's header fields and cost-breakdown totals into the master CTR tracker workbook, in batches, with revision-aware row placement.
+
+See [USER_GUIDE.md](USER_GUIDE.md) for full step-by-step usage of all three tools.
 
 ---
 
 ## Features
 
+### MR vs CTR Comparator
 - Upload multiple MR and/or CTR files at once
-- Automatic table detection via named ranges (`equip_start/end`, `cons_start/end`)
-- Select which sheets to include per file using a checklist
-- Side-by-side preview of MR and CTR data before comparing
-- Configurable join key and optional stock code filters
-- Comparison results:
-  - **Matched** — items found in both, with Description, Qty, Unit, Rechargeable, Allocation, Rate
-  - **Differences** — field-level mismatches with source document noted
-  - **Only in MR** — items not found in any CTR
-  - **Only in CTR** — items not found in any MR
-- Download a four-sheet Excel report (Matched / Differences / Only in MR / Only in CTR)
+- Automatic table detection via named ranges (`equip_start/end`, `cons_start/end`), with a keyword-based fallback when they're absent
+- Select which sheets to include per file using a checklist, with a live preview of the combined checked data
+- Configurable join key (default Stock Code) and optional stock code filters, independently for each side
+- Comparison results across **Matched**, **Only in MR**, **Only in CTR**, **Needs Review**, and **Error Data** tabs
+- **Combined View** — aggregates matched rows to one line per Stock Code, summing Qty across every contributing document per side; Stock Codes whose rows disagree on Unit are held out for manual approval in Needs Review
+- **Compare Values** — highlights Qty/Unit mismatches (or, in Combined View, Stock Codes spanning more than one source document), with ↑/↓ navigation between them
+- Download a multi-sheet Excel report, and save/reload a full comparison later without the original files
 - Sortable result tables (click any column header)
+
+### CTR Generator
+- Reads a CTR Request (Manpower, Plant & Equipment, Consumables, plus an Additional Info/Scaffold/Transport block) from a Combined DB workbook
+- Matches each line against the AZN Pricebook (manpower) and SAGE/equipment-names reference data (equipment, consumables), with on-screen review and correction before anything is written
+- Remembers manual corrections ("Saved Renames") so the same CTR Request description matches automatically next time
+- Fills the AZN and USD CTR templates with all rows, totals, and header fields, and exports each to PDF via LibreOffice
+- Presets for recurring project field combinations (client, location, scope, revision, job ref, output folder)
+
+### CTR Tracker
+- Reads a generated CTR's header fields and cost-breakdown totals straight off the file (client, CTR number, date, revision, description, value, currency, Location)
+- Batches up to 10 CTRs before writing, with a per-CTR editable review table
+- Writes each CTR into its pre-created row in the master tracker workbook, matched by CTR number and Location — rows are never created or shifted on the normal path
+- Revision handling: the same CTR + currency + revision overwrites its row in place; a different revision either reuses a spare row sharing that CTR number or, with "Add as separate revision", inserts a new one via Excel automation
+- Optional timestamped backup of the tracker workbook before every write
 
 ---
 
@@ -37,7 +55,7 @@ just run            # or: uv run python app.py
 
 ## Building the standalone .exe
 
-The `.exe` bundles Python, PySide6, pandas, and openpyxl — colleagues need nothing installed.
+The `.exe` bundles Python, PySide6, pandas, openpyxl, xlwings, and lxml — colleagues need nothing installed.
 
 > **Important:** the build must run on **Windows** (not WSL), since PyInstaller targets the OS it runs on.
 
@@ -46,27 +64,29 @@ The `.exe` bundles Python, PySide6, pandas, and openpyxl — colleagues need not
 The source code lives in WSL, but the build runs in a **Windows PowerShell** session that points at the WSL filesystem via `\\wsl$\<distro>`.
 
 1. **Find your WSL distro name** (run this in PowerShell):
+
    ```powershell
    wsl --list
    ```
-   The distro name shown (e.g. `Ubuntu-22.04`) is what you use in the path below.
 
+   The distro name shown (e.g. `Ubuntu-22.04`) is what you use in the path below.
 2. **Open PowerShell and navigate to the project**:
+
    ```powershell
    cd "\\wsl$\Ubuntu-22.04\home\alhiko56\projects\SOCAR_Cape-automation"
    ```
-
 3. **Install dependencies** (`uv` may not be on the Windows PATH — use plain pip instead):
+
    ```powershell
    pip install PySide6 pandas openpyxl pyinstaller
    ```
-
 4. **Build the exe**:
+
    ```powershell
    python -m PyInstaller app.spec
    ```
-   Note the capital `P` in `PyInstaller` — use `python -m PyInstaller` if `pyinstaller` is not found directly.
 
+   Note the capital `P` in `PyInstaller` — use `python -m PyInstaller` if `pyinstaller` is not found directly.
 5. **Collect the output** from `dist\MR_CTR_Comparator.exe` — copy it to wherever you want to distribute it.
 
 > **Tip:** if `\\wsl$\Ubuntu` gives a "path not found" error, run `wsl --list` to get the exact distro name (it is often `Ubuntu-22.04`, not just `Ubuntu`).
@@ -115,23 +135,36 @@ This is separate from the app's **data** folder (saved presets/renames), which a
 
 ```
 SOCAR_Cape-automation/
-├── app.py                  # PySide6 desktop application (main)
-├── sheet_parser.py         # Excel parsing logic (shared by both UIs)
+├── app.py                  # Main window: MR vs CTR Comparator tab + wiring for the other two
+├── sheet_parser.py         # Comparator's Excel parsing logic (named-range table detection)
+├── comparison_history.py   # Save/reload full comparisons
+├── app_logging.py          # Rotating app.log / crash.log setup
+├── ctr_tools/               # CTR Generator + CTR Tracker
+│   ├── window.py            # CTR Generator tab
+│   ├── builder_azn.py       # AZN CTR spreadsheet writer
+│   ├── builder_usd.py       # USD CTR spreadsheet writer
+│   ├── parser.py            # CTR Request / Combined DB parsing
+│   ├── pdf_exporter.py      # LibreOffice-based xlsx → PDF export
+│   ├── config.py            # Loads template_config.json
+│   ├── tracker_window.py    # CTR Tracker tab
+│   ├── tracker.py           # CTR Tracker data model + CTR-file field extraction
+│   ├── tracker_fast.py      # Raw-XML write path (normal case)
+│   ├── tracker_xlwings.py   # Excel-COM write path (row-insert fallback, Windows + Excel only)
+│   └── aliases.py / desc_renames.py / presets.py   # Persisted user corrections/presets
 ├── pyproject.toml          # Dependencies and project metadata
 ├── justfile                # Task runner (run / build / setup / clean)
 ├── app.spec                # PyInstaller build spec
-├── .gitignore              # Excludes .xlsx/.xlsm and env/
-└── legacy_streamlit.py     # LEGACY — browser UI kept for reference only
+└── .gitignore              # Excludes .xlsx/.xlsm and env/
 ```
 
 ---
 
-## Named range conventions
+## Named range conventions (MR vs CTR Comparator)
 
-The parser expects the following named ranges defined in the Excel workbook:
+The Comparator's parser expects the following named ranges defined in the Excel workbook. The CTR Generator parses its CTR Request/Combined DB inputs differently — by fixed sheet names and column positions — see `USER_GUIDE.md`'s CTR Generator section for that format.
 
-| Range name    | Document | Table                  |
-|---------------|----------|------------------------|
+| Range name      | Document | Table                   |
+| --------------- | -------- | ----------------------- |
 | `equip_start` | CTR      | Plant & Equipment start |
 | `equip_end`   | CTR      | Plant & Equipment end   |
 | `cons_start`  | CTR / MR | Consumables start       |

@@ -1,91 +1,84 @@
-# Handoff — 2026-09-15
+# Handoff — 2026-09-29
 
 ## Working on
-v1.0.14 — MR vs CTR Comparator's Combined View, two related changes: (1) show
-the item name/Description next to Stock Code (previously only the
-detail/Matched view did this — Combined View's aggregation never carried
-Description through at all), and (2) replace "Compare Values" with "Show
-Combined" while Combined View is active — it now highlights every Stock Code
-drawn from more than one MR/CTR source document (not just ones with
-mismatched totals) and wires the ↑/↓ arrows to navigate between them, fixing
-row navigation that was previously dead in Combined View. Normal (detail)
-view's "Compare Values" is unchanged. Everything lives in root-level `app.py`
-— the comparator is a separate subsystem from `ctr_tools/` (the CTR
-Generator/Tracker), despite `CLAUDE.md`'s header only mentioning `ctr_tools/`.
-VERSION bumped 1.0.13 → 1.0.14, CHANGELOG.md updated. Nothing committed yet.
+Two small, unrelated threads:
+1. Cleaning up a dead `tests/` directory.
+2. Prep work for the still-unstarted Word-automation feature (per-company
+   CTR-to-Word generation) — confirmed the library choice from last
+   session and installed the packages.
 
 ## Key decisions (with reasoning)
-- User explicitly chose "highlight ALL stock codes spanning multiple
-  documents" over "only mismatched ones" — Show Combined is a
-  document-provenance indicator, not a value-diff tool. Don't reintroduce
-  diff-based filtering there without re-confirming.
-- User explicitly chose to swap the button's label/behavior *only* while
-  Combined View is active, not globally — so "Compare Values" and "Show
-  Combined" are the same `QPushButton`/checked-state (`_compare_vals_btn`),
-  with `_set_compare_vals_mode(combined: bool)` (called from
-  `_apply_combined_view`) swapping text/tooltip/colour/nav-tooltips. The
-  detail-view Qty/Unit/Rate mismatch logic inside `_apply_value_highlights`
-  was deliberately left untouched.
-- The old green/red Diff-column highlighting in Combined View was removed
-  outright (not kept behind another toggle) — the user's request described
-  replacing that behavior, not adding alongside it. The Diff column itself
-  is still computed and shown, just no longer auto-highlighted.
-- While implementing, found and fixed a latent bug in `_nav_mismatch`: it
-  always read the Stock Code for the status bar from `self._display_df`
-  regardless of which table was on screen. Harmless before (Combined View
-  never populated `_mismatch_rows`), but would have shown the wrong Stock
-  Code once Show Combined started using the same nav mechanism — fixed by
-  reading from whichever table is actually active.
-- Deleted the now-dead `"positive"`/`"negative"` highlight kinds and
-  `_POSITIVE_BG`/`_POSITIVE_FG` constants left over after removing the
-  diff-coloring, rather than leaving unused code in place.
+- **Deleted `tests/` entirely.** It contained only stale `.pyc` files
+  (`__init__`, `fixtures`, `harness`, `invariants`, `run`, `snapshot`,
+  `test_ctr_output`) — the `.py` sources were already gone, and an empty
+  `tests/golden/`. Decompiled the bytecode (strings/docstrings) to
+  understand what it *was*: a well-built output-regression suite —
+  pinned fixtures, invariant checks (nothing below print area, no data on
+  hidden rows), structural JSON snapshots of generated `.xlsx` files,
+  diffed against goldens. Confirmed before deleting that it was genuinely
+  dead, not just temporarily broken: not imported by `ctr_tools/`
+  anywhere, no `just test`/`test-update` recipe in the `justfile` (despite
+  the deleted `run.py`'s own docstring referencing one), no CI workflow,
+  no `pytest`/test deps in `pyproject.toml`. It had apparently been built
+  once and never wired into the actual workflow before its source was
+  deleted outside of git (it was untracked, so there's no commit to
+  recover it from either). User confirmed the deletion explicitly.
+- **Word automation: confirmed python-docx + docxtpl, packages now
+  installed.** This decision itself was made *last* session (see prior
+  reasoning: pywin32 needs a licensed Word install this Linux/WSL machine
+  can't provide, would add an Office-runtime requirement to every
+  end-user's machine, doesn't fit the template-file-plus-code pattern
+  already used on the Excel side). This session, the user said they
+  "asked around" and confirmed going with that combination — added
+  `python-docx>=1.1` and `docxtpl>=0.19` to `pyproject.toml`'s main
+  `dependencies` (not the `dev` group — these are runtime deps once the
+  feature ships, same tier as `openpyxl`/`xlwings`), then `uv sync`.
+  Verified both import cleanly (`python-docx` 1.2.0, `docxtpl` 0.20.2).
+- **Word automation stays unstarted beyond that.** User confirmed no real
+  company Word template exists yet ("we will have it soon... let's
+  wait"). The blocking prerequisite carried over from last session is
+  unchanged: get one real template and check it for macros/VBA or
+  data-bound Content Controls (SDTs) — either would force pywin32 instead
+  and invalidate this session's package choice. No template code written,
+  no template inspected.
 
 ## Current state
-- `app.py` changes are implemented and verified headlessly (offscreen Qt,
-  synthetic MR/CTR data with multi-document stock codes, persistence paths
-  sandboxed to a temp dir per `CLAUDE.md`'s Testing Safety rule — no real
-  alias/preset/rename files or `TEST_Files/**/Output/` were touched). All
-  assertions passed: Description columns present in Combined/Needs
-  Review/Error Data tables, multi-doc rows correctly highlighted and
-  navigable, single-doc rows correctly excluded, button text/tooltip/colour
-  swap correctly with the Combined View toggle, detail-view Compare Values
-  unaffected.
-- **Not yet visually verified in the real app** — this is a Windows-only
-  PySide6 desktop app and this session ran on Linux/WSL, so only underlying
-  logic/widget state was checked, not actual rendering (colours, column
-  widths, layout).
-- CHANGELOG.md has a new `## [1.0.14] - 2026-09-15` entry; VERSION is `1.0.14`
-  (no trailing newline, matching the file's existing format).
-- Nothing committed. `git status` currently shows `app.py`, `CHANGELOG.md`,
-  `VERSION` modified, plus this handoff file and one unexplained file (next
-  section).
+- `tests/` no longer exists (was untracked, so `git status` shows no
+  change from the deletion).
+- `pyproject.toml` and `uv.lock` are modified but **not committed** —
+  `python-docx`/`docxtpl` added to `dependencies`. The `uv sync` run also
+  dropped a batch of already-obsolete streamlit-related lock entries
+  (`streamlit`, `pyarrow`, `pydeck`, etc.) — this matches the "removed
+  streamlit legacy stuff" work already committed in `d9804e8`, i.e. the
+  lock file was just catching up to `pyproject.toml`, not a side effect
+  of today's change.
+- `ctr_tools/cbar_rates.py` is still untracked, unchanged from last
+  session — not touched today.
 
 ## Open questions
-- `uv.lock` has an unexplained diff (921 lines removed — `altair`, `anyio`,
-  and other packages dropped) with an on-disk mtime during this session's
-  work window. I did not knowingly run `uv lock`/`uv sync`, and the cause
-  wasn't identified before this handoff was written. Left as-is —
-  uncommitted and un-reverted. Before committing the v1.0.14 changes, this
-  needs the user's own call: review whether the `uv.lock` change is
-  intentional/fine (e.g. a stale lock finally resolving) or should be reset
-  with `git checkout -- uv.lock` first, so it doesn't get bundled into an
-  unrelated commit.
-- Whether the new orange "combined" highlight colour and the added
-  Description column widths actually look right in the real Windows app
-  (per `CLAUDE.md`'s output-verification rule) — still pending a relayed
-  Windows check.
+- Word automation: still waiting on a real per-company template before
+  any code gets written. When it arrives, check macros/VBA and SDTs
+  first; only then decide data-source shape (parsed straight from CTR
+  requests vs. a separate structured input) and whether "several
+  companies, each with its own fixed style" means one template file per
+  company or one template with per-company conditional sections — neither
+  was decided, just raised.
+- Unrelated, still open from before: AZN CTR's `Estimated CTR Total`
+  formula still omits Contingency (same bug class as the fixed USD one) —
+  user was asked, hasn't said yes.
+- `ctr_tools/cbar_rates.py` still has no caller — wiring it into
+  `window.py` is still undecided future v1.0.15 work.
 
 ## Files changed
-- `app.py` — Combined View Description columns, Show Combined button
-  behavior, `_nav_mismatch` active-table fix, dead highlight-kind cleanup.
-  Full detail in CHANGELOG.md's 1.0.14 entry.
-- `CHANGELOG.md` — new 1.0.14 entry.
-- `VERSION` — `1.0.13` → `1.0.14`.
+- `tests/` — deleted (untracked, so no diff to commit).
+- `pyproject.toml`, `uv.lock` — modified, not committed
+  (python-docx/docxtpl added).
 
 ## Next step
-Nothing pending unless the user wants to commit. Before that: resolve the
-`uv.lock` question above, then confirm whether to stage/commit
-`app.py` + `CHANGELOG.md` + `VERSION` together. A real-app spot-check of the
-new Combined View colours/columns (via a relayed Windows session) is also
-still open, per this repo's output-verification rule for UI/formatting
-changes.
+Nothing blocking. When the user has a company Word template:
+- Inspect it for macros/VBA and data-bound Content Controls before
+  writing any generation code — either would overturn this session's
+  library choice.
+- Separately, whenever convenient: commit the `pyproject.toml`/`uv.lock`
+  change and the still-untracked `ctr_tools/cbar_rates.py` (neither was
+  committed automatically since committing wasn't asked for).
