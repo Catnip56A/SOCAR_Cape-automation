@@ -31,8 +31,8 @@ from datetime import date as _date
 
 from PySide6.QtCore import QSettings, QThread, QTimer, Qt, Signal
 from PySide6.QtWidgets import (
-    QButtonGroup, QCheckBox, QComboBox, QGroupBox, QHBoxLayout, QLabel,
-    QLineEdit, QMessageBox, QProgressDialog, QPushButton, QRadioButton,
+    QCheckBox, QComboBox, QGroupBox, QHBoxLayout, QLabel,
+    QLineEdit, QMessageBox, QProgressDialog, QPushButton,
     QScrollArea, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
@@ -72,26 +72,22 @@ class _WriteWorker(QThread):
     workbook through openpyxl — ~3s instead of ~11s on the real tracker
     file, and it also stops openpyxl's data-validation/drawing/print-
     settings/calc-chain stripping on every save."""
-    finished_ok = Signal(list, list, object)   # written[(idx, ctr_number, row)], skipped[(idx, ctr_number, reason)], backup_path | None
+    finished_ok = Signal(list, list, object, list)   # written[(idx, ctr_number, row)], skipped[(idx, ctr_number, reason)], backup_path | None, notes[str]
     error       = Signal(str)
 
     def __init__(self, tracker_path: str, entries: list[CTREntry], make_backup: bool,
-                 allow_overwrite: bool, revision_mode: str, parent=None):
+                 parent=None):
         super().__init__(parent)
         self._tracker_path = tracker_path
         self._entries = entries
         self._make_backup = make_backup
-        self._allow_overwrite = allow_overwrite
-        self._revision_mode = revision_mode
 
     def run(self):
         try:
-            written, skipped, backup_path = write_entries_fast(
-                self._tracker_path, self._entries,
-                make_backup=self._make_backup, allow_overwrite=self._allow_overwrite,
-                revision_mode=self._revision_mode,
+            written, skipped, backup_path, notes = write_entries_fast(
+                self._tracker_path, self._entries, make_backup=self._make_backup,
             )
-            self.finished_ok.emit(written, skipped, backup_path)
+            self.finished_ok.emit(written, skipped, backup_path, notes)
         except Exception as exc:
             log.exception("CTR Tracker write failed")
             self.error.emit(str(exc))
@@ -183,62 +179,7 @@ class CTRTrackerWidget(QWidget):
         self._backup_check.setStyleSheet("font-size: 11px;")
         gl.addWidget(self._backup_check)
 
-        self._overwrite_check = QCheckBox(
-            "Overwrite rows that already have data (Date/Description/Value/Currency/Revision)"
-        )
-        self._overwrite_check.setChecked(False)
-        self._overwrite_check.setToolTip(
-            "Off (default): a matching row with any of those fields already filled in is "
-            "skipped, not overwritten.\n"
-            "On: the first matching row is used regardless of its current contents — "
-            "existing data in it will be replaced with no undo besides the backup above."
-        )
-        self._overwrite_check.setStyleSheet("font-size: 11px; color: #C62828;")
-        self._overwrite_check.toggled.connect(self._on_overwrite_toggled)
-        gl.addWidget(self._overwrite_check)
-
-        # Only meaningful once Overwrite is on — how to handle a CTR whose
-        # matching row already has data in it.
-        revision_row = QHBoxLayout()
-        revision_row.setContentsMargins(20, 0, 0, 0)   # indented under the checkbox above
-        revision_row.setSpacing(10)
-        self._revision_group = QButtonGroup(self)
-        self._overwrite_revision_radio = QRadioButton("Overwrite this row")
-        self._overwrite_revision_radio.setToolTip(
-            "Replace the existing row's data in place. Its Revision "
-            "column (AI) and Comment (Y) are updated to this CTR's own "
-            "revision number."
-        )
-        self._separate_revision_radio = QRadioButton("Add as separate revision")
-        self._separate_revision_radio.setToolTip(
-            "Leave the existing row untouched and write this CTR into a "
-            "spare pre-created row sharing the same CTR number, if one is "
-            "available. If none is available, a new row is inserted "
-            "directly below the existing one (via Excel automation — "
-            "requires Excel installed; see tracker_xlwings.py). Either "
-            "way, this CTR's own revision number is written to both the "
-            "Revision column (AI) and Comment (Y)."
-        )
-        self._overwrite_revision_radio.setChecked(True)
-        self._revision_group.addButton(self._overwrite_revision_radio)
-        self._revision_group.addButton(self._separate_revision_radio)
-        for rb in (self._overwrite_revision_radio, self._separate_revision_radio):
-            rb.setStyleSheet("font-size: 11px;")
-            rb.setEnabled(False)
-            revision_row.addWidget(rb)
-        revision_row.addStretch()
-        gl.addLayout(revision_row)
-
         parent_layout.addWidget(grp)
-
-    def _on_overwrite_toggled(self, checked: bool):
-        self._overwrite_revision_radio.setEnabled(checked)
-        self._separate_revision_radio.setEnabled(checked)
-
-    def _revision_mode(self) -> str:
-        """'separate' or 'overwrite' — only meaningful when the Overwrite
-        checkbox is on; write_entries_fast ignores it otherwise."""
-        return "separate" if self._separate_revision_radio.isChecked() else "overwrite"
 
     def _build_add_section(self, parent_layout: QVBoxLayout):
         grp = QGroupBox("Add a CTR")
@@ -574,8 +515,6 @@ class CTRTrackerWidget(QWidget):
 
         n = len(self._batch)
         make_backup = self._backup_check.isChecked()
-        allow_overwrite = self._overwrite_check.isChecked()
-        revision_mode = self._revision_mode()
 
         if not skip_confirm:
             backup_note = (
@@ -583,20 +522,12 @@ class CTRTrackerWidget(QWidget):
                 if make_backup else
                 "No backup copy will be made (enable the checkbox above to save one)."
             )
-            if not allow_overwrite:
-                overwrite_note = ""
-            elif revision_mode == "overwrite":
-                overwrite_note = (
-                    "\n\n⚠ Overwrite mode is ON — a matching row's existing data will be "
-                    "replaced, its Revision and Comment updated."
-                )
-            else:
-                overwrite_note = (
-                    "\n\n⚠ Overwrite mode is ON, \"Add as separate revision\" selected — a "
-                    "matching row that already has data will be left alone, and this CTR "
-                    "written into a spare row or a newly inserted one instead. A row insert "
-                    "requires Excel to be installed on this machine."
-                )
+            overwrite_note = (
+                "\n\nA CTR whose revision is already in the tracker is updated in place; a "
+                "new revision gets its own row in revision order (a spare row is used only "
+                "if it keeps that order, otherwise a row is inserted — this needs Excel "
+                "installed on this machine)."
+            )
             reply = QMessageBox.question(
                 self, "Write to Tracker",
                 f"Write {n} CTR{'s' if n != 1 else ''} to:\n{tracker_path}\n\n{backup_note}"
@@ -619,12 +550,11 @@ class CTRTrackerWidget(QWidget):
         self._add_batch_btn.setEnabled(False)
 
         worker = _WriteWorker(
-            tracker_path, list(self._batch), make_backup, allow_overwrite,
-            revision_mode, parent=self,
+            tracker_path, list(self._batch), make_backup, parent=self,
         )
         self._workers.append(worker)
 
-        def _done(written: list, skipped: list, backup_path):
+        def _done(written: list, skipped: list, backup_path, notes: list):
             dlg.close()
             self._workers.remove(worker)
 
@@ -637,6 +567,11 @@ class CTRTrackerWidget(QWidget):
                 lines.append("Skipped (still in the batch — fix and retry):")
                 for _idx, ctr_number, reason in skipped:
                     lines.append(f"  • {ctr_number}: {reason}")
+            if notes:
+                lines.append("")
+                lines.append("Spare rows left blank (revision order):")
+                for note in notes:
+                    lines.append(f"  • {note}")
             if backup_path is not None:
                 lines.append("")
                 lines.append(f"Backup saved to:\n{backup_path.name}")
@@ -728,8 +663,6 @@ class CTRTrackerWidget(QWidget):
         if val:
             self._tracker_edit.setText(val)
         self._backup_check.setChecked(s.value("ctr_tracker/make_backup", True, type=bool))
-        # Overwrite mode is deliberately NOT remembered across restarts — it should
-        # always come up off, so it can never be silently left on from a prior session.
         self._refresh_batch_state()
 
     def save_settings(self) -> None:

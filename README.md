@@ -34,7 +34,7 @@ See [USER_GUIDE.md](USER_GUIDE.md) for full step-by-step usage of all three tool
 - Reads a generated CTR's header fields and cost-breakdown totals straight off the file (client, CTR number, date, revision, description, value, currency, Location)
 - Batches up to 10 CTRs before writing, with a per-CTR editable review table
 - Writes each CTR into its pre-created row in the master tracker workbook, matched by CTR number and Location — rows are never created or shifted on the normal path
-- Revision handling: the same CTR + currency + revision overwrites its row in place; a different revision either reuses a spare row sharing that CTR number or, with "Add as separate revision", inserts a new one via Excel automation
+- Revision handling: the same CTR + currency + revision overwrites its row in place; a different revision gets its own row in ascending revision order — a spare row sharing that CTR number if it keeps that order, otherwise a new one inserted via Excel automation
 - Optional timestamped backup of the tracker workbook before every write
 
 ---

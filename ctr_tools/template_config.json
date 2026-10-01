@@ -173,7 +173,7 @@
     ],
     "col_value_usd":     "AJ",
     "value_usd_formula": "IF(AC{row}=\"USD\", S{row}, IF(AC{row}=\"AZN\", S{row}/{rate}, \"\"))",
-    "value_style_by_currency": {"AZN": 72, "USD": 159},
+    "value_format_by_currency": {"AZN": "#,##0.00\\ [$₼-42C]", "USD": "\"$\"#,##0.00"},
     "col_labor":                "AM",
     "col_equipment":            "AN",
     "col_third_party":          "AV",
