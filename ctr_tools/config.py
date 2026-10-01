@@ -295,9 +295,11 @@ _DEFAULTS: dict = {
         "value_usd_formula": 'IF(AC{row}="USD", S{row}, IF(AC{row}="AZN", S{row}/{rate}, ""))',
         # Column S's number format shows the currency's own symbol instead
         # of tracking whatever style the placeholder row happened to have.
-        # Style ids come from this tracker's own styles.xml — AZN uses
-        # "#,##0.00 [$₼-42C]" (id 72), USD uses "$#,##0.00" (id 159).
-        "value_style_by_currency": {"AZN": 72, "USD": 159},
+        # Number format each currency's Value cell must display. The style
+        # id is looked up in the tracker's own styles.xml at write time —
+        # ids are positions in that table and shift, so they can't be fixed
+        # here (a hard-coded USD id once pointed at a date format).
+        "value_format_by_currency": {"AZN": "#,##0.00\\ [$₼-42C]", "USD": "\"$\"#,##0.00"},
 
         # Cost-breakdown columns (AL:AX in the tracker header). Populated
         # best-effort from whatever totals a CTR's own summary section has

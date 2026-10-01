@@ -445,7 +445,7 @@ To view, delete, or export saved renames: click the **Manage Saved Renames…** 
 
 The **CTR Tracker** tab writes a generated CTR's header fields and cost-breakdown totals into the master CTR Tracker workbook (the shared `.xlsm` file used to log every CTR). It reads the fields straight off a generated CTR file instead of you retyping them, lets you build up a batch of up to 10 CTRs and review/correct every field before anything is written, then writes the whole batch in one go.
 
-It does **not** create or reorder rows in the tracker on its normal path — each CTR is written into a row a human has already reserved for it by hand. The only exception is "Add as separate revision" when no spare row is available, which inserts one via Excel automation (see below).
+It does **not** create or reorder rows in the tracker on its normal path — each CTR is written into a row a human has already reserved for it by hand. The only exception is a new revision with no spare row available (or whose spare would break revision order), which inserts a row via Excel automation (see below).
 
 ---
 
@@ -464,12 +464,13 @@ It does **not** create or reorder rows in the tracker on its normal path — eac
 
 In the **Tracker Workbook** group, browse to the CTR Tracker `.xlsm` file. This is remembered the next time you open the app.
 
-Two options live in this group:
+One option lives in this group:
 
-- **Save a timestamped backup copy before writing** — on by default. A row-insert (see "Add as separate revision" below) falls back to driving Excel directly via COM automation, which has no verification against real Excel behind it — the backup is the safety net against it corrupting the shared file.
-- **Overwrite rows that already have data** — off by default. When off, a matching row that already has any of Date/Description/Value/Currency/Revision filled in is skipped rather than touched. Turning it on reveals two further options (only meaningful once it's on):
-  - **Overwrite this row** (default) — replaces the existing row's data in place; its Revision and Comment columns are updated to this CTR's own revision.
-  - **Add as separate revision** — leaves the existing row untouched and writes this CTR into a spare pre-created row sharing the same CTR number, or, if none is available, inserts a new row directly below it via Excel automation (requires Excel installed on this machine).
+- **Save a timestamped backup copy before writing** — on by default. A row-insert (see the revision rules below) falls back to driving Excel directly via COM automation, which has no verification against real Excel behind it — the backup is the safety net against it corrupting the shared file.
+Every write behaves the same way — there is no overwrite option to choose:
+
+- A CTR whose number, currency and revision already exist in the tracker updates that row in place.
+- A different revision is written to its own row, in ascending revision order (negative, then blank, then 0 and up). A blank spare row is used only if it keeps that order; otherwise a row is inserted at the right place via Excel automation (requires Excel installed on this machine) and the spare is left blank. The results dialog lists any spare row left blank this way.
 
 ### 2. Add a CTR
 
@@ -496,7 +497,9 @@ Each CTR is matched to the existing tracker row whose CTR Number column already 
 
 Skipped entries stay in the batch table so they're easy to fix and resubmit. Where available, cost-breakdown totals (Labor, Equipment, Consumables, Customs & Transportation, 3rd Party) are filled in from the CTR's own summary section.
 
-After writing, a summary lists what was written (with the row number) and what was skipped (with the reason), plus the backup file's name if one was made.
+After writing, a summary lists what was written (with the row number) and what was skipped (with the reason), any spare rows left blank to keep revision order, plus the backup file's name if one was made.
+
+**Formula cells look empty after writing?** The written formulas (USD equivalent, labor, totals) carry no stored result, and Excel doesn't always recalculate them when the file opens. In Excel, press **Ctrl+Alt+Shift+F9** — it recalculates every formula in the workbook — instead of refreshing each cell with F2 + Enter. Plain F9 won't work, since it only recalculates cells Excel already thinks are out of date.
 
 ### In-batch conflicts (two revisions of the same CTR)
 
@@ -515,4 +518,5 @@ If a batch contains two entries for the same CTR number + currency (e.g. a CTR a
 | *"Select a Job Type for this CTR."* | Job Type dropdown left on the placeholder | Pick one of the fixed Job Type options |
 | CTR skipped after writing, "no matching row" | No tracker row has that CTR number yet | Pre-create the row in the tracker by hand, then retry |
 | CTR skipped after writing, Location mismatch | The CTR's own Onshore/Offshore section doesn't match the selected Location | Confirm the correct Location for this CTR and resubmit |
-| Row insert requires Excel | "Add as separate revision" needed a new row and no spare one existed | Run this on a machine with a licensed Excel install, or pre-create a spare row by hand instead |
+| Row insert requires Excel | A new revision needed a row inserted (no spare, or the spare would break revision order) | Run this on a machine with a licensed Excel install, or pre-create a spare row by hand instead |
+| Formula cells (e.g. USD equivalent, totals) empty after writing, formula visible in the cell | The writer stores formulas without a calculated result and Excel hasn't recalculated them yet | In Excel press **Ctrl+Alt+Shift+F9** to recalculate the whole workbook |

@@ -15,8 +15,9 @@ version appended to the first blank row at the end of the sheet; that was
 replaced because CTR numbers need to land next to the row a human already
 reserved for them.
 
-The one exception is "add as separate revision" (revision_mode) with no
-spare pre-created row available for that CTR number: a real row does get
+The one exception is a separate revision (revision_mode, always "separate"
+from the tracker window) with no spare pre-created row available for that
+CTR number, or whose only spare would break ascending revision order: a real row does get
 inserted there, but not by this module — see tracker_xlwings.py, which
 drives actual Excel to do it (so formula/range references shift exactly
 as they would if a person inserted the row by hand) and always runs
@@ -110,6 +111,43 @@ def _col_default_styles(sheet_root) -> dict[int, str]:
         for i in range(cmin, cmax + 1):
             result[i] = style
     return result
+
+
+def _style_with_number_format(
+    styles_root, current_style: str, format_code: str,
+) -> str | None:
+    """The cellXfs index of the style that looks exactly like current_style
+    (same fill, border, font, alignment) but displays numbers with
+    format_code — or None if this workbook has no such style.
+
+    Style ids are positions in a workbook's own style table and shift
+    whenever Excel adds or reorders styles, so they can't be hard-coded
+    per currency: a fixed id once pointed at a date format in the real
+    tracker and USD values showed up as dates."""
+    fmt_id = next(
+        (n.get("numFmtId") for n in styles_root.findall(f"{_M}numFmts/{_M}numFmt")
+         if n.get("formatCode") == format_code),
+        None,
+    )
+    if fmt_id is None:
+        return None
+    xfs = styles_root.findall(f"{_M}cellXfs/{_M}xf")
+    try:
+        base = xfs[int(current_style)]
+    except (ValueError, IndexError):
+        return None
+
+    def _shape(xf) -> tuple:
+        attrs = {k: v for k, v in xf.attrib.items() if k not in ("numFmtId", "applyNumberFormat")}
+        return (tuple(sorted(attrs.items())), tuple(etree.tostring(c) for c in xf))
+
+    if base.get("numFmtId") == fmt_id:
+        return str(current_style)
+    base_shape = _shape(base)
+    for i, xf in enumerate(xfs):
+        if xf.get("numFmtId") == fmt_id and _shape(xf) == base_shape:
+            return str(i)
+    return None
 
 
 def _get_or_create_cell(row_elem, cells: dict, row_num: int, col_letter: str,
@@ -526,6 +564,46 @@ def _revision_sort_key(revision_text: str) -> tuple[int, float]:
     return (0, value) if value < 0 else (2, value)   # negative, or zero-and-up
 
 
+def _filled_revision_rows(
+    row_by_num: dict[int, "etree._Element"],
+    shared_strings: list[str],
+    cfg: dict,
+    base_ctr_number: str,
+    currency: str,
+    used_rows: set[int],
+) -> list[tuple[tuple, int, str]]:
+    """Every *filled* row for this exact (CTR number, currency), as
+    (revision_sort_key, row_num, revision_text), sorted by revision.
+    Rows reserved for the other currency and still-blank spares are left
+    out — neither has a revision to order against."""
+    d_col   = cfg["col_ctr_number"]
+    cur_col = cfg["col_currency"]
+    rev_col = cfg["col_revision"]
+    check_cols = [cfg["col_date"], cfg["col_description"], cfg["col_value"]]
+
+    filled: list[tuple[tuple, int, str]] = []
+    for row_num in sorted(row_by_num):
+        if row_num in used_rows:
+            continue
+        row_elem = row_by_num[row_num]
+        d_cell = next((c for c in row_elem if c.get("r") == f"{d_col}{row_num}"), None)
+        if d_cell is None or _cell_text(d_cell, shared_strings).strip() != base_ctr_number:
+            continue
+        cells = {c.get("r"): c for c in row_elem.findall(f"{_M}c")}
+        cur_cell = cells.get(f"{cur_col}{row_num}")
+        cur_text = _cell_text(cur_cell, shared_strings).strip() if cur_cell is not None else ""
+        if cur_text and currency and cur_text.upper() != currency.strip().upper():
+            continue
+        if all(_cell_is_empty(cells.get(f"{col}{row_num}")) for col in check_cols):
+            continue   # not filled — irrelevant to revision ordering
+        rev_cell = cells.get(f"{rev_col}{row_num}")
+        rev_text = _cell_text(rev_cell, shared_strings).strip() if rev_cell is not None else ""
+        filled.append((_revision_sort_key(rev_text), row_num, rev_text))
+
+    filled.sort(key=lambda t: t[0])
+    return filled
+
+
 def _insertion_row_for_revision(
     row_by_num: dict[int, "etree._Element"],
     shared_strings: list[str],
@@ -545,39 +623,43 @@ def _insertion_row_for_revision(
     whatever comes before. If new_revision is higher than every existing
     one (the common case — always adding the latest), that's simply one
     past the last existing revision row."""
-    d_col   = cfg["col_ctr_number"]
-    cur_col = cfg["col_currency"]
-    rev_col = cfg["col_revision"]
-    check_cols = [cfg["col_date"], cfg["col_description"], cfg["col_value"]]
-
-    filled: list[tuple[tuple, int]] = []   # (revision_sort_key, row_num)
-    for row_num in sorted(row_by_num):
-        if row_num in used_rows:
-            continue
-        row_elem = row_by_num[row_num]
-        d_cell = next((c for c in row_elem if c.get("r") == f"{d_col}{row_num}"), None)
-        if d_cell is None or _cell_text(d_cell, shared_strings).strip() != base_ctr_number:
-            continue
-        cells = {c.get("r"): c for c in row_elem.findall(f"{_M}c")}
-        cur_cell = cells.get(f"{cur_col}{row_num}")
-        cur_text = _cell_text(cur_cell, shared_strings).strip() if cur_cell is not None else ""
-        if cur_text and currency and cur_text.upper() != currency.strip().upper():
-            continue
-        if all(_cell_is_empty(cells.get(f"{col}{row_num}")) for col in check_cols):
-            continue   # not filled — irrelevant to revision ordering
-        rev_cell = cells.get(f"{rev_col}{row_num}")
-        rev_text = _cell_text(rev_cell, shared_strings).strip() if rev_cell is not None else ""
-        filled.append((_revision_sort_key(rev_text), row_num))
-
-    filled.sort(key=lambda t: t[0])
+    filled = _filled_revision_rows(
+        row_by_num, shared_strings, cfg, base_ctr_number, currency, used_rows,
+    )
     new_key = _revision_sort_key(new_revision)
-    for key, row_num in filled:
+    for key, row_num, _text in filled:
         if key > new_key:
             return row_num
     # Higher than every existing revision (or there were none found here,
     # which shouldn't happen given the caller only calls this once it
     # already knows a filled row exists) — land right after the last one.
     return (filled[-1][1] + 1) if filled else None
+
+
+def _check_spare_row(
+    filled: list[tuple[tuple, int, str]], spare_row: int, new_revision: str,
+) -> tuple[str, int | None]:
+    """Whether a blank spare row can take new_revision without breaking
+    ascending revision order among this (CTR, currency)'s filled rows:
+
+        ("same", row)      — a filled row already holds this exact
+                             revision; it's a correction, so that row is
+                             overwritten in place and the spare is left
+                             alone.
+        ("misordered", None) — using the spare would put new_revision above
+                             a lower revision or below a higher one.
+        ("ok", None)       — every lower revision is above the spare and
+                             every higher one below it (or nothing filled).
+    """
+    wanted = (new_revision or "").strip()
+    new_key = _revision_sort_key(wanted)
+    for _key, row_num, text in filled:
+        if text == wanted:
+            return "same", row_num
+    for key, row_num, _text in filled:
+        if (key < new_key and row_num > spare_row) or (key > new_key and row_num < spare_row):
+            return "misordered", None
+    return "ok", None
 
 
 def _validated_base(entry: CTREntry) -> tuple[str | None, str]:
@@ -599,7 +681,7 @@ def _validated_base(entry: CTREntry) -> tuple[str | None, str]:
 def _plan_insertions(
     tracker_path: Path, cfg: dict, entries: list[CTREntry],
     allow_overwrite: bool, revision_mode: str,
-) -> tuple[list[tuple[int, str]], dict[int, int], dict[int, str]]:
+) -> tuple[list[tuple[int, str]], dict[int, int], dict[int, str], dict[int, int]]:
     """Read-only planning pass, against the file's *current* on-disk
     state, for the two situations that need a brand-new row inserted:
 
@@ -629,7 +711,15 @@ def _plan_insertions(
     them have actually happened — final_row_for_idx below is what the
     real pass must use instead of re-discovering a target from scratch.
 
-    Returns (to_insert, final_row_for_idx, pre_skip):
+    A blank spare row is only used when it keeps this (CTR, currency)'s
+    filled rows in ascending revision order (see _check_spare_row). If it
+    wouldn't — e.g. a blank revision arriving after revision 1 while the
+    only spare sits below it — the spare is left alone, a row is inserted
+    at the ordered position instead, and the skipped spare is reported in
+    spare_skipped. If a filled row already holds the entry's exact
+    revision, that row is overwritten in place instead.
+
+    Returns (to_insert, final_row_for_idx, pre_skip, spare_skipped):
       to_insert         — [(insert_at_row, base_ctr_number), ...] for
                            tracker_xlwings.insert_revision_rows, each
                            computed against this snapshot.
@@ -641,6 +731,9 @@ def _plan_insertions(
                            re-classification entirely.
       pre_skip          — entries[] index -> reason, for anything this
                            pass already knows can't be written (invalid).
+      spare_skipped     — entries[] index -> the blank spare row (in this
+                           snapshot's numbering) it was NOT written into
+                           because that would have broken revision order.
     """
     with zipfile.ZipFile(tracker_path, "r") as zin:
         sheet_part = _resolve_sheet_part(zin, cfg["sheet_name"])
@@ -661,6 +754,8 @@ def _plan_insertions(
     # distinction matters.
     raw_insertions: list[tuple[int, int, str, bool]] = []
     pre_skip: dict[int, str] = {}
+    spare_skipped: dict[int, int] = {}
+    in_place_rows: dict[int, int] = {}   # idx -> filled row holding the same revision
 
     # (base_ctr_number, currency) -> the entries[] idx that already claims
     # it, earlier in this same batch. A second entry for the exact same
@@ -711,7 +806,24 @@ def _plan_insertions(
         probe_used.add(row)
 
         if kind == "empty":
-            continue   # a normal write
+            filled = _filled_revision_rows(
+                probe_row_by_num, probe_strings, cfg, base, entry.currency, set(),
+            )
+            verdict, same_row = _check_spare_row(filled, row, entry.revision)
+            if verdict == "ok":
+                continue   # a normal write
+            probe_used.discard(row)   # the spare stays free for a later entry
+            if verdict == "same":
+                probe_used.add(same_row)
+                in_place_rows[idx] = same_row
+                continue
+            insert_at = _insertion_row_for_revision(
+                probe_row_by_num, probe_strings, cfg, base,
+                entry.currency, entry.revision, set(),
+            )
+            raw_insertions.append((idx, insert_at, base, False))
+            spare_skipped[idx] = row
+            continue
 
         if not (allow_overwrite and revision_mode == "separate"):
             continue   # real pass overwrites `row` directly, or skips it — either way, nothing to plan here
@@ -791,29 +903,39 @@ def _plan_insertions(
         to_insert.append((insert_at, base))
         shift += 1
 
-    return to_insert, final_row_for_idx, pre_skip
+    for idx, same_row in in_place_rows.items():
+        # Rows at/after an insertion point shift down by one for each one.
+        final_row_for_idx[idx] = same_row + sum(1 for at, _b in to_insert if at <= same_row)
+
+    return to_insert, final_row_for_idx, pre_skip, spare_skipped
 
 
 def write_entries_fast(
     tracker_path: str | Path,
     entries: list[CTREntry],
     make_backup: bool = False,
-    allow_overwrite: bool = False,
-    revision_mode: str = "overwrite",
-) -> tuple[list[tuple[int, str, int]], list[tuple[int, str, str]], Path | None]:
+    allow_overwrite: bool = True,
+    revision_mode: str = "separate",
+) -> tuple[
+    list[tuple[int, str, int]], list[tuple[int, str, str]], Path | None, list[str],
+]:
     """Writes each entry into the existing tracker row reserved for its
     CTR number (see module docstring), backs up if requested, and saves
-    the workbook in place. Returns (written, skipped, backup_path):
+    the workbook in place. Returns (written, skipped, backup_path, notes):
     written is [(entries_idx, ctr_number, row), ...] for entries actually
     written; skipped is [(entries_idx, ctr_number, reason), ...] for
-    entries that couldn't be placed. entries_idx is this call's own
+    entries that couldn't be placed; notes is a list of human-readable
+    lines about blank spare rows deliberately left unused because writing
+    into them would have broken ascending revision order (the entry got an
+    inserted row at the ordered position instead). entries_idx is this call's own
     position in `entries` — the only unambiguous way for a caller to map
     a result back to the entry it came from, since two entries can share
     the same CTR number (e.g. two revisions of one CTR in one batch — see
     IN_BATCH_CONFLICT_MARKER). The file is only touched if at least one
     entry was written.
 
-    allow_overwrite (off by default) lets a match land on a row whose
+    allow_overwrite and revision_mode default to True / "separate" — the
+    tracker window no longer offers them as choices. allow_overwrite lets a match land on a row whose
     core data fields already have something in them, instead of treating
     that as "already filled" and skipping it — use with care, since it
     can silently replace real data with no undo besides the backup.
@@ -856,7 +978,7 @@ def write_entries_fast(
     # Always runs (not just when allow_overwrite is on) — a missing-currency
     # row needs creating regardless; _plan_insertions itself gates the
     # separate-revision-insertion logic behind allow_overwrite internally.
-    to_insert, final_row_for_idx, pre_skip = _plan_insertions(
+    to_insert, final_row_for_idx, pre_skip, spare_skipped = _plan_insertions(
         tracker_path, cfg, entries, allow_overwrite, revision_mode,
     )
 
@@ -871,6 +993,7 @@ def write_entries_fast(
             for idx in final_row_for_idx:
                 pre_skip[idx] = str(exc)
             final_row_for_idx = {}
+            spare_skipped = {}   # nothing was inserted — the spare stays the only free row
 
     with zipfile.ZipFile(tracker_path, "r") as zin:
         sheet_part = _resolve_sheet_part(zin, cfg["sheet_name"])
@@ -884,6 +1007,7 @@ def write_entries_fast(
         for r in sheet_root.findall(f".//{_M}sheetData/{_M}row")
     }
     default_styles = _col_default_styles(sheet_root)
+    styles_root = etree.fromstring(all_data["xl/styles.xml"])
 
     written: list[tuple[int, str, int]] = []
     skipped: list[tuple[int, str, str]] = [
@@ -989,9 +1113,14 @@ def write_entries_fast(
         if entry.value is not None:
             value_cell = _cell(cfg["col_value"])
             _set_numeric_cell(value_cell, entry.value)
-            style = cfg["value_style_by_currency"].get(entry.currency)
-            if style is not None:
-                value_cell.set("s", str(style))
+            format_code = cfg["value_format_by_currency"].get(entry.currency)
+            if format_code is not None:
+                style = _style_with_number_format(
+                    styles_root, value_cell.get("s") or default_styles.get(
+                        _col_index(cfg["col_value"]), "0"), format_code,
+                )
+                if style is not None:
+                    value_cell.set("s", style)
         if entry.revision:
             try:
                 _set_numeric_cell(_cell(cfg["col_revision"]), int(entry.revision))
@@ -1060,4 +1189,13 @@ def write_entries_fast(
         finally:
             tmp_path.unlink(missing_ok=True)
 
-    return written, skipped, backup_path
+    # A spare left unused is shifted down by every insertion at/above it.
+    notes = [
+        f"row {spare + sum(1 for at, _b in to_insert if at <= spare)} left blank — "
+        f"using it for {entries[idx].ctr_number} would have broken revision order "
+        f"(a row was inserted instead)"
+        for idx, spare in sorted(spare_skipped.items())
+        if idx not in pre_skip
+    ]
+
+    return written, skipped, backup_path, notes
