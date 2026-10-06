@@ -60,6 +60,7 @@ there's no marker word to remove.
 
 from __future__ import annotations
 
+import logging
 import re
 import shutil
 from copy import copy
@@ -75,6 +76,8 @@ from openpyxl.worksheet.properties import PageSetupProperties
 
 from ctr_tools.config import CFG
 from ctr_tools.naming import ctr_output_filename
+
+log = logging.getLogger(__name__)
 
 _azn = CFG["azn_template"]
 
@@ -223,6 +226,86 @@ def _set_cell(ws, row: int, col: int, value) -> None:
     cell = ws.cell(row=row, column=col)
     if not isinstance(cell, MergedCell):
         cell.value = value
+
+
+def _merged_range_of(ws, row: int, col: int):
+    """The merged range containing (row, col), or None."""
+    for rng in ws.merged_cells.ranges:
+        if rng.min_row <= row <= rng.max_row and rng.min_col <= col <= rng.max_col:
+            return rng
+    return None
+
+
+def _validate_template_layout(ws, template_path) -> None:
+    """
+    Check the loaded AZN template matches the layout template_config.json
+    describes, before anything is written. Rows are located by fixed address,
+    so a template saved in an older layout (e.g. without the Comments box,
+    which puts the Summary block 5 rows higher) would otherwise fail deep in
+    the build with openpyxl's "'MergedCell' object attribute 'value' is
+    read-only", which says nothing about the real cause.
+
+    Raises ValueError listing every mismatch found.
+    """
+    problems: list[str] = []
+
+    def _check_formula_cell(addr: str, what: str, prefix: str = "=") -> None:
+        row, col = _cell_row_col(addr)
+        rng = _merged_range_of(ws, row, col)
+        cell = ws.cell(row=row, column=col)
+        if rng is not None and (rng.min_row, rng.min_col) != (row, col):
+            problems.append(f"{what} expected at {addr}, found merged cell {rng.coord}")
+        elif not (isinstance(cell.value, str) and cell.value.startswith(prefix)):
+            problems.append(
+                f"{what} expected at {addr} (a formula), found {cell.value!r}")
+
+    _check_formula_cell(_azn["cell_summary_onshore"],  "Summary 'Total Project Support'")
+    _check_formula_cell(_azn["cell_summary_offshore"], "Summary 'Total Offshore Activities'")
+    _check_formula_cell(_azn["cell_summary_combined"], "Summary 'Estimated CTR Total'")
+
+    # Section totals sit total_gap rows below each section's data range.
+    _check_formula_cell(f"G{_SUPPORT_DATA_END + _SUPPORT_TOTAL_GAP + 1}",
+                        "Support section total", "=SUM")
+    _check_formula_cell(f"G{_OTHER_DATA_END + _OTHER_TOTAL_GAP + 1}",
+                        "Offshore section total", "=SUM")
+
+    row, col = _cell_row_col(_azn["cell_comments_extra"])
+    rng = _merged_range_of(ws, row, col)
+    value = ws.cell(row=row, column=col).value
+    if rng is not None and (rng.min_row, rng.min_col) != (row, col):
+        problems.append(
+            f"Comments box expected at {_azn['cell_comments_extra']}, "
+            f"found merged cell {rng.coord}")
+    elif not (isinstance(value, str) and value.strip().lower().startswith("comments")):
+        problems.append(
+            f"Comments box expected at {_azn['cell_comments_extra']} "
+            f"(labelled 'Comments:'), found {value!r}")
+
+    if problems:
+        problems = list(dict.fromkeys(problems))
+        if len(problems) > 4:
+            problems = problems[:4] + [f"{len(problems) - 4} more"]
+        msg = (
+            f"AZN template layout doesn't match template_config.json "
+            f"({'; '.join(problems)}). Is {Path(template_path).name} an "
+            f"outdated template? Replace it with the current AZN_TEMPLATE.xlsx."
+        )
+        log.error("%s [template: %s]", msg, template_path)
+        raise ValueError(msg)
+
+
+def _write_summary_formula(ws, row: int, col: int, value: str) -> None:
+    """Write a Summary-block formula, naming the cell and merge on failure."""
+    cell = ws.cell(row=row, column=col)
+    if isinstance(cell, MergedCell):
+        rng = _merged_range_of(ws, row, col)
+        addr = f"{_col_letter(col)}{row}"
+        msg = (f"Cannot write {value} to {addr}: it sits inside merged range "
+               f"{rng.coord if rng else '?'}. The AZN template layout doesn't "
+               f"match template_config.json — is it an outdated template?")
+        log.error(msg)
+        raise ValueError(msg)
+    cell.value = value
 
 
 def _insert_rows_preserving_merges(ws, insert_row: int, amount: int) -> None:
@@ -439,6 +522,15 @@ def _write_comments(ws, addr: str, text: str) -> None:
         text, width, cell.font.size, base)
 
 
+# Excel expression that reads the leading number of a "6 Days" / "1.5 Trips"
+# cell: everything before the first space (a space is appended so a bare
+# "6" still works). NUMBERVALUE with an explicit "." decimal separator keeps
+# it independent of the viewer's regional settings — plain VALUE("1.5")
+# fails under a comma-decimal locale. NUMBERVALUE needs the _xlfn. prefix in
+# the file (Excel 2013+).
+_DURATION_NUMBER = '_xlfn.NUMBERVALUE(LEFT({cell},FIND(" ",{cell}&" ")-1),".")'
+
+
 def _write_third_party_section(
     ws, after_row: int, rows: list[dict], col_count: int, labor_data_start: int,
 ) -> tuple[int, int]:
@@ -462,11 +554,10 @@ def _write_third_party_section(
     them (which is not where the template had them, if the request needed
     extra manpower rows inserted earlier).
 
-    Each row's total is qty x rate x duration x (1 + mark-up). Duration is
-    embedded in the formula as a literal because its own cell is text ("6
-    Days" / "2 Trips") — the request states a duration but not what a
-    duration means for that vehicle, so it stays human-readable rather than
-    being split into a number and a unit column the template doesn't have.
+    Each row's total is qty x rate x duration x (1 + mark-up). The duration
+    cell is text ("6 Days" / "2 Trips" — the unit varies per line), so the
+    formula reads the number off the front of that cell (_DURATION_NUMBER)
+    and editing the cell updates the total, whatever unit follows it.
     """
     hdr_row     = after_row + 1
     col_hdr_row = hdr_row + 1
@@ -518,7 +609,9 @@ def _write_third_party_section(
         markup_cell.number_format = _azn.get("third_party_markup_format", "0.0%")
         ws.cell(row=r, column=5).value = f"{duration:g} {uom}".strip()
         ws.cell(row=r, column=6).value = rate
-        ws.cell(row=r, column=7).value = f"=B{r}*F{r}*{duration:g}*(1+D{r})"
+        ws.cell(row=r, column=7).value = (
+            f"=B{r}*F{r}*{_DURATION_NUMBER.format(cell=f'E{r}')}*(1+D{r})"
+        )
 
     for r in range(hdr_row, total_row + 1):
         ws.row_dimensions[r].hidden = False
@@ -609,6 +702,15 @@ def build_azn(
         ) from e
     except Exception as e:
         raise ValueError(f"Could not read AZN Template {template_path}: {e}") from e
+
+    try:
+        _validate_template_layout(ws, template_path)
+    except ValueError:
+        # Don't leave a copy of the unmodified template in the output folder
+        # looking like a finished CTR.
+        wb.close()
+        out_path.unlink(missing_ok=True)
+        raise
 
     # ── Header cells ──────────────────────────────────────────────────────────
     _write_addr(ws, _azn["cell_ctr_ref"], f"CTR-26-{job_ref} AZN")
@@ -766,12 +868,12 @@ def build_azn(
     # ── Summary cells — addresses from config, shifted by any inserted rows ────
     _r, _c = _cell_row_col(_azn["cell_summary_onshore"])
     support_summary_addr = f"{_col_letter(_c)}{_r + _row_shift}"
-    ws.cell(row=_r + _row_shift, column=_c).value = f"=G{support_total_row}"
+    _write_summary_formula(ws, _r + _row_shift, _c, f"=G{support_total_row}")
 
     _r, _c = _cell_row_col(_azn["cell_summary_offshore"])
     other_summary_row  = _r + _row_shift
     other_summary_addr = f"{_col_letter(_c)}{other_summary_row}"
-    ws.cell(row=other_summary_row, column=_c).value = f"=G{other_total_row}"
+    _write_summary_formula(ws, other_summary_row, _c, f"=G{other_total_row}")
 
     _r, _c = _cell_row_col(_azn["cell_summary_combined"])
     combined_row = _r + _row_shift
@@ -804,7 +906,24 @@ def build_azn(
                     item_no = int(item_no) + 1
                     ws.cell(row=row, column=1).value = item_no
 
-    ws.cell(row=combined_row, column=_c).value = "=" + "+".join(summary_addrs)
+    # Estimated CTR Total sums the whole Summary block, Contingency included
+    # (a typed-in amount, 0 by default). Located by its label so it follows
+    # the block however many rows were inserted above it; if the label isn't
+    # found, fall back to adding the lines written here.
+    first_row = _cell_row_col(summary_addrs[0])[0]
+    contingency_row = next(
+        (row for row in range(first_row, combined_row)
+         if "contingency" in str(ws.cell(row=row, column=2).value or "").lower()),
+        None,
+    )
+    if contingency_row is None:
+        log.warning("AZN Summary has no Contingency row; total adds the written lines only")
+        ws.cell(row=combined_row, column=_c).value = "=" + "+".join(summary_addrs)
+    else:
+        col = _col_letter(_c)
+        ws.cell(row=combined_row, column=_c).value = (
+            f"=SUM({col}{first_row}:{col}{contingency_row})"
+        )
 
     # Every row inserted above moved the document's tail down by that much;
     # the print area has to follow or the bottom of the CTR silently stops

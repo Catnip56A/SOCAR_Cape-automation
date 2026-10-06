@@ -50,6 +50,17 @@ def available() -> bool:
     return sys.platform in ("win32", "darwin")
 
 
+# HRESULTs Excel's COM server returns when the Excel process goes away
+# mid-call: 0x800706BE RPC call failed, 0x800706BA RPC server unavailable.
+_EXCEL_GONE_HRESULTS = {-2147023170, -2147023174}
+
+
+def _is_excel_gone(exc: BaseException) -> bool:
+    """True if `exc` is a COM error meaning Excel was closed or crashed."""
+    args = getattr(exc, "args", ())
+    return bool(args) and args[0] in _EXCEL_GONE_HRESULTS
+
+
 def insert_revision_rows(
     tracker_path: str | Path,
     sheet_name: str,
@@ -153,6 +164,11 @@ def insert_revision_rows(
         finally:
             book.close()
     except Exception as exc:
+        if _is_excel_gone(exc):
+            raise RuntimeError(
+                "Excel stopped responding or was closed while the row was being "
+                "inserted. Close any open Excel windows and try again."
+            ) from exc
         raise RuntimeError(f"Excel row insertion failed: {exc}") from exc
     finally:
         app.quit()

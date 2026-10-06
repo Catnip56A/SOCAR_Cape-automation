@@ -5,6 +5,23 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and version numbers come from the [VERSION](VERSION) file.
 
+## [1.0.17] - 2026-10-06
+### Fixed
+- AZN CTR: **Estimated CTR Total now includes Contingency.** The total only added the Total Project Support, Offshore/Other Activities and Third Party lines, so a Contingency typed into the Summary block never reached it (and so never reached the CTR Tracker, which reads that total). The USD CTR already included it.
+- AZN CTR, Third Party Activities: each row's total used the duration as a typed-in number, so editing the **Duration & UOM** cell did not change the total. The formula now reads the leading number from that cell (`6 Days`, `2 Trips`, `1.5 Hours`, or a bare `4` all work, whatever the unit), using `NUMBERVALUE` with a "." decimal separator so it does not depend on the viewer's regional settings (needs Excel 2013 or later). `_write_third_party_section` (`builder_azn.py`).
+- CTR generation failed with the unhelpful `'MergedCell' object attribute 'value' is read-only` when the AZN template on disk had an older layout than `template_config.json` expects (e.g. a template without the Comments box, which puts the Summary 5 rows higher). Reported from a real run: the app was updated to v1.0.14+ but the template the user had selected was still the old one.
+- CTR Tracker: a failed final save (`PermissionError` replacing the tracker file, almost always because it is open in Excel or being synced) showed the raw Windows error. It now says the file is locked and that no CTR data was saved, and notes if Excel had already inserted blank rows for the batch.
+
+### Changed
+- AZN and USD CTR: the **Estimated CTR Total** is now `=SUM(first Summary line : Contingency)` instead of a chain of `+` between individual cells, matching how hand-priced CTRs are built. The USD result is identical to before; AZN differs only by including Contingency (0 unless someone types one).
+- AZN and USD CTR: the template layout is now checked **before anything is written**. If a configured cell is merged or its label isn't where `template_config.json` says (e.g. `Summary 'Total Project Support' expected at G72, found merged cell A72:G72`), generation stops with `AZN/USD template layout doesn't match template_config.json (…). Is <file> an outdated template? Replace it with the current …_TEMPLATE.xlsx.` The message lists up to four mismatches, and the half-written copy is removed from the output folder. A write that still hits a merged cell names the cell and the merged range in the log. `_validate_template_layout` in `builder_azn.py` / `builder_usd.py`.
+- CTR Tracker: when Excel closes or stops responding during row insertion (COM errors `0x800706BE` / `0x800706BA` in `crash.log`), the entry is skipped with "Excel stopped responding or was closed while the row was being inserted…" instead of the raw COM text.
+
+### Known issues
+- The templates are not bundled with the app: the AZN/USD template each user selects must be replaced by hand when the layout changes (see "Common errors and fixes" in the User Guide). The new layout check only makes a stale template obvious.
+- The two `crash.log` COM entries could not be tied to a specific failed write (the file has no timestamps); they may be harmless noise from Excel shutting down.
+- Carried over from 1.0.16: CTR Tracker formulas need Ctrl+Alt+Shift+F9 to show a result after a write.
+
 ## [1.0.16] - 2026-09-29
 ### Fixed
 - CTR Tracker: a USD CTR's Value cell showed as a date (e.g. 4634 → `07-Sep-12`) with an off fill colour. The writer stamped a hard-coded style id (`159`, set for an older tracker) on every USD value, but style ids are positions in each workbook's own style table and 159 is a date format in the real tracker. The Value cell now gets the style that matches its current look (fill, border, alignment) with the currency's number format — `"$"#,##0.00` for USD, `#,##0.00 [$₼-42C]` for AZN — looked up in the tracker's own `styles.xml` at write time; if no such style exists, the cell keeps its own style instead of guessing an id. `value_style_by_currency` in `template_config.json` / `config.py` is replaced by `value_format_by_currency`; `_style_with_number_format` (`ctr_tools/tracker_fast.py`). USD rows written by earlier versions may still carry the wrong format and need fixing by hand.
