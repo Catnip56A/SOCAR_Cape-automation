@@ -107,6 +107,7 @@ last-calculated value.
 
 from __future__ import annotations
 
+import logging
 import shutil
 from copy import copy
 from datetime import datetime
@@ -121,6 +122,8 @@ from openpyxl.worksheet.properties import PageSetupProperties
 
 from ctr_tools.config import CFG
 from ctr_tools.naming import ctr_output_filename
+
+log = logging.getLogger(__name__)
 
 _usd = CFG["usd_template"]
 
@@ -151,6 +154,65 @@ def _cell_row_col(addr: str) -> tuple[int, int]:
     col_str = "".join(c for c in addr if c.isalpha())
     row_str = "".join(c for c in addr if c.isdigit())
     return int(row_str), _col_idx(col_str)
+
+
+# (config key, column holding the row's label, text that label must contain).
+# Every cell listed is written by build_usd at a fixed address; the label
+# beside it proves the template really has that row there.
+_LAYOUT_CHECKS = (
+    ("cell_total_equip_2",             "A", "Total Plant & Equipment"),
+    ("cell_total_cons_raw",            "C", "General Consumables"),
+    ("cell_cons_markup_rate",          "C", "Mark up (For Consumables)"),
+    ("cell_total_cons_markup",         "C", "Mark up (For Consumables)"),
+    ("cell_total_cons_transport",      "C", "Transportation"),
+    ("cell_total_cons_services_markup", "C", "Mark up (for services)"),
+    ("cell_total_cons",                "A", "Total Material/Consumables/others"),
+    ("cell_summary_project_support",   "B", "Total Project Support"),
+    ("cell_summary_offshore",          "B", "Total Offshore Activities"),
+    ("cell_summary_other",             "B", "Total Other Activities"),
+    ("cell_summary_equip",             "B", "Total Plant & Equipment"),
+    ("cell_summary_cons_raw",          "B", "Total Material/Consumables/others"),
+    ("cell_contingency",               "B", "Contingency"),
+    ("cell_summary_grand",             "A", "Estimated CTR Total"),
+)
+
+
+def _validate_template_layout(ws, template_path) -> None:
+    """
+    Check the loaded USD template's Main sheet matches the layout
+    template_config.json describes, before anything is written. Cells are
+    addressed by fixed position, so a template saved in a different layout
+    would otherwise fail midway with openpyxl's "'MergedCell' object
+    attribute 'value' is read-only" or, worse, write totals into the wrong
+    rows. Raises ValueError listing every mismatch found.
+    """
+    problems: list[str] = []
+    for key, label_col, expected in _LAYOUT_CHECKS:
+        addr = _usd[key]
+        row, col = _cell_row_col(addr)
+        rng = next(
+            (r for r in ws.merged_cells.ranges
+             if r.min_row <= row <= r.max_row and r.min_col <= col <= r.max_col),
+            None,
+        )
+        if rng is not None and (rng.min_row, rng.min_col) != (row, col):
+            problems.append(f"'{expected}' value expected at {addr}, found merged cell {rng.coord}")
+            continue
+        label = ws[f"{label_col}{row}"].value
+        if not (isinstance(label, str) and expected.lower() in label.lower()):
+            problems.append(f"'{expected}' expected at {label_col}{row}, found {label!r}")
+
+    if problems:
+        problems = list(dict.fromkeys(problems))
+        if len(problems) > 4:
+            problems = problems[:4] + [f"{len(problems) - 4} more"]
+        msg = (
+            f"USD template layout doesn't match template_config.json "
+            f"({'; '.join(problems)}). Is {Path(template_path).name} an "
+            f"outdated template? Replace it with the current USD_TEMPLATE.xlsx."
+        )
+        log.error("%s [template: %s]", msg, template_path)
+        raise ValueError(msg)
 
 
 def _shift_cell(addr: str, row_shift: int) -> str:
@@ -549,6 +611,15 @@ def build_usd(
     except Exception as e:
         raise ValueError(f"Could not read USD Template {template_path}: {e}") from e
 
+    try:
+        _validate_template_layout(ws_m, template_path)
+    except ValueError:
+        # Don't leave a copy of the unmodified template in the output folder
+        # looking like a finished CTR.
+        wb.close()
+        out_path.unlink(missing_ok=True)
+        raise
+
     # ── Main sheet: header ────────────────────────────────────────────────────
     _write_addr(ws_m, _usd["cell_ctr_ref"], f"CTR-26-{job_ref} USD")
     _write_addr(ws_m, _usd["cell_job_ref"], int(job_ref))
@@ -865,15 +936,10 @@ def build_usd(
     # nonzero Contingency) actually flows through. The template's own
     # formula here (=G126+G120) silently dropped the other four.
     summary_support_addr  = _shift_cell(_usd["cell_summary_project_support"], total_shift)
-    summary_offshore_addr = _shift_cell(_usd["cell_summary_offshore"], total_shift)
-    summary_other_addr    = _shift_cell(_usd["cell_summary_other"], total_shift)
     contingency_addr      = _shift_cell(_usd["cell_contingency"], total_shift)
 
     summary_grand_addr = _shift_cell(_usd["cell_summary_grand"], total_shift)
-    ws_m[summary_grand_addr] = (
-        f"={summary_support_addr}+{summary_offshore_addr}+{summary_other_addr}"
-        f"+{summary_equip_addr}+{summary_cons_addr}+{contingency_addr}"
-    )
+    ws_m[summary_grand_addr] = f"=SUM({summary_support_addr}:{contingency_addr})"
 
     # Every row inserted above moved each sheet's tail down by that much;
     # the print area has to follow or the bottom of the CTR silently stops

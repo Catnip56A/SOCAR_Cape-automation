@@ -1,96 +1,89 @@
-# Handoff — 2026-09-29 (session 2)
+# Handoff — 2026-10-01
 
 ## Working on
-CTR Tracker write path (v1.0.16): fixing revision rows landing out of order
-when a CTR has several pre-made spare rows. All code + docs done, **uncommitted**.
-(The 1.0.15 MR-comparator work from the earlier session is already committed as
-caf64db.)
+CTR Tracker write path, released as v1.0.16 (committed, 41b6cfe, working tree
+clean at last check). After the release the session was Q&A on how the tracker
+and the MR vs CTR comparator behave; no code changed after the commit.
 
 ## Key decisions (with reasoning)
-- **Root cause found:** the user's real tracker pre-creates *three* blank rows
-  per CTR (rows 8296–8298 for CTR-26-281, height 31.5; neighbouring CTRs have
-  one 15-height row). `_classify_target_row` returns the first blank row and
-  the "empty" branch skipped all revision-order logic, so USD → 8296, AZN
-  rev 1 → 8297, AZN blank → 8298 (below rev 1). Confirmed against the pristine
-  `TEST_Files/CTR tracker/CTR-Tracker copy.xlsm` (not the "error files" copy).
+- **Root cause of out-of-order revisions:** the user's real tracker pre-creates
+  *three* blank rows per CTR (rows 8296–8298 for CTR-26-281, height 31.5;
+  neighbouring CTRs have one 15-height row). The writer took the first blank
+  row and the "empty" branch skipped all revision-order logic. Confirmed against
+  the pristine `TEST_Files/CTR tracker/CTR-Tracker copy.xlsm`, not the
+  "error files" copy (that is an output).
 - **Fixed mode, no UI choices** (user's call after consulting their users):
-  removed the "Overwrite rows that already have data" checkbox and both radios.
-  Every write = `allow_overwrite=True, revision_mode="separate"`. Consequence
-  the user accepted: the old "skip a filled row" default is gone; the backup
-  checkbox (default on) is the only safety net.
-- **Spare rows are used only if they keep ascending revision order**
-  (`_check_spare_row`: every lower revision above the spare, every higher one
-  below). Otherwise a row is inserted at the ordered position (Option B) and the
-  spare is left blank and reported in the results dialog.
-- **No Excel → skip the entry with a message**, never fall back to the
-  out-of-order spare (user confirmed).
-- **Beyond the literal ask:** re-loading a revision that already exists now
-  overwrites that row in place even when spares exist (previously it filled
-  another spare → duplicate). User believed it already did this; the memory
-  rule says it must.
-- **USD-shows-as-date was OUR bug** (I first accepted the user's "it's the
-  file author's" and was wrong; the pristine backup has the same styles):
-  `value_style_by_currency` hard-coded USD → style id 159, which in the real
-  tracker is a date format with a different fill (the right one is 157,
-  `"$"#,##0.00`). Style ids are positions in each workbook's style table, so
-  ids can't be fixed in config. Replaced by `value_format_by_currency` +
-  `_style_with_number_format` (looks up, in the tracker's own `styles.xml`,
-  the style identical to the cell's current one but with the currency format;
-  falls back to leaving the cell's style alone). Old USD rows already written
-  by earlier versions are NOT repaired.
-- **Version:** bumped to 1.0.16 since 1.0.15 was already committed and dated;
-  the two tracker entries moved to a new `[1.0.16]` section. `pyproject.toml`
-  still deliberately left alone (VERSION is the source).
+  every write is `allow_overwrite=True, revision_mode="separate"`. The old
+  "skip a filled row" default is gone; the backup checkbox (default on) is the
+  only safety net. A spare row is used only if it keeps ascending revision
+  order, else a row is inserted via Excel and the spare is listed in the results
+  dialog. No Excel → the entry is skipped with a message, never placed out of
+  order.
+- **Beyond the literal ask:** re-loading an existing revision now overwrites
+  that row in place even when spares exist (it used to fill another spare and
+  duplicate). The user believed it already did this; the memory rule says it must.
+- **USD-shows-as-date was OUR bug.** I first accepted the user's "it's the
+  file author's" without checking and was wrong: the template has the same
+  styles. A hard-coded style id (159) is a date format in the real tracker.
+  Lesson: compare template vs output before attributing a formatting problem to
+  the input. Fixed by looking up the style by number format in the tracker's own
+  `styles.xml` (`value_format_by_currency`). Old USD rows written by earlier
+  versions are NOT repaired.
+- **Empty formula cells after a write:** writer saves formulas with empty `<v/>`
+  and `calcPr` has no `fullCalcOnLoad`, so Excel doesn't recalculate on open.
+  The user chose docs-only: workaround is Ctrl+Alt+Shift+F9 (USER_GUIDE,
+  CHANGELOG "Known issues"). Plain F9 doesn't work.
+- `pyproject.toml` version deliberately left alone (VERSION is the source).
 
 ## Current state
-- Verified on Linux only: replayed USD → AZN rev1 → AZN blank → rev1 again →
-  rev2 on a scratchpad copy of the pristine tracker, with a **fake
-  openpyxl row-inserter standing in for Excel**. Order, in-place correction,
-  and the flag ("row 8299 left blank…", post-shift numbering) all correct.
-  Tracker window builds offscreen; not exercised interactively.
-- `write_entries_fast` now returns 4 values (`written, skipped, backup, notes`);
-  only `tracker_window.py` calls it.
-- **User confirmed on real Windows/Excel ("I checked, its fine"):** the v1.0.16
-  tracker changes work. Details of what exactly was exercised weren't given.
-- **Was not verified on Linux:** real Excel insertion (`tracker_xlwings.insert_revision_rows`)
-  with these new row numbers; the results dialog with the new "Spare rows left
-  blank" section; the confirm dialog wording. Needs a relayed Windows session.
-- Nothing committed. Suggested message:
-  `v1.0.16 - CTR Tracker: revisions stay in order across spare rows, fixed separate-revision mode (overwrite options removed), spare-row flag in results`
-- `.claude/handoff.md` was already modified in git before this session (an
-  older handoff), now overwritten by this one.
+- v1.0.16 committed. The user checked the tracker changes on real Windows/Excel
+  ("I checked, its fine"), without detailing which cases they ran.
+- On Linux only the planning logic was replayed (fake row-inserter standing in
+  for Excel, on scratchpad copies); results dialog and confirm text were never
+  exercised on Linux.
+- Facts established this session that are not in the code comments:
+  - **AZN tracker rows** get C, K, L, N, O, P, S, AC, AI (if a revision exists)
+    and formulas AJ, AM (Labor), AU, AX. Equipment/3rd party/transport/
+    consumables columns are only filled for USD. **The AZN CTR's Third Party
+    section (transport) is not carried into the tracker's 3rd party column** —
+    looks like a gap, not traced whether intended.
+  - **MR vs CTR "Flag" column** (Combined view and its Excel report only):
+    blank = units agree; "⚠ Unit conflict — approved" = the user approved
+    summing an item whose MR/CTR units disagree (Needs Review → Approve);
+    Reject moves it to Error Data. Now documented in USER_GUIDE.md (see
+    "Decisions made after the commit").
+
+## Decisions made after the commit (2026-10-01)
+- **`fullCalcOnLoad` stays OFF for now.** The user will keep using the
+  Ctrl+Alt+Shift+F9 workaround (documented in USER_GUIDE + CHANGELOG "Known
+  issues"). Revisit only if it becomes a real pain for users. The permanent fix
+  would be `fullCalcOnLoad="1"` in `write_entries_fast`
+  (`ctr_tools/tracker_fast.py`); cost: slightly slower open and a "save
+  changes?" prompt on close. Worth timing on the real ~8000-row tracker first.
+- **Dropped:** read-only scan for old USD rows with the date style; AZN Third
+  Party → tracker gap. The user says neither is needed.
+- **Revision correction already exists:** after loading a CTR file, the add
+  form's Revision field (`tracker_window.py` `_revision_edit`, filled in
+  `_load_fields`, read in the add handler) is editable, so mistakes are fixed
+  there before the entry is added to the batch. This explains the `AI = 1` on
+  row 8297 of the "rev1" AZN file (E5 = 0): it was typed in the window. Not
+  checked: whether a revision can be changed after an entry is already in the
+  batch table.
+- **Flag column** is now explained in USER_GUIDE.md ("Combined View, Needs
+  Review and Error Data" section, after Compare Values). Doc-only; not checked
+  against a real Combined-view run.
 
 ## Open questions
-- **Empty formula cells after a write** (user hit it): writer saves formulas with an
-  empty `<v/>` and workbook `calcPr` has no `fullCalcOnLoad`, so Excel doesn't
-  recalc on open. Workaround documented (Ctrl+Alt+Shift+F9, USER_GUIDE +
-  CHANGELOG "Known issues"). Permanent fix (set `fullCalcOnLoad="1"` in
-  `write_entries_fast`) proposed, user chose docs-only for now.
-- Does the real Windows run insert at the right row and keep formulas intact
-  for the new blank-vs-rev1 case? (Memory note: tracker_xlwings behaviour has
-  changed since the v1.0.12 real-Excel verification.)
-- Existing USD rows written before this fix still have the date style; offered
-  a read-only check that lists them — user hasn't answered.
-- The user's "rev1" AZN file has `0` in its Revision cell (E5); the `AI = 1` on
-  row 8297 must have been typed in the window. Never confirmed with the user.
-- Carried over: named-range scoping in `_collect_named_range_refs`, real-MR
+- Carried over (to be discussed later): named-range scoping in `_collect_named_range_refs`, real-MR
   check of the cover-sheet toggle, AZN `Estimated CTR Total` omitting
   Contingency, Word template blocker, `cbar_rates.py` wiring.
 
 ## Files changed
-- `ctr_tools/tracker_fast.py` — `_filled_revision_rows` (extracted),
-  `_check_spare_row` (new), `_plan_insertions` (empty-branch order check,
-  4th return `spare_skipped`, in-place rows), `write_entries_fast`
-  (defaults True/"separate", `notes` return, Excel-failure clears the flag).
-- `ctr_tools/tracker_window.py` — removed overwrite checkbox/radios,
-  `_on_overwrite_toggled`, `_revision_mode`; `_WriteWorker` signal now carries
-  `notes`; confirm and results dialogs reworded/extended; unused imports gone.
-- `ctr_tools/config.py` + `template_config.json` — `value_format_by_currency`
-  replaces `value_style_by_currency`.
-- `VERSION` (1.0.16), `CHANGELOG.md`, `USER_GUIDE.md`, `README.md`.
-- `.kilo/worktrees/galvanized-plier/` has stale copies of these files —
-  deliberately untouched.
+None since commit 41b6cfe (this handoff aside). The commit touched
+`ctr_tools/tracker_fast.py`, `tracker_window.py`, `config.py`,
+`template_config.json`, `VERSION`, `CHANGELOG.md`, `USER_GUIDE.md`, `README.md`.
+`.kilo/worktrees/galvanized-plier/` holds stale copies — deliberately untouched.
 
 ## Next step
-Commit (message above). Optionally: make the `fullCalcOnLoad` fix, and/or a
-read-only check listing old USD rows that still carry the date style.
+Carried-over items, to be discussed with the user: real-MR check of the
+cover-sheet toggle first.

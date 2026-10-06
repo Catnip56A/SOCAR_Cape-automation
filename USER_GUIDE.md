@@ -124,6 +124,28 @@ Click **Compare Values** again to clear all highlights.
 
 ---
 
+## Combined View, Needs Review and Error Data
+
+After a Compare, the **Combined View** button (next to Compare Values) switches the Matched tab to one row per Stock Code. MR and CTR quantities are summed across every matched row, and a **Diff (CTR − MR)** column shows the difference.
+
+Quantities can only be summed safely if the rows use the same unit. If the MR and CTR rows for a Stock Code use different units (for example `EA` in MR and `BOX` in CTR), that code is held out of the Combined table and listed in the **Needs Review** tab. For each one you choose:
+
+- **Approve** — sum the quantities anyway. The code moves to the Combined table and is marked in the **Flag** column.
+- **Reject** — leave the code out of the totals. It moves to the **Error Data** tab with the reason "Unit conflict … rejected, excluded from Combined totals".
+
+### Flag column
+
+The **Flag** column appears in the Combined view and in the Excel report's Combined sheet. It has two possible values:
+
+| Flag | Meaning |
+|---|---|
+| *(blank)* | MR and CTR use the same unit; the totals are safe to compare. |
+| ⚠ Unit conflict — approved | The units disagreed and you approved summing them in Needs Review. The Unit column shows both units (for example `BOX / EA`). Check the totals by hand before relying on them. |
+
+Approve/Reject decisions are cleared when you run a new Compare.
+
+---
+
 ## Downloading the report
 
 Click **Download Excel Report…** at the bottom of the results panel. Choose a save location and file name. The downloaded file contains three sheets:
@@ -355,7 +377,7 @@ The **Additional Info & Transport — AZN** group shows what the request's extra
 - one requested vehicle can bill as several lines — a minibus charges vehicle+driver and its fuel separately, and only the former carries mark-up;
 - a vehicle that isn't in the rate table still gets a line, at a 0.00 rate, so it's there to price by hand — generating warns about any line still priced at 0.00.
 
-Each row's total is `Quantity × Rate × Duration × (1 + Mark Up)`.
+Each row's total is `Quantity × Rate × Duration × (1 + Mark Up)`. **Duration** is read from the number at the start of the *Duration & UOM* cell (`6 Days`, `2 Trips`, `1.5 Hours`, or just `4`), so you can edit that cell in the finished CTR and the total follows; keep the number first and a space before the unit.
 
 **Scaffold.** Scaffold is equipment, so a requested scaffold tonnage is added to the **Plant & Equipment — USD** table instead of appearing here — as an ordinary equipment line carrying the three things the request states: the system's name, the tonnage as **Quantity**, and **TON** as the unit. It reaches the USD CTR's Pricing sheet exactly like every other equipment line:
 
@@ -410,6 +432,10 @@ A progress dialog is shown during generation. When complete, a message lists the
 Output file names follow the pattern:  
 `{JobRef}_AZN_WCH_CTR.xlsx` / `{JobRef}_USD_WCH_CTR.xlsx`
 
+**Estimated CTR Total.** In both CTRs this is a `SUM` of the whole Summary block, **Contingency included**. Contingency is a figure you type into the Summary yourself (0 by default); once you do, the Estimated CTR Total — and the value the CTR Tracker picks up — follows.
+
+**Template check.** Before writing, the app confirms the selected AZN/USD template has the layout it expects. If not, nothing is generated and the message says which cell was wrong. See the first row of the errors table below.
+
 ---
 
 ## Common errors and fixes
@@ -421,6 +447,7 @@ Output file names follow the pattern:
 | *"…is missing expected column(s)…"* on the SAGE sheet | The Combined DB's SAGE sheet doesn't have the expected headers | Check that the header row uses exactly `product`, `long_description`, `unit_code`, `local_expect_cost` |
 | *"Could not find a sheet named CTR_REQUEST"* | The Combined DB file uses a different sheet name | Open the file in Excel and rename the sheet to `CTR_REQUEST` |
 | *"Job Ref must be a number"* | Non-numeric text was entered in Job Ref | Enter a number only, e.g. `217` |
+| *"AZN/USD template layout doesn't match template_config.json (… Is … an outdated template?)"* | The template selected in Source Files is an older (or otherwise different) layout than this version of the app writes into — e.g. an AZN template without the Comments box, whose Summary sits 5 rows higher | Replace it with the current `AZN_TEMPLATE.xlsx` / `USD_TEMPLATE.xlsx` (any custom edits must be carried over) and click Generate again |
 | *"AZN Template not found"* | The template file was moved or deleted since it was selected | Browse to the file again |
 | *"Cannot save … it may be open in Excel"* | The output file is already open in Excel | Close the file in Excel and click Generate again |
 | *PDF export skipped* | LibreOffice (soffice) is not on PATH | Install LibreOffice — the xlsx files are still produced correctly |
@@ -518,5 +545,7 @@ If a batch contains two entries for the same CTR number + currency (e.g. a CTR a
 | *"Select a Job Type for this CTR."* | Job Type dropdown left on the placeholder | Pick one of the fixed Job Type options |
 | CTR skipped after writing, "no matching row" | No tracker row has that CTR number yet | Pre-create the row in the tracker by hand, then retry |
 | CTR skipped after writing, Location mismatch | The CTR's own Onshore/Offshore section doesn't match the selected Location | Confirm the correct Location for this CTR and resubmit |
+| *"Cannot save … it is locked, most likely open in Excel or being synced"* | The tracker file could not be replaced at the final save, so **no CTR data was written** | Close the tracker in Excel (and any other program or sync using it), then write the batch again. If the message adds that blank rows were already inserted, those spare rows stay in the tracker and are reused next time |
+| *"Excel stopped responding or was closed while the row was being inserted"* | Excel went away while the app was inserting a revision row; that entry was skipped | Close any open Excel windows and write the batch again |
 | Row insert requires Excel | A new revision needed a row inserted (no spare, or the spare would break revision order) | Run this on a machine with a licensed Excel install, or pre-create a spare row by hand instead |
 | Formula cells (e.g. USD equivalent, totals) empty after writing, formula visible in the cell | The writer stores formulas without a calculated result and Excel hasn't recalculated them yet | In Excel press **Ctrl+Alt+Shift+F9** to recalculate the whole workbook |

@@ -1185,7 +1185,19 @@ def write_entries_fast(
                 for name, info in infos.items():
                     data = new_sheet_xml if name == sheet_part else all_data[name]
                     zout.writestr(info, data)
-            tmp_path.replace(tracker_path)
+            try:
+                tmp_path.replace(tracker_path)
+            except PermissionError as exc:
+                inserted = (
+                    " Blank rows were already inserted for this batch, so the "
+                    "tracker has spare rows that were not filled in."
+                    if to_insert else ""
+                )
+                raise ValueError(
+                    f'Cannot save "{tracker_path.name}" — it is locked, most likely '
+                    f"open in Excel or being synced. Close it there and write again; "
+                    f"no CTR data was saved.{inserted}"
+                ) from exc
         finally:
             tmp_path.unlink(missing_ok=True)
 
