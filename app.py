@@ -17,7 +17,7 @@ from PySide6.QtCore import (
     QAbstractTableModel, QModelIndex, QSettings, QSortFilterProxyModel,
     Qt, QThread, Signal,
 )
-from PySide6.QtGui import QBrush, QColor, QFont, QPainter, QPalette, QPen
+from PySide6.QtGui import QBrush, QColor, QFont, QKeySequence, QPainter, QPalette, QPen, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QDialog, QDialogButtonBox,
     QFileDialog, QFormLayout, QFrame, QGroupBox, QHBoxLayout, QHeaderView,
@@ -34,7 +34,9 @@ from comparison_history import (
     save_comparison, suggest_save_path,
 )
 from ctr_tools import __version__ as _CTR_VERSION
-from ctr_tools.window import CTRGeneratorWidget
+from ctr_tools.window import CTRGeneratorWidget, stoppable_progress_dialog
+from ctr_tools.tasks import TASKS, Job
+from ctr_tools.inspector import InspectorDock
 from ctr_tools.tracker_window import CTRTrackerWidget
 
 log = logging.getLogger(__name__)
@@ -324,6 +326,11 @@ class PandasModel(QAbstractTableModel):
     def __init__(self, df: pd.DataFrame, parent=None):
         super().__init__(parent)
         self._df = df.reset_index(drop=True)
+        # data() runs once per cell per role on every paint and column-resize
+        # pass; DataFrame.iloc per call is far too slow for that (~50 µs each),
+        # so read the values and column names from plain lists made once here.
+        self._values = self._df.to_numpy(dtype=object).tolist()
+        self._col_names = [str(c) for c in self._df.columns]
         self._highlights: dict[tuple[int, str], str] = {}  # (src_row, col_name) -> kind
 
     def set_highlights(self, cells: dict[tuple[int, str], str]):
@@ -340,8 +347,8 @@ class PandasModel(QAbstractTableModel):
     def data(self, index, role=Qt.ItemDataRole.DisplayRole):
         if not index.isValid():
             return None
-        col_name = str(self._df.columns[index.column()])
-        val      = self._df.iloc[index.row(), index.column()]
+        col_name = self._col_names[index.column()]
+        val      = self._values[index.row()][index.column()]
 
         if role == Qt.ItemDataRole.DisplayRole:
             if isinstance(val, float) and pd.isna(val):
@@ -374,7 +381,7 @@ class PandasModel(QAbstractTableModel):
 
     def headerData(self, section, orientation, role=Qt.ItemDataRole.DisplayRole):
         if orientation == Qt.Orientation.Horizontal:
-            col_name = str(self._df.columns[section])
+            col_name = self._col_names[section]
             if role == Qt.ItemDataRole.DisplayRole:
                 return col_name
             if role == Qt.ItemDataRole.ForegroundRole:
@@ -719,18 +726,41 @@ class ParseWorker(QThread):
         super().__init__(parent)
         self._payloads = payloads
         self._include_cover = include_cover   # MR side: also parse the Socar-Cape sheet
+        # One step per file, shown in the F12 Inspector. A stop request is
+        # only honoured between files, so a file that is being parsed always
+        # finishes.
+        self.job: Job = TASKS.begin_job(
+            f"Parse {'MR' if include_cover else 'CTR'} files",
+            [name for name, _data in payloads],
+        )
+        self.stopped_after: int | None = None   # files parsed when stopped early
 
     def run(self):
-        log.info("ParseWorker: parsing %d file(s)", len(self._payloads))
+        payloads, self._payloads = self._payloads, None   # the worker must not keep the raw files
+        log.info("ParseWorker: parsing %d file(s)", len(payloads))
+        job, i = self.job, 0
         try:
             results = []
-            for name, data in self._payloads:
+            for i, (name, data) in enumerate(payloads):
+                if job.should_stop():
+                    job.skip_remaining(i)
+                    self.stopped_after = i
+                    log.info("ParseWorker: stopped on request after %d of %d file(s)",
+                             i, len(payloads))
+                    break
+                job.start(i)
                 results.extend(parse_workbook(BytesIO(data), filename=name,
                                               include_cover=self._include_cover))
+                payloads[i] = (name, b"")                 # this file's bytes are done with
+                job.done(i)
             log.info("ParseWorker: produced %d table(s)", len(results))
+            job.finish()
             self.finished.emit(results)
         except Exception as exc:
             log.exception("ParseWorker failed")
+            job.failed(i, str(exc))
+            job.skip_remaining(i + 1, "not run")
+            job.finish()
             self.error.emit(str(exc))
 
 
@@ -781,15 +811,38 @@ class MainWindow(QMainWindow):
         self._pre_hide_maximized: bool             = False
 
         self._build_ui()
+        self._build_inspector()
 
         s = QSettings("SOCAR", "CTRGenerator")
         geom = s.value("window/geometry")
         if geom:
             self.restoreGeometry(geom)
+        # Where the Inspector was left (side, size, floating or docked) —
+        # but it always starts closed; F12 opens it.
+        dock_state = s.value("inspector/state")
+        if dock_state:
+            self.restoreState(dock_state, 2)   # v2: older saves had Qt-floating docks
+        if self._inspector.isFloating():
+            self._inspector.setFloating(False)
+        self._inspector.hide()
+        self._inspector.restore(s)
+
+    def _build_inspector(self):
+        """F12 toggles the read-only Inspector dock (see ctr_tools/inspector.py)."""
+        self._inspector = InspectorDock(self)
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self._inspector)
+        self.resizeDocks([self._inspector], [640], Qt.Orientation.Horizontal)
+        # Application-wide, so F12 also works while the inspector is floating
+        # and has the focus.
+        self._inspector_shortcut = QShortcut(QKeySequence(Qt.Key.Key_F12), self)
+        self._inspector_shortcut.setContext(Qt.ShortcutContext.ApplicationShortcut)
+        self._inspector_shortcut.activated.connect(self._inspector.toggle)
 
     def closeEvent(self, event):
         s = QSettings("SOCAR", "CTRGenerator")
         s.setValue("window/geometry", self.saveGeometry())
+        s.setValue("inspector/state", self.saveState(2))
+        self._inspector.save(s)
         self._ctr_gen.save_settings()
         self._ctr_tracker.save_settings()
         super().closeEvent(event)
@@ -1399,13 +1452,20 @@ class MainWindow(QMainWindow):
 
     # ── Parsing ───────────────────────────────────────────────────────────────
 
-    def _parse(self, side: str, payloads: list[tuple[str, bytes]]):
-        dlg = QProgressDialog(f"Parsing {side.upper()} files…", None, 0, 0, self)
-        dlg.setWindowModality(Qt.WindowModality.WindowModal)
-        dlg.show()
+    def _prune_workers(self) -> None:
+        """Drops workers that have finished — a worker is a Qt child of the
+        window, so it (and anything it references) lives until it is deleted."""
+        for w in [w for w in self._workers if w.isFinished()]:
+            self._workers.remove(w)
+            w.deleteLater()
 
+    def _parse(self, side: str, payloads: list[tuple[str, bytes]]):
+        n_files = len(payloads)     # the closures below must not capture `payloads` (the raw file bytes)
         worker = ParseWorker(payloads, parent=self, include_cover=(side == "mr"))
+        self._prune_workers()
         self._workers.append(worker)
+        dlg = stoppable_progress_dialog(
+            self, f"Parsing {side.upper()} files…", "Parsing", worker.job)
 
         def _done(tables: list):
             dlg.close()
@@ -1417,6 +1477,10 @@ class MainWindow(QMainWindow):
                 self._fill_table_list(self._ctr_table_list, self._ctr_tables, "ctr")
             self._on_table_sel_changed()
             self._refresh_file_warnings(side)
+            if worker.stopped_after is not None:
+                self._set_status(
+                    f"Stopped on request — parsed {worker.stopped_after} of "
+                    f"{n_files} {side.upper()} file(s); the rest were not read.")
 
         def _err(msg: str):
             dlg.close()

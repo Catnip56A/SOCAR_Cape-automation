@@ -150,6 +150,8 @@ SOCAR_Cape-automation/
 │   ├── tracker.py           # CTR Tracker data model + CTR-file field extraction
 │   ├── tracker_fast.py      # Raw-XML write path (normal case)
 │   ├── tracker_xlwings.py   # Excel-COM write path (row-insert fallback, Windows + Excel only)
+│   ├── inspector.py         # F12 Inspector dock (read-only: logs, data, storage, threads, variables, tasks, charts)
+│   ├── tasks.py             # Ordered background tasks + "stop after current task" (used by the Inspector)
 │   └── aliases.py / desc_renames.py / presets.py   # Persisted user corrections/presets
 ├── pyproject.toml          # Dependencies and project metadata
 ├── justfile                # Task runner (run / build / setup / clean)

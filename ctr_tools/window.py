@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import json
 import logging
+import weakref
 import re
 from datetime import date as _date
 from pathlib import Path
@@ -69,6 +70,7 @@ from ctr_tools.parser import (
     parse_ctr_request, parse_equip_names_db,
 )
 from ctr_tools.pdf_exporter import export_to_pdf
+from ctr_tools.tasks import TASKS, Job
 
 log = logging.getLogger(__name__)
 
@@ -185,6 +187,34 @@ _TRANSPORT_HEADERS = [
 # Worker thread
 # ─────────────────────────────────────────────────────────────────────────────
 
+def stoppable_progress_dialog(parent, text: str, title: str, job: Job) -> QProgressDialog:
+    """A modal busy dialog whose button asks `job` to stop after the task that
+    is running now (see ctr_tools/tasks.py) — the dialog stays up until the
+    worker really finishes, so the user can see it wind down."""
+    dlg = QProgressDialog(text, "Stop after current step", 0, 0, parent)
+    dlg.setWindowTitle(title)
+    dlg.setWindowModality(Qt.WindowModality.WindowModal)
+    dlg.setAutoReset(False)
+    dlg.setAutoClose(False)
+    btn = dlg.findChild(QPushButton)
+
+    def _stop():
+        job.request_stop()
+        if btn is not None:
+            btn.setEnabled(False)
+        dlg.setLabelText("Stopping after the current step…")
+
+    if btn is not None:
+        try:
+            btn.clicked.disconnect()   # the dialog's own cancel() would just hide it
+        except (RuntimeError, TypeError):
+            pass
+        btn.clicked.connect(_stop)
+    dlg.canceled.connect(_stop)       # Esc / window close count as Stop too
+    dlg.show()
+    return dlg
+
+
 class CTRWorker(QThread):
     progress = Signal(str)
     finished = Signal(list)   # list[str] of output file paths
@@ -219,6 +249,13 @@ class CTRWorker(QThread):
         self._header_azn    = header_azn
         self._header_usd    = header_usd
         self._markup_rate   = markup_rate
+        # Ordered steps, shown in the F12 Inspector. A stop request is only
+        # honoured between steps, so a spreadsheet is never cut off halfway.
+        self.job: Job = TASKS.begin_job(f"Generate CTR {job_ref}", [
+            "Write AZN spreadsheet", "Write USD spreadsheet",
+            "Export AZN PDF", "Export USD PDF",
+        ])
+        self.stopped = False
 
     def run(self):
         log.info(
@@ -228,44 +265,87 @@ class CTRWorker(QThread):
             len(self._equip_rows), len(self._consump_rows),
             len(self._third_party_rows), self._output_dir,
         )
+        job = self.job
+        step = 0
+        produced: list[str] = []
+
+        def _stop_here(next_step: int) -> bool:
+            """Between steps only: finish cleanly with what is already saved."""
+            if not job.should_stop():
+                return False
+            job.skip_remaining(next_step)
+            job.finish()
+            self.stopped = True
+            log.info("CTRWorker: stopped on request after step %d; saved: %s", next_step, produced)
+            self.finished.emit(produced)
+            return True
+
         try:
             out = Path(self._output_dir)
 
+            step = 0
+            job.start(step)
             self.progress.emit("Writing AZN CTR spreadsheet…")
             azn_xlsx = build_azn(
                 self._support_rows, self._other_rows, self._azn_tpl, out, self._job_ref,
                 header=self._header_azn, third_party_rows=self._third_party_rows,
             )
             log.info("CTRWorker: AZN spreadsheet written: %s", azn_xlsx)
+            job.done(step)
+            produced.append(str(azn_xlsx))
+            if _stop_here(1):
+                return
 
+            step = 1
+            job.start(step)
             self.progress.emit("Writing USD CTR spreadsheet…")
             usd_xlsx = build_usd(
                 self._equip_rows, self._consump_rows, self._usd_tpl, out, self._job_ref,
                 header=self._header_usd, markup_rate=self._markup_rate,
             )
             log.info("CTRWorker: USD spreadsheet written: %s", usd_xlsx)
+            job.done(step)
+            produced.append(str(usd_xlsx))
+            if _stop_here(2):
+                return
 
+            step = 2
+            job.start(step)
             self.progress.emit("Exporting AZN PDF via LibreOffice…")
             try:
                 azn_pdf = export_to_pdf(azn_xlsx, out)
                 azn_pdf_str = str(azn_pdf)
+                job.done(step)
             except RuntimeError as e:
                 log.warning("CTRWorker: AZN PDF export skipped: %s", e)
                 azn_pdf_str = f"[PDF skipped: {e}]"
+                job.done(step, "PDF skipped")
+            produced.append(azn_pdf_str)
+            if _stop_here(3):
+                return
 
+            step = 3
+            job.start(step)
             self.progress.emit("Exporting USD PDF via LibreOffice…")
             try:
                 usd_pdf = export_to_pdf(usd_xlsx, out)
                 usd_pdf_str = str(usd_pdf)
+                job.done(step)
             except RuntimeError as e:
                 log.warning("CTRWorker: USD PDF export skipped: %s", e)
                 usd_pdf_str = f"[PDF skipped: {e}]"
+                job.done(step, "PDF skipped")
+            produced.append(usd_pdf_str)
 
             log.info("CTRWorker: finished successfully")
-            self.finished.emit([str(azn_xlsx), str(usd_xlsx), azn_pdf_str, usd_pdf_str])
+            job.finish()
+            self.finished.emit(produced)
 
         except Exception as exc:
             log.exception("CTRWorker failed")
+            job.failed(step, str(exc))
+            job.skip_remaining(step + 1, "not run")
+            job.finish()
             self.error.emit(str(exc))
 
 
@@ -278,20 +358,42 @@ class _LoadSignals(QObject):
     result = Signal(str, object)   # (task_name, DataFrame | Exception)
 
 
+class _TaskStopped(Exception):
+    """Result of a load task that was skipped because the user asked to stop
+    after the task that was already running (see ctr_tools/tasks.py)."""
+
+
 class _LoadTask(QRunnable):
     """Runs one file-parse function on a pool thread, then emits result."""
-    def __init__(self, name: str, fn, signals: _LoadSignals):
+    def __init__(self, name: str, fn, signals: _LoadSignals,
+                 job: Job | None = None, index: int = 0):
         super().__init__()
         self._name    = name
         self._fn      = fn
         self._signals = signals
+        self._job     = job
+        self._index   = index
         self.setAutoDelete(True)
 
     def run(self):
+        job, i = self._job, self._index
+        # Checked before the task starts, never inside it.
+        if job is not None and job.should_stop():
+            job.skip(i)
+            self._signals.result.emit(self._name, _TaskStopped("stopped before it started"))
+            return
+        if job is not None:
+            job.start(i)
         try:
-            self._signals.result.emit(self._name, self._fn())
+            result = self._fn()
         except Exception as exc:
+            if job is not None:
+                job.failed(i, str(exc))
             self._signals.result.emit(self._name, exc)
+            return
+        if job is not None:
+            job.done(i)
+        self._signals.result.emit(self._name, result)
 
 
 class _CTRRequestWorker(QThread):
@@ -302,12 +404,20 @@ class _CTRRequestWorker(QThread):
     def __init__(self, path: str, parent=None):
         super().__init__(parent)
         self._path = path
+        self.job = TASKS.begin_job("Load CTR Request", ["Read CTR Request sheet"], stoppable=False)
 
     def run(self):
+        self.job.start(0)
         try:
-            self.finished.emit(parse_ctr_request(self._path))
+            data = parse_ctr_request(self._path)
         except Exception as exc:
+            self.job.failed(0, str(exc))
+            self.job.finish()
             self.error.emit(str(exc))
+            return
+        self.job.done(0)
+        self.job.finish()
+        self.finished.emit(data)
 
 
 # At most 3 file-parse tasks run concurrently — limits RAM and disk contention
@@ -381,19 +491,26 @@ def _apply_row_tint(tbl: QTableWidget, row: int) -> None:
     key = col0.data(_ROW_TINT_ROLE) if col0 else None
     colors = _ROW_TINT_COLORS.get(key)
     selected = bool(col0) and col0.isSelected()
-    for col in range(tbl.columnCount()):
-        item = tbl.item(row, col)
-        if not item:
-            continue
-        if colors is None:
-            item.setBackground(QBrush())
-            item.setForeground(QBrush())
-        elif selected:
-            item.setBackground(QBrush())
-            item.setForeground(QBrush(colors[1]))
-        else:
-            item.setBackground(QBrush(colors[0]))
-            item.setForeground(QBrush())
+    # Every setBackground/setForeground emits itemChanged, and the tables'
+    # itemChanged handlers re-match the row (Match By column) — which tints
+    # it again. Painting is cosmetic, so it must not trigger any of that.
+    was_blocked = tbl.blockSignals(True)
+    try:
+        for col in range(tbl.columnCount()):
+            item = tbl.item(row, col)
+            if not item:
+                continue
+            if colors is None:
+                item.setBackground(QBrush())
+                item.setForeground(QBrush())
+            elif selected:
+                item.setBackground(QBrush())
+                item.setForeground(QBrush(colors[1]))
+            else:
+                item.setBackground(QBrush(colors[0]))
+                item.setForeground(QBrush())
+    finally:
+        tbl.blockSignals(was_blocked)
 
 
 def _set_row_tint(tbl: QTableWidget, row: int, key: str | None) -> None:
@@ -457,6 +574,46 @@ def _file_picker_row(label: str, ext_filter: str) -> tuple[QHBoxLayout, QLineEdi
     return row, edit
 
 
+# Normalised-text -> first-row-position index per (dataframe, column). A
+# lookup used to lowercase/strip the whole column (91k rows for SAGE) on every
+# call, and a CTR Request load makes hundreds of them on the UI thread. The
+# dataframes are only ever replaced wholesale on load (never edited in
+# place), so an index built once per dataframe stays valid; the entry holds a
+# reference to its dataframe so its id can't be reused while cached.
+_LOOKUP_INDEXES: dict[int, tuple[weakref.ref, dict[str, dict[str, int]]]] = {}
+
+
+def _lookup_index(df: pd.DataFrame, col: str) -> dict[str, int]:
+    """First row position for each trimmed, lower-cased value of df[col]."""
+    key = id(df)
+    entry = _LOOKUP_INDEXES.get(key)
+    if entry is None or entry[0]() is not df:
+        # A weak reference: the index must not keep a replaced table alive —
+        # when the table is freed (e.g. SAGE reloaded) its index goes with it.
+        def _forget(ref, key=key):
+            current = _LOOKUP_INDEXES.get(key)
+            if current is not None and current[0] is ref:
+                del _LOOKUP_INDEXES[key]
+        entry = _LOOKUP_INDEXES[key] = (weakref.ref(df, _forget), {})
+    by_col = entry[1]
+    index = by_col.get(col)
+    if index is None:
+        index = {}
+        for pos, value in enumerate(df[col].astype(str).str.strip().str.lower().tolist()):
+            index.setdefault(value, pos)
+        by_col[col] = index
+    return index
+
+
+def _prime_sage_index(df: pd.DataFrame) -> pd.DataFrame:
+    """Builds SAGE's lookup indexes — called on the load thread so the first
+    match after loading doesn't pay for it on the UI thread."""
+    for col in ("product", "long_description"):
+        if col in df.columns:
+            _lookup_index(df, col)
+    return df
+
+
 def _match_lookup(df: pd.DataFrame, code_col: str, desc_col: str, price_col: str, key: str):
     """
     Look up a row in a reference dataframe (SAGE, or the AZN pricebook via
@@ -470,15 +627,15 @@ def _match_lookup(df: pd.DataFrame, code_col: str, desc_col: str, price_col: str
     key_norm = key.strip().lower()
 
     if code_col in df.columns:
-        code_matches = df[df[code_col].astype(str).str.strip().str.lower() == key_norm]
-        if not code_matches.empty:
-            row = code_matches.iloc[0]
+        pos = _lookup_index(df, code_col).get(key_norm)
+        if pos is not None:
+            row = df.iloc[pos]
             return str(row[desc_col]), float(row[price_col]), str(row[code_col])
 
     if desc_col in df.columns:
-        desc_matches = df[df[desc_col].astype(str).str.strip().str.lower() == key_norm]
-        if not desc_matches.empty:
-            row = desc_matches.iloc[0]
+        pos = _lookup_index(df, desc_col).get(key_norm)
+        if pos is not None:
+            row = df.iloc[pos]
             code_val = str(row[code_col]) if code_col in df.columns else ""
             return str(row[desc_col]), float(row[price_col]), code_val
 
@@ -579,10 +736,10 @@ def _sage_non_recharge(sage_df: pd.DataFrame, key: str) -> bool | None:
     if sage_df is None or sage_df.empty or not key:
         return None
     key_norm = key.strip().lower()
-    hits = sage_df[sage_df["product"].astype(str).str.strip().str.lower() == key_norm]
-    if hits.empty:
+    pos = _lookup_index(sage_df, "product").get(key_norm)
+    if pos is None:
         return None
-    return bool(hits.iloc[0]["non_recharge"])
+    return bool(sage_df.iloc[pos]["non_recharge"])
 
 
 # AZN labor stock codes encode shift + shift-type in their prefix, e.g.
@@ -1121,6 +1278,7 @@ class CTRGeneratorWidget(QWidget):
         self._load_signals = _LoadSignals()
         self._load_signals.result.connect(self._on_file_loaded)
         self._pending_loads: int  = 0
+        self._load_job: Job | None = None
         self._load_errors:   list = []   # [(name, msg, is_warning)]
         self._load_status:   list = []
 
@@ -1963,7 +2121,7 @@ class CTRGeneratorWidget(QWidget):
 
         tasks = [
             ("azn_pb", lambda p=azn_pb: parse_azn_pricebook(p)),
-            ("sage",   lambda p=sage:   parse_sage(p)),
+            ("sage",   lambda p=sage:   _prime_sage_index(parse_sage(p))),
             ("usd_pb", lambda p=usd_pb: parse_usd_pricebook(p)),
         ]
         # Optional — only needed to resolve a CTR Request equipment stock
@@ -1972,6 +2130,7 @@ class CTRGeneratorWidget(QWidget):
         if combined:
             tasks.append(("names_db", lambda p=combined: parse_equip_names_db(p)))
 
+        job = TASKS.begin_job("Load pricebook files", [name for name, _fn in tasks])
         self._pending_loads += len(tasks)
         self._load_errors.clear()
         self._load_status.clear()
@@ -1982,12 +2141,15 @@ class CTRGeneratorWidget(QWidget):
             "Async loading pricebook files: azn=%s sage=%s usd_pb=%s combined_db=%s",
             azn_pb, sage, usd_pb, combined,
         )
-        for name, fn in tasks:
-            _LOAD_POOL.start(_LoadTask(name, fn, self._load_signals))
+        for i, (name, fn) in enumerate(tasks):
+            _LOAD_POOL.start(_LoadTask(name, fn, self._load_signals, job, i))
+        self._load_job = job
 
     def _on_file_loaded(self, name: str, result) -> None:
         """Slot (always on main thread via queued connection) for pool-task results."""
-        if isinstance(result, Exception):
+        if isinstance(result, _TaskStopped):
+            self._load_status.append(f"{name}: not loaded (stopped on request)")
+        elif isinstance(result, Exception):
             is_warning = name == "names_db"
             self._load_errors.append((name, str(result), is_warning))
             log.error("Failed to load %s: %s", name, result)
@@ -2009,6 +2171,8 @@ class CTRGeneratorWidget(QWidget):
         if self._pending_loads <= 0:
             self._pending_loads = 0
             self._load_files_btn.setEnabled(True)
+            if self._load_job is not None:
+                self._load_job.finish()
             self._finish_file_load()
 
     def _finish_file_load(self) -> None:
@@ -2043,6 +2207,12 @@ class CTRGeneratorWidget(QWidget):
                 + "; ".join(self._load_status)
             )
 
+    def _prune_workers(self) -> None:
+        """Drops workers that have finished (see MainWindow._prune_workers)."""
+        for w in [w for w in self._workers if w.isFinished()]:
+            self._workers.remove(w)
+            w.deleteLater()
+
     def _load_ctr_request(self):
         """Starts parsing the CTR Request sheet of the Combined DB file on a background thread."""
         path = self._combined_db_edit.text().strip()
@@ -2058,6 +2228,7 @@ class CTRGeneratorWidget(QWidget):
         self._ctr_req_status.setText("Loading CTR Request…")
 
         worker = _CTRRequestWorker(path, parent=self)
+        self._prune_workers()
         self._workers.append(worker)
         worker.finished.connect(self._on_ctr_loaded)
         worker.error.connect(self._on_ctr_error)
@@ -3418,12 +3589,6 @@ class CTRGeneratorWidget(QWidget):
         }
         header_usd = {**_base, "contract_no": self._contract_no_usd_edit.text().strip()}
 
-        # Progress dialog
-        dlg = QProgressDialog("Generating CTR documents…", None, 0, 0, self)
-        dlg.setWindowTitle("Generating")
-        dlg.setWindowModality(Qt.WindowModality.WindowModal)
-        dlg.show()
-
         worker = CTRWorker(
             support_rows  = support_rows,
             other_rows    = other_rows,
@@ -3439,15 +3604,25 @@ class CTRGeneratorWidget(QWidget):
             markup_rate   = self._markup_rate(),
             parent        = self,
         )
+        self._prune_workers()
         self._workers.append(worker)
+        dlg = stoppable_progress_dialog(
+            self, "Generating CTR documents…", "Generating", worker.job)
 
         def _done(paths: list[str]):
             dlg.close()
-            body = "\n".join(f"  • {p}" for p in paths)
+            body = "\n".join(f"  • {p}" for p in paths) or "  (nothing was written)"
             note = (
                 f"\n\nSkipped {total_skipped} unmatched row(s) — not included "
                 f"in the output." if total_skipped else ""
             )
+            if worker.stopped:
+                QMessageBox.information(
+                    self, "Generation stopped",
+                    "Stopped after the step that was running — the remaining steps "
+                    f"were not run.\n\nSaved so far:\n\n{body}{note}"
+                )
+                return
             QMessageBox.information(
                 self, "Generation complete",
                 f"CTR documents saved:\n\n{body}{note}"

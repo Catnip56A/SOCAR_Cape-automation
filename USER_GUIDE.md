@@ -549,3 +549,24 @@ If a batch contains two entries for the same CTR number + currency (e.g. a CTR a
 | *"Excel stopped responding or was closed while the row was being inserted"* | Excel went away while the app was inserting a revision row; that entry was skipped | Close any open Excel windows and write the batch again |
 | Row insert requires Excel | A new revision needed a row inserted (no spare, or the spare would break revision order) | Run this on a machine with a licensed Excel install, or pre-create a spare row by hand instead |
 | Formula cells (e.g. USD equivalent, totals) empty after writing, formula visible in the cell | The writer stores formulas without a calculated result and Excel hasn't recalculated them yet | In Excel press **Ctrl+Alt+Shift+F9** to recalculate the whole workbook |
+
+---
+
+# Inspector (F12)
+
+Press **F12** anywhere to open the **Inspector** — a read-only panel that shows what the app is doing. It never changes your data. It opens docked on the right; drag its title to move it to another side. Press **Float** to turn it into its own window — an ordinary window with a normal title bar you can drag, edges you can resize, and minimise/maximise buttons — and **Dock** to put it back. Press F12 again to hide it. The app remembers whether it was docked or floating, and the window's size and position, but it always starts closed.
+
+| Tab | What it shows |
+|---|---|
+| **Overview** | Version, memory, CPU, running jobs, log folder, and the **last error with its date** and how long ago it happened. |
+| **Logs** | The log files (`app.log`, `crash.log`, older rotations). Filter by **Level**, **Search**, and tick **Follow** to keep scrolling to the newest line as the log grows (untick it to stay where you are). **Open folder** / **Copy path** find the file. |
+| **Data** | Everything currently held in memory — pricebooks, SAGE, request lines, MR/CTR tables — with rows, size and source path. Sources that aren't loaded show the path they are connected to. Select a loaded table to preview its first rows. |
+| **Storage** | Every file and folder the app is connected to, as a **path only** (nothing is opened): whether it exists, size, date, and whether the app itself holds its contents. |
+| **Threads** | What every thread is doing right now (its call stack). **Copy all stacks** is handy for a bug report. |
+| **Variables** | A read-only list of the app's variables with a search box. |
+| **Tasks** | The background work in order, with timings. **Stop after current task** lets the running task finish and doesn't start the next ones. |
+| **Charts** | Memory and CPU over time (tick **Record usage** to start sampling), time per task, memory per loaded table, space per folder. |
+
+**Snapshot.** The **Snapshot** button (next to Float) saves everything the tabs show — as of that moment — into one text file: overview and last error, the recent log and `crash.log`, what is loaded in memory (rows, size, source path and column names, but never table contents), every connected path, every thread's call stack, the variables list, the tasks with timings, and the chart data. The file goes into a `snapshots` folder inside the log folder (`snapshot_YYYYMMDD_HHMMSS.txt`; the 30 newest are kept) and a message shows the path with **Open folder** and **Copy path**. To keep it safe to pass around, the user name in paths is replaced with `<user>` and variables named like value / rate / price / cost / total / markup / contingency / amount are shown as `<hidden>`. It still contains client names, contract numbers, job references and file names, so send it to people inside the company only. Send it with a problem report: it shows what the app was doing when the problem happened.
+
+**Stopping work.** Generate and file parsing also show a **Stop after current step** button in their progress window. A stop never interrupts a task that has already started — a spreadsheet being written is always finished — so the files saved so far are complete, and the result message lists them. A tracker write is a single task and can't be stopped.

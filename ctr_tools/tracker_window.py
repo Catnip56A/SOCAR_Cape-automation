@@ -41,6 +41,7 @@ from ctr_tools.tracker import (
     location_options, match_site,
 )
 from ctr_tools.tracker_fast import IN_BATCH_CONFLICT_MARKER, write_entries_fast
+from ctr_tools.tasks import TASKS
 from ctr_tools.window import _file_picker_row, _group_css, _highlight_row, _make_table, _ro_item
 
 log = logging.getLogger(__name__)
@@ -81,16 +82,53 @@ class _WriteWorker(QThread):
         self._tracker_path = tracker_path
         self._entries = entries
         self._make_backup = make_backup
+        # One atomic task (a half-saved tracker is the worst outcome), so it
+        # is shown in the Inspector but offers no "stop".
+        self.job = TASKS.begin_job(
+            "Write batch to CTR Tracker", [f"Write {len(entries)} CTR(s)"], stoppable=False)
 
     def run(self):
+        self.job.start(0)
         try:
             written, skipped, backup_path, notes = write_entries_fast(
                 self._tracker_path, self._entries, make_backup=self._make_backup,
             )
-            self.finished_ok.emit(written, skipped, backup_path, notes)
         except Exception as exc:
             log.exception("CTR Tracker write failed")
+            self.job.failed(0, str(exc))
+            self.job.finish()
             self.error.emit(str(exc))
+            return
+        self.job.done(0)
+        self.job.finish()
+        self.finished_ok.emit(written, skipped, backup_path, notes)
+
+
+class _ExtractWorker(QThread):
+    """Runs extract_ctr_data() off the UI thread — it opens the CTR workbook
+    twice through openpyxl, which blocks the window for up to a couple of
+    seconds on a large file."""
+    finished_ok = Signal(object)   # CTREntry
+    error       = Signal(str)
+
+    def __init__(self, path: str, parent=None):
+        super().__init__(parent)
+        self._path = path
+        self.job = TASKS.begin_job("Load fields from CTR file", ["Read CTR file"], stoppable=False)
+
+    def run(self):
+        self.job.start(0)
+        try:
+            entry = extract_ctr_data(self._path)
+        except Exception as exc:
+            log.exception("Failed to read CTR file %s", self._path)
+            self.job.failed(0, str(exc))
+            self.job.finish()
+            self.error.emit(str(exc))
+            return
+        self.job.done(0)
+        self.job.finish()
+        self.finished_ok.emit(entry)
 
 
 def _hdr_row(label: str, widget: QWidget) -> QHBoxLayout:
@@ -199,6 +237,7 @@ class CTRTrackerWidget(QWidget):
             }}
             QPushButton:hover {{ background-color: #1565C0; }}
         """)
+        self._load_btn = load_btn
         load_btn.clicked.connect(self._load_fields)
         gl.addWidget(load_btn)
 
@@ -306,13 +345,31 @@ class CTRTrackerWidget(QWidget):
         if not path:
             QMessageBox.warning(self, "No file selected", "Choose a CTR file first.")
             return
-        try:
-            entry = extract_ctr_data(path)
-        except Exception as exc:
-            log.exception("Failed to read CTR file %s", path)
-            QMessageBox.critical(self, "Could not read file", str(exc))
-            return
+        self._load_btn.setEnabled(False)
+        label = self._load_btn.text()
+        self._load_btn.setText("Loading…")
+        worker = _ExtractWorker(path, parent=self)
+        self._workers.append(worker)
 
+        def _finish():
+            self._workers.remove(worker)
+            self._load_btn.setText(label)
+            self._load_btn.setEnabled(True)
+
+        def _done(entry):
+            _finish()
+            self._apply_loaded_entry(entry)
+
+        def _err(message: str):
+            _finish()
+            QMessageBox.critical(self, "Could not read file", message)
+
+        worker.finished_ok.connect(_done)
+        worker.error.connect(_err)
+        worker.start()
+
+    def _apply_loaded_entry(self, entry: CTREntry) -> None:
+        """Fills the form from a freshly read CTR file (UI thread)."""
         self._current_entry = entry
         self._client_edit.setText(entry.client)
         self._ctr_no_edit.setText(entry.ctr_number)

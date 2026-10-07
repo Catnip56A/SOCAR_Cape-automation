@@ -30,6 +30,7 @@ a = Analysis(
         "PySide6.QtCore",
         "PySide6.QtGui",
         "PySide6.QtWidgets",
+        "PySide6.QtCharts",   # F12 Inspector charts (ctr_tools/inspector.py)
         "ctr_tools.presets",
         "ctr_tools.config",
         # CTR Tracker's "Add as separate revision" row-insertion path

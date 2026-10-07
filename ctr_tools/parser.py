@@ -73,11 +73,16 @@ raw pandas/openpyxl traceback — see _friendly_open_error.
 
 from __future__ import annotations
 
+import logging
+import re
+import zipfile
 from io import BytesIO
 from pathlib import Path
+from xml.etree import ElementTree
 
 import openpyxl
 import pandas as pd
+from openpyxl.worksheet.cell_range import CellRange
 
 from ctr_tools.config import CFG
 
@@ -85,6 +90,8 @@ _pb     = CFG["pricebook"]
 _usd_pb = CFG["usd_pricebook"]
 _sg     = CFG["sage_export"]
 _nm     = CFG["names_db"]
+log = logging.getLogger(__name__)
+
 _req    = CFG["ctr_request"]
 _xtr    = CFG["ctr_request_extras"]
 _scf    = CFG["scaffold"]
@@ -545,6 +552,138 @@ def _parse_request_extras(ws) -> dict:
     return result
 
 
+# ── Reading the request sheet without loading the whole workbook ─────────────
+#
+# The CTR Request normally lives in the Combined DB workbook, next to the
+# 117,000-row SAGE sheet. Loading that workbook in full to read one sheet made
+# the process grow by ~470 MB (and take ~16 s) — memory Python then keeps for
+# the rest of the session. A read-only load of just this sheet costs ~8 MB and
+# under a second. Read-only sheets have no merged-cell information and are slow
+# to index, so the sheet is copied into a small snapshot object offering the
+# same two things the parsing code uses: ws.cell(row=, column=).value and
+# ws.merged_cells.ranges (the latter read straight from the sheet's XML).
+
+_NS_MAIN = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
+_NS_REL  = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}"
+_MERGE_REF = re.compile(rb'<(?:\w+:)?mergeCell\b[^>]*?\bref="([^"]+)"')
+
+
+class _SnapshotCell:
+    __slots__ = ("value",)
+
+    def __init__(self, value):
+        self.value = value
+
+
+class _SnapshotMerges:
+    def __init__(self, ranges):
+        self.ranges = ranges
+
+
+class _SheetSnapshot:
+    """Values of a sheet's top-left block plus its merged ranges (see above)."""
+
+    def __init__(self, rows: list[tuple], merged: list[CellRange]):
+        self._rows = rows
+        self.merged_cells = _SnapshotMerges(merged)
+
+    def cell(self, row: int, column: int) -> _SnapshotCell:
+        if 1 <= row <= len(self._rows):
+            values = self._rows[row - 1]
+            if 1 <= column <= len(values):
+                return _SnapshotCell(values[column - 1])
+        return _SnapshotCell(None)
+
+
+def _request_sheet_bounds() -> tuple[int, int]:
+    """Rows/columns of the request sheet the parsing code can look at."""
+    cols = [v for k, v in _req.items() if isinstance(v, int) and (k.startswith("col_") or k.endswith("_col"))]
+    rows = [v for k, v in _req.items() if isinstance(v, int) and k.startswith("row_")]
+    max_col = max([_xtr["search_max_col"], *cols]) + 2
+    # the line-item scan is capped at 1000 rows below data_start_row (see parse_ctr_request)
+    max_row = max([_xtr["search_max_row"], _req["data_start_row"] + 1000, *rows]) + 5
+    return max_row, max_col
+
+
+def _sheet_part_path(zf: zipfile.ZipFile, sheet_name: str) -> str:
+    """Path inside the .xlsx of the worksheet XML for `sheet_name`."""
+    workbook = ElementTree.fromstring(zf.read("xl/workbook.xml"))
+    rel_id = None
+    for sheet in workbook.iter(f"{_NS_MAIN}sheet"):
+        if sheet.get("name") == sheet_name:
+            rel_id = sheet.get(f"{_NS_REL}id")
+    if rel_id is None:
+        raise KeyError(sheet_name)
+    rels = ElementTree.fromstring(zf.read("xl/_rels/workbook.xml.rels"))
+    for rel in rels:
+        if rel.get("Id") == rel_id:
+            target = rel.get("Target", "")
+            return target.lstrip("/") if target.startswith("/") else "xl/" + target
+    raise KeyError(rel_id)
+
+
+def _merged_ranges(src, sheet_name: str) -> list[CellRange]:
+    """Merged ranges of a sheet, read from its XML. Merges are listed after
+    </sheetData>, so only that tail is kept — the (large) cell data is streamed
+    past, not held."""
+    markers = (b"</sheetData>", b"<sheetData/>")
+    with zipfile.ZipFile(_open(src)) as zf:
+        part = _sheet_part_path(zf, sheet_name)
+        tail, carry, found = b"", b"", False
+        with zf.open(part) as fh:
+            while True:
+                chunk = fh.read(1 << 20)
+                if not chunk:
+                    break
+                if found:
+                    tail += chunk
+                    continue
+                data = carry + chunk
+                hits = [(data.find(m), m) for m in markers if data.find(m) >= 0]
+                if hits:
+                    i, m = min(hits)
+                    found, tail = True, data[i + len(m):]
+                else:
+                    carry = data[-16:]
+    if not found:
+        raise ValueError("no sheetData end marker in the sheet XML")
+    return [CellRange(m.group(1).decode()) for m in _MERGE_REF.finditer(tail)]
+
+
+def _open_request_sheet(src):
+    """(worksheet-like, workbook-or-None). Fast read-only snapshot first; if that
+    fails for any reason, the full load that always worked (slower, and heavy
+    on memory) — with a warning in the log so the fallback is visible."""
+    try:
+        wb = openpyxl.load_workbook(_open(src), read_only=True, data_only=True)
+    except Exception as e:
+        raise _friendly_open_error(e, src, "CTR Request", _REQUEST_SHEET) from e
+    try:
+        if _REQUEST_SHEET not in wb.sheetnames:
+            sheets = ", ".join(wb.sheetnames)
+            raise ValueError(
+                f'Could not find a sheet named "{_REQUEST_SHEET}" in {_display_name(src)}. '
+                f"Found sheets: {sheets}. Is this the right CTR Request file?"
+            )
+        try:
+            ws = wb[_REQUEST_SHEET]
+            ws.reset_dimensions()          # a wrong stored sheet size must not truncate the read
+            max_row, max_col = _request_sheet_bounds()
+            rows = [tuple(r) for r in ws.iter_rows(max_row=max_row, max_col=max_col, values_only=True)]
+            snapshot = _SheetSnapshot(rows, _merged_ranges(src, _REQUEST_SHEET))
+            return snapshot, None
+        except Exception:
+            log.warning("CTR Request: fast read failed, falling back to the full workbook load "
+                        "(slower, uses far more memory)", exc_info=True)
+    finally:
+        wb.close()
+    try:
+        wb = openpyxl.load_workbook(_open(src), data_only=True)
+    except Exception as e:
+        raise _friendly_open_error(e, src, "CTR Request", _REQUEST_SHEET) from e
+    return wb[_REQUEST_SHEET], wb
+
+
 def parse_ctr_request(src) -> dict:
     """
     Reads the REQUEST sheet of a CTR Request workbook (e.g. *.xlsm).
@@ -559,19 +698,7 @@ def parse_ctr_request(src) -> dict:
     Cells containing the literal '-' are treated as "not requested" and
     excluded from the line-item lists.
     """
-    try:
-        wb = openpyxl.load_workbook(_open(src), data_only=True)
-    except Exception as e:
-        raise _friendly_open_error(e, src, "CTR Request", _REQUEST_SHEET) from e
-
-    if _REQUEST_SHEET not in wb.sheetnames:
-        sheets = ", ".join(wb.sheetnames)
-        wb.close()
-        raise ValueError(
-            f'Could not find a sheet named "{_REQUEST_SHEET}" in {_display_name(src)}. '
-            f"Found sheets: {sheets}. Is this the right CTR Request file?"
-        )
-    ws = wb[_REQUEST_SHEET]
+    ws, wb = _open_request_sheet(src)
 
     def _v(row, col):
         val = ws.cell(row=row, column=col).value
@@ -682,5 +809,6 @@ def parse_ctr_request(src) -> dict:
     result["equipment_rows"]  = equipment_rows
     result["consumable_rows"] = consumable_rows
     result.update(_parse_request_extras(ws))
-    wb.close()
+    if wb is not None:
+        wb.close()
     return result

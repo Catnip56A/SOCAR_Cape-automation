@@ -48,6 +48,12 @@ _QT_LEVELS = {
 }
 
 _crash_file = None  # kept open for the lifetime of the process — faulthandler needs a live fd
+_log_dir: Path | None = None  # set by setup_logging; read by the F12 Inspector
+
+
+def get_log_dir() -> Path | None:
+    """The log folder in use, or None if setup_logging() has not run (e.g. tests)."""
+    return _log_dir
 
 
 def _resolve_log_dir() -> Path:
@@ -96,9 +102,9 @@ def _excepthook(exc_type, exc_value, exc_tb):
 
 def setup_logging(level: int = logging.INFO) -> Path:
     """Configure rotating file + console logging, plus crash capture. Returns the log dir."""
-    global _crash_file
+    global _crash_file, _log_dir
 
-    log_dir = _resolve_log_dir()
+    log_dir = _log_dir = _resolve_log_dir()
 
     root = logging.getLogger()
     root.setLevel(level)
