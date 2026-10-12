@@ -23,7 +23,13 @@ The application window is divided into two main areas stacked vertically:
 A scrollable panel with two columns side by side: the left column for MR files and the right column for CTR files. Each column has three numbered steps.
 
 **Bottom area — Results**
-A collapsible panel that appears after you click Compare. It shows a row of summary counts at the top, then three tabs (Matched / Only in MR / Only in CTR), and a download button at the bottom.
+A collapsible panel that appears after you click Compare. It shows a row of summary counts at the top, then the result tabs (Matched / Only in MR / Only in CTR / Needs Review / Error Data / Statistics), and download and save buttons at the bottom. In a narrow window the Statistics toolbar wraps onto a second line, and the tab can be scrolled.
+
+Under the progress indicator, **Compare** and **Load Comparison…** share one line (same size), and the **SAGE Export** field (the file used for the cost statistics) sits on the line below them.
+
+**Ctrl+F** in any table or tree opens a find bar over it: type to search every visible column, **Enter** (or ▶) goes to the next match and **Shift+Enter** (◀) to the previous one, with a counter such as “3 of 12”; **Esc** closes it. It only moves between matches — the “Filter rows” boxes are what hide rows.
+
+In every table, if a cell's text is cut off because the column is too narrow, rest the mouse on the cell to see the whole text in a tooltip (a cell that already has its own hint shows the full text first, then the hint).
 
 A progress indicator at the very top of the window shows which step you are on: Upload Files → Select Tables → Compare & Review.
 
@@ -110,7 +116,10 @@ In the top-right corner of the result tabs there is a **Compare Values** button.
 
 Click it while the **Matched** tab is open to highlight every row where:
 - **Qty (MR)** and **Qty (CTR)** are different, or
-- **Unit (MR)** and **Unit (CTR)** are different
+- **Unit (MR)** and **Unit (CTR)** are different, or
+- MR's **Rechargeable** flag and CTR's **Rate** disagree about whether the item is billable (a number in Rate means rechargeable; `NONRECHARG` means not)
+
+This Rate/Rechargeable check is only highlighted while Compare Values is on.
 
 Mismatched cells are highlighted in **red** with dark red text. The mismatch highlight stays visible even when the row is selected (blue selection bar).
 
@@ -121,6 +130,34 @@ The **Matched keys** box shows a summary below the count:
 **Navigation arrows** (↑ ↓) appear to the left of the Compare Values button. Use them to jump to the previous or next mismatched row. The status bar at the bottom of the window shows which mismatch you are on and the stock code of that row.
 
 Click **Compare Values** again to clear all highlights.
+
+In **Combined View** a second, separate **Compare Values** button appears (the original one becomes **Show Combined**, which marks Stock Codes built from several documents in orange). It highlights in red every Stock Code whose **Qty (MR) Total** and **Qty (CTR) Total** differ (including the Diff column), or whose MR and CTR units differ (shown in the **Unit** column as both units). The ↑ ↓ arrows step through the highlighted rows; with both buttons on, red wins on any shared cell.
+
+---
+
+## Filter documents
+
+Above the result tabs, the **Filter documents** box limits what you see to rows that came from the MR/CTR files (and sheets) you choose. It only changes the view — the Excel download and Save Comparison still contain the full comparison.
+
+Write each name as `MR:<document>` or `CTR:<document>`, optionally followed by `>` and a sheet name:
+
+| You type | Shows rows where… |
+|---|---|
+| `MR:Jan` | the MR side came from a file whose name contains "Jan" |
+| `MR:Jan>CH-01` | … and from the sheet whose name contains "CH-01" |
+| `CTR:sage` | the CTR side came from a file containing "sage" |
+
+Part of a name is enough and capitals don't matter. As you type, a list of matching documents and sheets from your uploaded files appears — pick one to complete the name: click it, or use ↑ ↓ and **Enter** / **Tab** (**Esc** closes the list, ↓ opens it again). After you choose a document, the list immediately offers that document's sheets (or type `>` yourself); press **Esc** to keep just the document. The list also appears after `(`, `and`, `or` and `not`.
+
+Combine names with **and**, **or**, **not**, and use **( )** to group, like a search tool:
+
+`(MR:Jan>CH-01 or MR:Feb) and not CTR:draft`
+
+`not` is applied first, then `and`, then `or`. If a name contains brackets, `>` or the words and/or/not, put it in quotes: `MR:"Rock and Roll (1).xlsx"`. The sheet always follows the file with `>` and no spaces around it: `MR:Jan_MR.xlsx>CH-1` — writing `MR:Jan_MR.xlsx CH-1` looks for a file literally named that. When a name matches nothing, an orange note appears beside the box and the status bar explains (and points out a missing `>`). If the expression isn't valid yet (for example an open bracket), the reason is shown in red and the previous filter stays on. Clear the box to show everything. The filter resets whenever you run a new Compare or load a saved comparison.
+
+It applies to **Matched**, **Only in MR** and **Only in CTR**, and a count ("Showing 12 of 40 matched …") sits beside the box. The ↑ ↓ arrows only visit rows you can see. **Show Document Names** now also shows each row's MR/CTR sheet.
+
+In **Combined View** the Stock Codes that don't involve the chosen documents are hidden, but the totals shown are still the full totals. Hover a **Qty (MR) Total**, **Qty (CTR) Total** or **Diff** cell to see how much of it comes from the chosen documents, for example "MR from selected documents: 10 of 40 (25%)". Comparisons saved before version 1.0.19 can still be filtered by document, but they hold no sheet names or quantity breakdown: `>sheet` can't match and no sheets are suggested, and an orange note says so. Click **Compare** again (or upload the files and Compare) to get sheet filtering.
 
 ---
 
@@ -144,6 +181,31 @@ The **Flag** column appears in the Combined view and in the Excel report's Combi
 
 Approve/Reject decisions are cleared when you run a new Compare.
 
+**No quantity.** Rows whose quantity is blank or not a number are also listed in **Needs Review**, under a red "No quantity" heading (the tab badge counts them). There is nothing to approve: they cannot be costed, so they are left out of the cost statistics until the quantity is filled in in the source file and you Compare again.
+
+---
+
+## Statistics tab (cost of the MR and CTR)
+
+The **Statistics** tab shows how much of the **SAGE expected cost** of your MR and CTR documents is rechargeable and how much is not. It is SAGE's expected cost (`local_expect_cost`), **not what the client is billed**, and it is calculated for every row of the compared files, matched or not.
+
+**Before you start.** Choose the **SAGE Export** file in the field under the **Compare** and **Load Comparison…** buttons. It is the same field as in the CTR Generator tab — setting it in one sets it in the other. Without it nothing can be costed: a yellow banner in the tab says so and cannot be closed. Statistics are calculated in the background after Compare (the banner says they will appear shortly; you can keep working) and the banner disappears when they are ready. Changing the SAGE file after a Compare recalculates them automatically; **Reload statistics** reads the file again after you have edited it.
+
+**Reading it.** The first rows are **MR — all documents shown** and **CTR — all documents shown**. Each expands to one row per document, and each document expands to its Stock Codes. Every row shows **Rechargeable**, **Non-Rechargeable** and **Unknown** cost, with a percentage beside each (the share of that group's costed total), plus **Total cost** and **Non ÷ Rech** — the Non-Rechargeable cost divided by the Rechargeable cost, in money (for example `1.34` means 1.34 of non-rechargeable cost for every 1.00 of rechargeable). It follows **Multiply cost by quantity**, which is on by default, so out of the box it compares quantity-weighted cost; with the switch off it compares unit costs. It shows **n/a** when there is non-rechargeable cost but no rechargeable cost to divide by, and is left blank on individual Stock Code lines. *Unknown* means the document does not say whether the item is rechargeable. When there is an Unknown amount, Rechargeable % + Non-Rechargeable % is less than 100 — that is intended.
+
+**Where rechargeability comes from.** From the documents themselves: MR's *Rechargeable* column (`RECHARGE` / `NONRECHARG`) and, for the CTR, the *Rate* column (a number means rechargeable, `NONRECHARG` means not). This is the working default and is open for discussion with the department; SAGE is used only for the cost.
+
+**Controls above the table**
+- **Multiply cost by quantity** (on by default): cost = SAGE unit cost × quantity. Off shows the unit cost alone for each row.
+- **All types / Equipment / Consumable / Uncategorised**, **All items / Rechargeable / Non-Rechargeable / Unknown / Not counted**, and a sort order for the Stock Codes inside each document (highest or lowest cost, highest or lowest unit cost, Stock Code). The totals follow these filters.
+- The **Filter documents** box above the tabs also applies: only the chosen documents are listed and totalled. A CTR row stays when the MR document you chose contains the same Stock Code, as in the other tabs.
+
+**Items that cannot be costed** are shown in red and are **not counted**: Stock Codes that are not in the SAGE Export, and rows with no quantity (while *Multiply cost by quantity* is on). For a code that is not in SAGE, double-click its **Unit cost** cell and type the cost — it is then used for every row with that Stock Code (SAGE wins if it later contains the code); clear the cell to remove it. Typed costs are kept when you save the comparison. Alternatively, update the SAGE file and press **Reload statistics**.
+
+**Type (Equipment / Consumable).** The type of a Stock Code is the CTR section it is listed under (*Plant & Equipment* or *Consumables & Materials*). A code that is in no CTR — which includes everything in **Only in MR** — or that appears in both sections, is **Uncategorised**. The **Type** box next to *Filter documents* filters Matched, Only in MR, Only in CTR and the Combined View the same way (view only), and hovering a Stock Code shows its type. Comparisons saved before this version have no sections stored, so the Type box is disabled for them until you Compare again.
+
+**Saving and the report.** Save Comparison stores the statistics with the comparison, so reopening it shows them straight away without SAGE (Reload statistics needs the original files). The Excel report gains the sheets **Statistics**, **Statistics Items** and **No Quantity**; they always contain everything, whatever the filters show.
+
 ---
 
 ## Downloading the report
@@ -153,6 +215,8 @@ Click **Download Excel Report…** at the bottom of the results panel. Choose a 
 - **Matched** — all matched items with all comparison columns
 - **Only in MR** — items found only in MR
 - **Only in CTR** — items found only in CTR
+
+It also contains **Combined** and **Error Data** when the Combined View has been used, and — when the cost statistics have been calculated — **Statistics**, **Statistics Items** and **No Quantity** (see *Statistics tab* above). The document and type filters never shorten the report.
 
 ---
 
@@ -250,7 +314,7 @@ The app looks for the following columns in MR tables (column names are matched c
 The **CTR Generator** tab produces the two standard CTR spreadsheets (AZN and USD) plus their PDF equivalents from a single CTR Request form. It:
 
 1. Reads the requested manpower, equipment, and consumables from the **Combined DB** file's CTR Request sheet.
-2. Looks up each requested item in the **AZN Pricebook** (manpower) and, for equipment/consumables, in the **Combined DB** file's SAGE and equipment-names sheets, to find the correct rate.
+2. Looks up each requested item to find the correct rate: manpower in the **AZN Pricebook**, equipment in the **USD Pricebook** (the Combined DB's equipment-names sheet translates a request stock code into the pricebook description), and consumables in the **SAGE Export**.
 3. Lets you review, correct, and approve every match on screen before writing any output.
 4. Writes filled copies of the **AZN Template** and **USD Template** with all rows, totals, and header fields populated — and exports each to PDF via LibreOffice.
 
@@ -258,38 +322,43 @@ The **CTR Generator** tab produces the two standard CTR spreadsheets (AZN and US
 
 ## Required files
 
-| File | Purpose | Format |
-|---|---|---|
-| **AZN Template** | Blank CTR template for AZN currency | `.xlsx` |
-| **USD Template** | Blank CTR template for USD currency | `.xlsx` |
-| **AZN Pricebook** | Rates for manpower (labor) items | `.xlsx` |
-| **Combined DB** | SAGE rates, equipment names bridge, and the CTR Request — all in one workbook | `.xlsx` |
+| File | Purpose | Format | Needed for |
+|---|---|---|---|
+| **AZN Template** | Blank CTR template for AZN currency | `.xlsx` | Generate |
+| **USD Template** | Blank CTR template for USD currency | `.xlsx` | Generate |
+| **AZN Pricebook** | Rates for manpower (labor) items | `.xlsx` | Load Files |
+| **SAGE Export** | Reference catalog and rates for consumables (and their rechargeable flag) | `.xlsx` / `.xlsm` | Load Files |
+| **USD Pricebook** | Rental rates for equipment | `.xlsx` | Load Files |
+| **Combined DB** | The CTR Request sheet and the equipment-names bridge sheet, in one workbook | `.xlsx` | Load CTR Request (the names sheet is optional for Load Files) |
 
-The Combined DB file replaces what used to be three separate files (SAGE Export, Equipment Names DB, CTR Request). It must contain these sheets:
+Load Files refuses to start until the AZN Pricebook, SAGE Export and USD Pricebook are all selected. The Combined DB is optional there: without it, equipment is matched by its "Match By" description directly against the USD Pricebook, with no stock-code bridge. It is required to load a CTR Request. It must contain these sheets:
 
 | Sheet | Purpose |
 |---|---|
-| `SAGE` | Rates for consumables **and** equipment, keyed by stock code |
-| `CTR_NAMES_DB_USD` | Bridges a CTR Request equipment stock code to the canonical name used to search SAGE by description |
+| `CTR_NAMES_DB_USD` | Bridges a CTR Request equipment stock code to the description used to look the item up in the USD Pricebook |
 | `CTR_REQUEST` | The customer's request form |
+
+The templates are not installed with the app. Each user keeps their own copies and must replace them when the app's layout changes (see the template check under Generate).
 
 ---
 
 ## Input file formats
 
-### AZN Pricebook
-Must contain a sheet named **"Item Details and Rates"**. The app reads from row 8 onwards and expects these columns (1-indexed):
+### AZN Pricebook and USD Pricebook
+Both files share one layout. Each must contain a sheet named **"Item Details and Rates"**. The app reads from row 8 onwards and expects these columns:
 
 | Column | Content |
 |---|---|
-| D (4) | Stock Code |
-| E (5) | Product Type |
-| F (6) | Unit of Measure |
-| I (9) | Supplier Description |
-| N (14) | Unit Price (AZN) |
+| E | Stock Code |
+| F | Product Type |
+| G | Unit of Measure |
+| J | Supplier Description |
+| O | Unit Price (AZN or USD) |
 
-### Combined DB — SAGE sheet
-Sheet named **"SAGE"** with at least these columns (exact header names):
+On the **USD Pricebook** the stock code is not unique per item: each equipment line carries one of two generic rate codes, ending `-NOR` (normal) or `-STBY` (standby). The app matches equipment by Supplier Description and prefers the `-NOR` rate when both exist.
+
+### SAGE Export
+Sheet named **"FROM SAGE"** (in a dedicated file, usually `.xlsm`) with these columns (exact header names):
 
 | Header | Content |
 |---|---|
@@ -297,6 +366,9 @@ Sheet named **"SAGE"** with at least these columns (exact header names):
 | `long_description` | Item description |
 | `unit_code` | Unit of measure |
 | `local_expect_cost` | Unit cost |
+| `analysis_b` | Rechargeability tag. `NONRECHARG` (or `NONRECHAR`) marks a non-rechargeable consumable: it is shown as "NONRECHARG" instead of a rate |
+
+The placeholder code `S0000000000` is ignored.
 
 ### Combined DB — CTR_NAMES_DB_USD sheet
 Read by column position (A, B, C) — header text doesn't matter:
@@ -305,9 +377,9 @@ Read by column position (A, B, C) — header text doesn't matter:
 |---|---|
 | A | Stock code (as written in the CTR Request) |
 | B | Legacy name (fallback display name) |
-| C | Canonical pricebook name used to search SAGE by description, or the literal text `NON-RECHARGEABLE` |
+| C | Canonical pricebook name used to search the USD Pricebook by description, or the literal text `NON-RECHARGEABLE` |
 
-Equipment matching tries, in order: (1) if the stock code is tagged `NON-RECHARGEABLE` in column C, the row is auto-matched using the column B name at a rate of **0** — these items are never billed to the client, even if SAGE happens to show a rate for that code; (2) otherwise, if column C has a canonical name, SAGE is searched by that description; (3) if neither applies, the stock code (or description) is looked up directly in SAGE.
+Equipment matching tries, in order: (1) if the stock code is tagged `NON-RECHARGEABLE` in column C, the row is auto-matched using the column B name at a rate of **0** — these items are never billed to the client, even if SAGE happens to show a rate for that code; (2) otherwise, if column C has a canonical name, the USD Pricebook is searched by that description; (3) if neither applies, the description is looked up directly in the USD Pricebook.
 
 ### Combined DB — CTR_REQUEST sheet
 Must be named **"CTR_REQUEST"**. The standard SOCAR Cape CTR Request form already has the correct layout. Header fields (requester, client, date, etc.) are in rows 5–9. Line items start at row 13:
@@ -325,13 +397,13 @@ Beside the line-item table the form also carries an extras block — **Additiona
 
 ### 1. Select templates and Combined DB
 
-In the **Source Files** group at the top, use the **Browse…** buttons next to **AZN Template**, **USD Template**, and **Combined DB (SAGE + Names + Request)** to select your files. All three are shared by both sub-tabs below.
+In the **Source Files** group at the top, use the **Browse…** buttons next to **AZN Template**, **USD Template**, and **Combined DB (Names + Request)** to select your files. All three are shared by both sub-tabs below.
 
 ---
 
 ### 2. Load pricebook / SAGE reference data
 
-Click the **Pricebook-Based** sub-tab. Select **AZN Pricebook**, then click **Load Files**. This loads the AZN Pricebook plus the SAGE and equipment-names sheets from the Combined DB file selected above. The button is greyed out while loading (files are parsed in parallel in the background — you can continue working). A status line shows how many rows were loaded from each source.
+Click the **Pricebook-Based** sub-tab. Select the **AZN Pricebook**, **SAGE Export** and **USD Pricebook** files, then click **Load Files**. This loads those three files, plus the equipment-names sheet from the Combined DB file selected above if there is one. The button is greyed out while loading (files are parsed in parallel in the background — you can continue working). A status line shows how many rows were loaded from each source.
 
 ---
 
@@ -349,6 +421,20 @@ The app fills in the **CTR Header Info** fields below (Client, Location, Scope, 
 Every row immediately shows its match status:
 - **✓ Matched** — an exact match was found in the pricebook/SAGE; rate is pre-filled
 - **✗ No match** — highlighted in red; the row needs attention before generating
+
+**Nothing is assumed.** If the request does not give a value a CTR line needs, that cell stays **empty and turns red** — it is never replaced by 1, 0 or 30. The values checked are: *Manpower* — Num Employees, Qty (hours), Rate, Shift, Shift Type, Nationality; *Equipment* — Qty, Unit, Rate, Days; *Consumables* — Qty, Unit, Price; *Transport* — Qty, Duration, Unit, Rate. A rate or price may be a number **or `NONRECHARG`** (a non-rechargeable line needs no rate; a rechargeable one does); a 0 you type counts as filled in. A yellow warning above the *Cost statistics* box counts the missing values. Next to it the **Go to value** button helps you find them: *click* it to go to the next one (a missing required value first, then a Stock Code that is not in SAGE) and click again for the one after; use its **▾ arrow** to open a **list** and choose which one. A missing value is shown by selecting its whole row (blue) and painting the cell itself **orange** with a border; a Stock Code not in SAGE is opened in the *Cost statistics* list with its *Unit cost* ready for typing. A row added with **+ Add Row** starts empty for the same reason. This includes **Shift** and **Shift Type**: when the request does not state them the cells stay empty, the row stays unmatched, and you choose them from the **drop-down** in each cell (Day/Night, Normal/Overtime/Standby) — they are never assumed to be Day/Normal.
+
+If you press **Generate** with missing values, a **red list** shows each affected row and what it lacks. **Generate without them** creates the CTRs *without those rows* (they are named in the log and the final message says how many were left out); **Cancel** takes you to the first empty cell. Enter the values to include them.
+
+---
+
+### 3b. Manpower: the Encoding
+
+The **Encoding** column (e.g. `NS-NAT-OFF-12`) decides a manpower row's Type (Onshore/Offshore), Shift, Shift Type and shift length, and with them the pricebook rate. It is filled from the request. **If the request gives none, no rate is written**: the row shows *“the request gives no Encoding”* and stays red until you pick one from the cell's drop-down (click anywhere on it), which lists only the encodings valid for that role; typing letters jumps to the matching entry and Enter confirms. The Type, Shift and Shift Type are then filled in for you. Changing or clearing the Encoding clears the old rate, so a rate never stays from an earlier answer.
+
+**Onshore and Offshore are never mixed.** An Offshore row only accepts `-OFF-` encodings and an Onshore row only `-ON-` ones; an encoding that disagrees with the request's Project Type is refused with an explanation. The exception is the roles listed as *always Onshore* in the Combined DB (sheet `ENC_LIST`, column H — in the test file Project Engineer, Senior Project Engineer, TAR Coordinator and Planner): they use Onshore encodings even in an Offshore request. The valid encodings per role come from the Combined DB's *Possible Variants* sheet and are read when you press **Load Files**. Allowance codes (floatel, hot-bed, per-diem) are not handled yet.
+
+**Before Load Files** the rows are shown neutral with *“⏳ Waiting for Load Files”* instead of red; they are matched, and coloured if they really do not match, once the files are loaded. **Generate** will not run while rows are still waiting.
 
 ---
 
@@ -375,7 +461,7 @@ The **Additional Info & Transport — AZN** group shows what the request's extra
 **Transport.** Each requested vehicle becomes one or more lines of the AZN CTR's **Third Party Activities** section (a section the template doesn't ship with — it's added only when there are transport lines, and the Summary block gains a matching *Total Other Activities* item). The request form only says which vehicle, how many, and for how long, so the **Description**, **Rate AZN**, **Mark Up %** and **Duration UOM** come from the transport rate table in `ctr_tools/template_config.json` and are editable in the table before generating:
 
 - one requested vehicle can bill as several lines — a minibus charges vehicle+driver and its fuel separately, and only the former carries mark-up;
-- a vehicle that isn't in the rate table still gets a line, at a 0.00 rate, so it's there to price by hand — generating warns about any line still priced at 0.00.
+- a vehicle that isn't in the rate table still gets a line, with the **Rate left empty** (red), so it's there to price by hand — generating leaves out any transport line whose Qty, Duration, Unit or Rate is still empty (after you confirm; see *Nothing is assumed* above). A quantity or duration the request does not state is left empty too, never assumed to be 1.
 
 Each row's total is `Quantity × Rate × Duration × (1 + Mark Up)`. **Duration** is read from the number at the start of the *Duration & UOM* cell (`6 Days`, `2 Trips`, `1.5 Hours`, or just `4`), so you can edit that cell in the finished CTR and the total follows; keep the number first and a space before the unit.
 
@@ -384,6 +470,20 @@ Each row's total is `Quantity × Rate × Duration × (1 + Mark Up)`. **Duration*
 `1 | Conventional Scaffold | 66.96 | TON | rate/day | days | total`
 
 The request gives no rate and no duration for scaffold, so **Rate/Day and Days both arrive blank** — they're yours to fill in. The row is marked **✓ Manual** rather than red: it can't match the pricebook, but the request did ask for scaffold, so the line is written to the CTR either way with its name, tonnage and unit, totalling 0.00 until you price it. If you set **Match By** to the pricebook description instead of typing a rate, that correction is remembered and the next request naming the same scaffold system matches on its own.
+
+---
+
+### 4c. Cost statistics
+
+The **Cost statistics** box (after Additional Info & Transport) shows what the loaded CTR Request costs at **SAGE's expected unit cost** — not what the client is billed — split into **Rechargeable**, **Non-Rechargeable** and **Unknown**, with a percentage beside each. Under **CTR Request** it lists **Equipment** and **Consumables**; expand either to see its lines, sort them by cost or unit cost, or filter them. It uses the same panel as the Comparator's *Statistics tab* (see that section for the controls, including *Multiply cost by quantity*, which is on by default).
+
+- Only **✓ matched** lines are counted — the ones that go into the CTR. A grey note says how many unmatched lines are left out. Scaffold is not included.
+- Rechargeability follows how the CTR is generated: a line priced `NONRECHARG` is non-rechargeable, a priced line is rechargeable. This is the working default and is open for discussion with the department.
+- It needs SAGE: until the files have been loaded with **Load Files** a yellow warning says so; the figures then appear by themselves and follow every edit you make to the tables.
+- A line whose Match By is not in SAGE, or whose quantity is empty, is shown in red and not counted. For a code not in SAGE, double-click its *Unit cost* to type one in.
+- **Stock Codes not in SAGE have no SAGE cost.** The box says so in a yellow banner and asks you to type the cost by hand (double-click the red row's *Unit cost*). That cost fills the CTR's internal *SC cost* cell on the Pricing sheet; with none typed in, the cell is left **empty** (never 0), and **Generate** warns you which lines are affected before it goes ahead.
+- **Double-click a row to find it.** Double-click a Stock Code in the list and the same line is selected and scrolled to in the Equipment or Consumables table above (a code on several rows selects them all); double-click a document row to bring that table into view (it still opens/closes as well). Double-clicking the *Unit cost* cell types a cost instead, as before; a single click does nothing, so the page never scrolls by accident.
+- **Save statistics (Excel)…** (under the box) saves a workbook with *Statistics* (per side), *Statistics Items* (every line, its unit cost and why it was not counted) and *Info* (job, SAGE file, cost basis, lines not counted). A small window shows the folder remembered from last time: **Save here** uses it, **Change folder…** picks another one (the first time it opens the folder chooser straight away). The chosen folder is remembered and shown again before every save.
 
 ---
 
@@ -443,14 +543,27 @@ Output file names follow the pattern:
 | Error message | What it means | Fix |
 |---|---|---|
 | *"AZN Pricebook not selected"* | The required AZN Pricebook field is empty | Select the pricebook file and click Load Files |
-| *"Combined DB file not selected"* | The required Combined DB field is empty | Select the Combined DB file in the Source Files section |
-| *"…is missing expected column(s)…"* on the SAGE sheet | The Combined DB's SAGE sheet doesn't have the expected headers | Check that the header row uses exactly `product`, `long_description`, `unit_code`, `local_expect_cost` |
+| *"SAGE Export not selected"* / *"USD Pricebook not selected"* | A required Pricebook-Based field is empty | Select the file and click Load Files |
+| *"Select the Combined DB file first"* | You clicked Load CTR Request with no Combined DB | Select the Combined DB file in the Source Files section |
+| *"…is missing expected column(s)…"* on the "FROM SAGE" sheet | The SAGE Export doesn't have the expected headers | Check that the header row uses exactly `product`, `long_description`, `unit_code`, `local_expect_cost`, `analysis_b` |
 | *"Could not find a sheet named CTR_REQUEST"* | The Combined DB file uses a different sheet name | Open the file in Excel and rename the sheet to `CTR_REQUEST` |
+| *"Missing values — rows will not be included"* (red list on Generate) | The request, or a row you added, left a required value empty (shown in red) | Fill in each red cell — **Go to value** takes you there — or press **Generate without them** to leave those rows out of the CTRs. Nothing is ever assumed in place of a missing value |
 | *"Job Ref must be a number"* | Non-numeric text was entered in Job Ref | Enter a number only, e.g. `217` |
 | *"AZN/USD template layout doesn't match template_config.json (… Is … an outdated template?)"* | The template selected in Source Files is an older (or otherwise different) layout than this version of the app writes into — e.g. an AZN template without the Comments box, whose Summary sits 5 rows higher | Replace it with the current `AZN_TEMPLATE.xlsx` / `USD_TEMPLATE.xlsx` (any custom edits must be carried over) and click Generate again |
 | *"AZN Template not found"* | The template file was moved or deleted since it was selected | Browse to the file again |
 | *"Cannot save … it may be open in Excel"* | The output file is already open in Excel | Close the file in Excel and click Generate again |
 | *PDF export skipped* | LibreOffice (soffice) is not on PATH | Install LibreOffice — the xlsx files are still produced correctly |
+
+---
+
+## Settings
+
+The **⚙ gear button** at the left end of the tab bar (same row as the tabs) opens the **Settings window** — one place for what the app remembers between runs:
+
+- **SAGE Export** — the path used by both the CTR Generator and the MR vs CTR statistics (changing it here changes it there).
+- **Default output folder** — where the CTR Generator saves generated CTRs.
+- **Statistics save folder** — where *Save statistics (Excel)* saves. It is still shown before every save; **Forget** makes the next save ask for a folder again.
+- **Match By aliases**, **Description renames** and **CTR presets** — how many are saved. *Open manager* opens the manager window for aliases and renames. **Reset…** asks for confirmation, copies the current file next to the original as `<name>.bak-<date>-<time>.json`, then restores the aliases/presets that ship with the app (renames become empty). The reset values apply from the next request load; rows already on screen are not changed. To undo a reset, close the app and copy the `.bak` file back over the original (the tab shows the folder).
 
 ---
 

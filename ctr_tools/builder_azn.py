@@ -449,6 +449,21 @@ def _safe_float(value, default: float = 0.0) -> float:
         return default
 
 
+def _require_float(row: dict, key: str, what: str) -> float:
+    """A figure the CTR must state: raises (naming the line) instead of
+    guessing when it is missing or not a number. The Generator tab leaves
+    incomplete rows out before building, so this only trips on a bug."""
+    try:
+        f = float(row.get(key))
+    except (TypeError, ValueError):
+        f = float("nan")
+    if f != f:
+        raise ValueError(
+            f"{what} has no valid {key!r} (got {row.get(key)!r}) — "
+            "a missing figure is never assumed.")
+    return f
+
+
 def _parse_date(value):
     """Best-effort string → datetime conversion; returns value unchanged if unparseable."""
     if isinstance(value, str):
@@ -591,10 +606,13 @@ def _write_third_party_section(
 
     for i, tp in enumerate(rows):
         r = data_start + i
-        qty      = _safe_float(tp.get("quantity", 1), 1.0)
-        rate     = _safe_float(tp.get("rate_azn", 0), 0.0)
+        _what    = f"Third Party line {tp.get('description') or i + 1!r}"
+        qty      = _require_float(tp, "quantity", _what)
+        rate     = _require_float(tp, "rate_azn", _what)
+        duration = _require_float(tp, "duration", _what)
+        # No mark-up is a stated case (the fuel line carries none), so a
+        # blank mark-up is "none", not a missing figure.
         markup   = _safe_float(tp.get("markup", 0), 0.0)
-        duration = _safe_float(tp.get("duration", 1), 1.0)
         uom      = str(tp.get("uom", "") or "").strip()
 
         ws.cell(row=r, column=1).value = str(tp.get("comment", "") or "")
@@ -792,18 +810,10 @@ def build_azn(
 
         for i, lr in enumerate(rows):
             r = start + i
-            try:
-                num_emp = float(lr.get("num_employees", 1) or 1)
-            except (ValueError, TypeError):
-                num_emp = 1.0
-            try:
-                qty = float(lr.get("quantity", 0) or 0)
-            except (ValueError, TypeError):
-                qty = 0.0
-            try:
-                rate = float(lr.get("rate_azn", 0) or 0)
-            except (ValueError, TypeError):
-                rate = 0.0
+            _what = f"Manpower line {lr.get('description') or i + 1!r}"
+            num_emp = _require_float(lr, "num_employees", _what)
+            qty     = _require_float(lr, "quantity", _what)
+            rate    = _require_float(lr, "rate_azn", _what)
 
             ws.cell(row=r, column=1).value = strip_support_keyword(str(lr.get("comment", "")))
             ws.cell(row=r, column=2).value = num_emp

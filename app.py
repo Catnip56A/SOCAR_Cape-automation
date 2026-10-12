@@ -14,27 +14,33 @@ from pathlib import Path
 
 import pandas as pd
 from PySide6.QtCore import (
-    QAbstractTableModel, QModelIndex, QSettings, QSortFilterProxyModel,
-    Qt, QThread, Signal,
+    QAbstractTableModel, QEvent, QModelIndex, QSettings, QSortFilterProxyModel,
+    QSize, Qt, QThread, QTimer, Signal,
 )
 from PySide6.QtGui import QBrush, QColor, QFont, QKeySequence, QPainter, QPalette, QPen, QShortcut
 from PySide6.QtWidgets import (
-    QAbstractItemView, QApplication, QCheckBox, QDialog, QDialogButtonBox,
+    QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
     QFileDialog, QFormLayout, QFrame, QGroupBox, QHBoxLayout, QHeaderView,
     QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu,
     QMessageBox, QProgressDialog, QPushButton, QScrollArea,
     QSplitter, QStackedWidget, QStyle, QStyledItemDelegate, QTabWidget,
-    QTableView, QVBoxLayout, QWidget,
+    QTableView, QToolButton, QVBoxLayout, QWidget,
 )
 
 sys.path.insert(0, str(Path(__file__).parent))
 from sheet_parser import is_cover_sheet, parse_workbook
+import doc_filter
+import cost_stats
+from stats_view import STOPPED as _STATS_STOPPED, StatsPanel, StatsWorker
+from settings_view import SettingsDialog, gear_icon
+from find_bar import install_find
+from hover_text import install_elided_tooltips
 from comparison_history import (
     comparisons_dir, default_label, list_saved_comparisons, load_comparison,
     save_comparison, suggest_save_path,
 )
 from ctr_tools import __version__ as _CTR_VERSION
-from ctr_tools.window import CTRGeneratorWidget, stoppable_progress_dialog
+from ctr_tools.window import CTRGeneratorWidget, _file_picker_row, stoppable_progress_dialog
 from ctr_tools.tasks import TASKS, Job
 from ctr_tools.inspector import InspectorDock
 from ctr_tools.tracker_window import CTRTrackerWidget
@@ -146,7 +152,8 @@ def _aggregate_combined(
 ) -> dict[str, dict]:
     """Group MR and CTR rows by Stock Code (restricted to matched_keys) and
     sum Qty per side. Returns {key: {"mr_qty", "mr_units", "mr_docs",
-    "mr_desc", "ctr_qty", "ctr_units", "ctr_docs", "ctr_desc"}} — *_units is
+    "mr_desc", "mr_parts", "ctr_qty", "ctr_units", "ctr_docs", "ctr_desc",
+    "ctr_parts"}} (*_parts = [{"doc", "sheet", "qty"}] per document+sheet) — *_units is
     the sorted set of distinct non-blank units contributing to that side's
     total, so more than one entry signals a unit conflict the caller must
     resolve before trusting the sum. *_docs is the sorted set of distinct
@@ -179,7 +186,20 @@ def _aggregate_combined(
             desc = ""
             if desc_col and desc_col in grp.columns:
                 desc = next((v for v in (_norm_val(d) for d in grp[desc_col]) if v), "")
-            result[key] = {"qty": qty_total, "units": units, "docs": docs, "desc": desc}
+            # Per (document, sheet) share of the total — drives the Combined
+            # view's document filter and its "x of y from selected" tooltips.
+            parts = []
+            if "_SourceFile" in grp.columns:
+                sheets = (grp["_SourceSheet"] if "_SourceSheet" in grp.columns
+                          else pd.Series("", index=grp.index))
+                tmp = pd.DataFrame({"doc": grp["_SourceFile"].map(_norm_val),
+                                    "sheet": sheets.map(_norm_val),
+                                    "qty": qty_numeric})
+                for (d, sh), g in tmp.groupby(["doc", "sheet"], sort=True):
+                    parts.append({"doc": d, "sheet": sh,
+                                  "qty": float(g["qty"].sum()) if g["qty"].notna().any() else None})
+            result[key] = {"qty": qty_total, "units": units, "docs": docs, "desc": desc,
+                           "parts": parts}
         return result
 
     mr_agg  = _agg_side(mr,  qty_mr,  unit_mr,  desc_mr)
@@ -187,11 +207,12 @@ def _aggregate_combined(
 
     raw: dict[str, dict] = {}
     for key in matched_keys:
-        m = mr_agg.get(key,  {"qty": None, "units": [], "docs": [], "desc": ""})
-        c = ctr_agg.get(key, {"qty": None, "units": [], "docs": [], "desc": ""})
+        m = mr_agg.get(key,  {"qty": None, "units": [], "docs": [], "desc": "", "parts": []})
+        c = ctr_agg.get(key, {"qty": None, "units": [], "docs": [], "desc": "", "parts": []})
         raw[key] = {
             "mr_qty": m["qty"],   "mr_units":  m["units"],  "mr_docs":  m["docs"],  "mr_desc":  m["desc"],
             "ctr_qty": c["qty"],  "ctr_units": c["units"],  "ctr_docs": c["docs"],  "ctr_desc": c["desc"],
+            "mr_parts": m["parts"], "ctr_parts": c["parts"],
         }
     return raw
 
@@ -287,9 +308,9 @@ class EmptyState(QWidget):
 
 def _col_side(col_name: str) -> str:
     """Return 'mr', 'ctr', or '' (neutral) for a display column name."""
-    if "(MR)" in col_name or col_name in ("MR Document", "Rechargeable", "Allocation"):
+    if "(MR)" in col_name or col_name in ("MR Document", "MR Sheet", "Rechargeable", "Allocation"):
         return "mr"
-    if "(CTR)" in col_name or col_name == "CTR Document":
+    if "(CTR)" in col_name or col_name in ("CTR Document", "CTR Sheet"):
         return "ctr"
     return ""
 
@@ -332,6 +353,10 @@ class PandasModel(QAbstractTableModel):
         self._values = self._df.to_numpy(dtype=object).tolist()
         self._col_names = [str(c) for c in self._df.columns]
         self._highlights: dict[tuple[int, str], str] = {}  # (src_row, col_name) -> kind
+        self._tips: dict[tuple[int, str], str] = {}        # (src_row, col_name) -> tooltip
+
+    def set_tooltips(self, tips: dict[tuple[int, str], str]):
+        self._tips = tips
 
     def set_highlights(self, cells: dict[tuple[int, str], str]):
         self._highlights = cells
@@ -354,6 +379,9 @@ class PandasModel(QAbstractTableModel):
             if isinstance(val, float) and pd.isna(val):
                 return ""
             return str(val) if val is not None else ""
+
+        if role == Qt.ItemDataRole.ToolTipRole:
+            return self._tips.get((index.row(), col_name))
 
         # A highlight (mismatch, or a Combined-view multi-document colour) overrides
         # all other cell colours.
@@ -394,6 +422,46 @@ class PandasModel(QAbstractTableModel):
         if role == Qt.ItemDataRole.DisplayRole:
             return str(section + 1)
         return None
+
+
+def _sort_number(text: str) -> float | None:
+    try:
+        return float(text.strip())
+    except (ValueError, AttributeError):
+        return None
+
+
+class NumericSortProxy(QSortFilterProxyModel):
+    """Sorts numeric cells as numbers (the model's DisplayRole is text, so a
+    plain text sort puts -10 before -2 and -30 before 0.0). Numbers come
+    before text, and blanks stay last in both ascending and descending.
+
+    Also hides rows by a per-source-row mask (the document filter)."""
+
+    _mask: list[bool] | None = None
+
+    def set_mask(self, mask: list[bool] | None):
+        self._mask = mask
+        self.invalidateFilter()
+
+    def filterAcceptsRow(self, source_row, source_parent):
+        return self._mask is None or (source_row < len(self._mask) and self._mask[source_row])
+
+    def lessThan(self, left, right):
+        a = left.data(Qt.ItemDataRole.DisplayRole) or ""
+        b = right.data(Qt.ItemDataRole.DisplayRole) or ""
+        a_blank, b_blank = not str(a).strip(), not str(b).strip()
+        if a_blank or b_blank:
+            if a_blank and b_blank:
+                return False
+            # Qt reverses lessThan for descending, so flip to keep blanks last.
+            return a_blank == (self.sortOrder() == Qt.SortOrder.DescendingOrder)
+        fa, fb = _sort_number(str(a)), _sort_number(str(b))
+        if fa is not None and fb is not None:
+            return fa < fb
+        if fa is not None or fb is not None:       # number vs text
+            return (fa is not None) == (self.sortOrder() == Qt.SortOrder.AscendingOrder)
+        return str(a).casefold() < str(b).casefold()
 
 
 class ResultTableDelegate(QStyledItemDelegate):
@@ -440,6 +508,8 @@ def _make_view(compact: bool = False) -> QTableView:
         v.horizontalHeader().setSectionResizeMode(
             QHeaderView.ResizeMode.ResizeToContents)
     _attach_column_hiding(v)
+    install_elided_tooltips(v)      # full text on hover when a cell is cut off
+    install_find(v)                 # Ctrl+F
     return v
 
 
@@ -531,7 +601,7 @@ def _load_view(view: QTableView, df: pd.DataFrame):
         view.setColumnHidden(idx, False)
     if getattr(view, "_user_hidden", None):
         view._user_hidden = {}
-    proxy = QSortFilterProxyModel()
+    proxy = NumericSortProxy()
     proxy.setSourceModel(PandasModel(df))
     proxy.setSortCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
     view.setModel(proxy)
@@ -792,6 +862,27 @@ class MainWindow(QMainWindow):
         self._combined_df        = pd.DataFrame()
         self._combined_review_df = pd.DataFrame()
         self._combined_error_df  = pd.DataFrame()
+        # Document filter (view-only; downloads and saves keep every row).
+        self._doc_filter_tree = None            # parsed expression, None = off
+        # Cost statistics (MA131): rows of the last Compare, the running
+        # worker's token (an older worker's result is ignored) and the threads.
+        self._stats_items: pd.DataFrame | None = None
+        self._pending_stats: pd.DataFrame | None = None   # handed from _run_compare to the present step
+        self._pending_saved_stats: dict | None = None     # same, from a loaded comparison
+        # (side, key, doc, sheet) of every row, for the document filter — the
+        # Compare's own rows, or the saved ones of a reopened comparison.
+        self._stats_pairs: pd.DataFrame | None = None
+        # Rows with no numeric quantity: listed in Needs Review, left out of
+        # the cost statistics.
+        self._missing_qty_df = pd.DataFrame(columns=cost_stats.MISSING_QTY_COLUMNS)
+        # Stock Code -> Equipment / Consumable, from the CTR sections of the
+        # last Compare. None = unknown (e.g. a reopened saved comparison).
+        self._category_by_key: dict[str, str] | None = None
+        self._stats_token = 0
+        self._stats_workers: list[StatsWorker] = []
+        self._matched_mask: list[bool] | None = None   # mask of whatever the Matched tab shows
+        self._filter_pairs: list[tuple[str, str, str]] = []   # (side, document, sheet) for suggestions
+        self._filter_has_sheets = True          # False for comparisons saved before sheets were recorded
 
         # Source file names behind the current results — for labelling a
         # saved comparison. Populated by a fresh Compare or by loading one.
@@ -845,6 +936,8 @@ class MainWindow(QMainWindow):
         self._inspector.save(s)
         self._ctr_gen.save_settings()
         self._ctr_tracker.save_settings()
+        for w in list(self._stats_workers):
+            w.wait(3000)          # a QThread must not be destroyed while running
         super().closeEvent(event)
 
     # ── UI construction ───────────────────────────────────────────────────────
@@ -931,18 +1024,16 @@ class MainWindow(QMainWindow):
             }}
         """)
         self._compare_btn.clicked.connect(self._run_compare)
-        pinned_l.addWidget(self._compare_btn)
 
         # Alternative to uploading + comparing: reopen a past comparison
         # directly. Lives here (not with Download/Save below) so it works
         # even before anything's been uploaded.
-        or_lbl = QLabel("— or —")
+        or_lbl = QLabel("or")
         or_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        or_lbl.setStyleSheet(f"color: {MUTED}; font-size: 10px;")
-        pinned_l.addWidget(or_lbl)
+        or_lbl.setStyleSheet(f"color: {MUTED}; font-size: 11px;")
 
         self._load_btn = QPushButton("Load Comparison…")
-        self._load_btn.setFixedHeight(36)
+        self._load_btn.setFixedHeight(44)      # same height as Compare: they share a line
         self._load_btn.setToolTip(
             "Reopen a previously saved comparison exactly as it was left, "
             "without needing the original MR/CTR files.\n"
@@ -954,12 +1045,26 @@ class MainWindow(QMainWindow):
                 color: {PRIMARY};
                 border: 1.5px solid {PRIMARY};
                 border-radius: 6px;
-                font-size: 12px;
+                font-size: 14px;
+                font-weight: bold;
             }}
             QPushButton:hover {{ background: {MR_LIGHT}; }}
         """)
         self._load_btn.clicked.connect(self._load_comparison)
-        pinned_l.addWidget(self._load_btn)
+        # Compare and Load Comparison share one line, with the SAGE Export
+        # field on the line below. The window's minimum height matters here:
+        # a taller top area made it taller than a maximized WSLg window
+        # (Wayland protocol error, app closed) — sharing the line pays for
+        # the extra SAGE line. The field lives here, not in the results panel
+        # (hidden until the first Compare), because the path is set before it.
+        action_row = QHBoxLayout()
+        action_row.setSpacing(10)
+        action_row.addWidget(self._compare_btn, 1)
+        action_row.addWidget(or_lbl)
+        action_row.addWidget(self._load_btn, 1)        # same width and text size as Compare
+        pinned_l.addLayout(action_row)
+        pinned_l.addSpacing(8)                          # a little air before the SAGE line
+        pinned_l.addLayout(self._build_sage_row())
 
         pinned_sep = QFrame()
         pinned_sep.setFrameShape(QFrame.Shape.HLine)
@@ -1107,8 +1212,8 @@ class MainWindow(QMainWindow):
         self._stack_only_ctr, self._tab_only_ctr = _result_stack(
             "Run Compare to see items that appear only in CTR.")
         self._stack_review,  self._review_list   = _review_stack(
-            "Turn on Combined View — stock codes whose MR/CTR rows disagree "
-            "on Unit will appear here for manual approval.")
+            "Stock codes whose MR/CTR rows disagree on Unit (turn on Combined View) "
+            "and rows with no quantity will appear here.")
         self._stack_error,   self._tab_error     = _result_stack(
             "Rejected unit-conflict entries will appear here.")
 
@@ -1117,6 +1222,19 @@ class MainWindow(QMainWindow):
         self._tabs.addTab(self._stack_only_ctr, "Only in CTR")
         self._tabs.addTab(self._stack_review,   "Needs Review")
         self._tabs.addTab(self._stack_error,    "Error Data")
+        self._stats_panel = StatsPanel()
+        self._stats_panel.reload_requested.connect(self._on_stats_reload_clicked)
+        # In a scroll area so this tab page can be squeezed like the table tabs:
+        # a tab page's minimum height counts toward the window's, and the bare
+        # panel (banner + toolbar + tree) was 55 px taller than the others —
+        # enough to push the window past a maximized WSLg screen (Wayland
+        # "buffer does not match the configured maximized state", app closed).
+        _stats_scroll = QScrollArea()
+        _stats_scroll.setWidgetResizable(True)
+        _stats_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        _stats_scroll.setWidget(self._stats_panel)
+        self._stats_tab = _stats_scroll
+        self._tabs.addTab(_stats_scroll,        "Statistics")
 
         # Corner toolbar: navigate between mismatches + toggle highlight
         _corner = QWidget()
@@ -1150,6 +1268,32 @@ class MainWindow(QMainWindow):
         self._compare_vals_btn.setEnabled(False)
         self._set_compare_vals_mode(combined=False)   # starts out as "Compare Values"
         self._compare_vals_btn.toggled.connect(self._apply_value_highlights)
+
+        # Combined-view-only value check (Qty totals / Unit). Separate from
+        # _compare_vals_btn, which is "Show Combined" while Combined is on.
+        self._combined_cmp_btn = QPushButton("Compare Values")
+        self._combined_cmp_btn.setCheckable(True)
+        self._combined_cmp_btn.setEnabled(False)
+        self._combined_cmp_btn.setVisible(False)
+        self._combined_cmp_btn.setToolTip(
+            "Highlight Stock Codes where the MR and CTR Qty totals differ, or\n"
+            "where MR and CTR use different Units, in red.\n"
+            "Use ↑ ↓ to jump between them. Click again to clear.")
+        self._combined_cmp_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: white; color: {PRIMARY};
+                border: 1px solid {PRIMARY}; border-radius: 4px;
+                padding: 2px 10px; font-size: 11px;
+                min-height: 24px;
+            }}
+            QPushButton:checked {{
+                background: #FFEBEE; color: #C62828;
+                border: 1.5px solid #C62828; font-weight: bold;
+            }}
+            QPushButton:disabled {{ color: {BORDER}; border-color: {BORDER}; }}
+        """)
+        self._combined_cmp_btn.toggled.connect(
+            lambda _=False: self._apply_value_highlights(self._compare_vals_btn.isChecked()))
 
         self._combined_btn = QPushButton("Combined View")
         self._combined_btn.setCheckable(True)
@@ -1196,14 +1340,6 @@ class MainWindow(QMainWindow):
         """)
         self._show_docs_btn.toggled.connect(self._apply_doc_column_visibility)
 
-        _cl.addWidget(self._prev_mm_btn)
-        _cl.addWidget(self._next_mm_btn)
-        _cl.addSpacing(4)
-        _cl.addWidget(self._compare_vals_btn)
-        _cl.addSpacing(4)
-        _cl.addWidget(self._combined_btn)
-        _cl.addSpacing(4)
-        _cl.addWidget(self._show_docs_btn)
 
         self._cols_btn = QPushButton("Columns")
         self._cols_btn.setToolTip(
@@ -1222,16 +1358,17 @@ class MainWindow(QMainWindow):
         self._cols_btn.setEnabled(False)
         self._cols_btn.clicked.connect(
             lambda: (v := self._current_result_view()) and _unhide_dialog(v))
-        _cl.addSpacing(4)
-        _cl.addWidget(self._cols_btn)
         for _v in (self._tab_matched, self._tab_only_mr, self._tab_only_ctr, self._tab_error):
             _v._on_hidden_changed = self._refresh_cols_btn
         self._tabs.currentChanged.connect(lambda _=0: self._refresh_cols_btn())
-        _cl.addStretch(1)   # left-aligned toolbar row above the tabs
+        self._corner_layout = _cl
+        self._arrange_toolbar(combined=False)
 
         # This button's label swaps between "Compare Values" and "Show
         # Combined" (_set_compare_vals_mode) — reserve room for the longer
         # one so the buttons to its right don't shift when it changes.
+        for _b in (self._combined_cmp_btn, self._combined_btn):
+            _b.setMinimumWidth(_b.sizeHint().width() + 14)   # +bold when checked
         _keep = self._compare_vals_btn.text()
         _w = 0
         for _t in ("Compare Values", "Show Combined"):
@@ -1240,6 +1377,7 @@ class MainWindow(QMainWindow):
         self._compare_vals_btn.setText(_keep)
         self._compare_vals_btn.setMinimumWidth(_w + 14)   # +bold when checked
 
+        body_l.addWidget(self._build_filter_row())
         body_l.addWidget(_corner)
         body_l.addWidget(self._tabs)
 
@@ -1289,12 +1427,37 @@ class MainWindow(QMainWindow):
         # ── Tab 1: CTR Generator ────────────────────────────────────────────
         self._ctr_gen = CTRGeneratorWidget(parent=self)
         self._main_tabs.addTab(self._ctr_gen, "CTR Generator")
+        # One SAGE Export path shared by both tabs: setting it in either
+        # fills the other (each side ignores a value it already holds, so
+        # they cannot echo forever). Connected before restore_settings() so
+        # the saved path reaches the MR vs CTR field too.
+        self._ctr_gen.sage_path_changed.connect(self._set_comparator_sage_path)
+        self._sage_edit.textChanged.connect(self._ctr_gen.set_sage_path)
+        self._sage_edit.textChanged.connect(self._on_sage_path_edited)
         self._ctr_gen.restore_settings()
 
         # ── Tab 2: CTR Tracker ───────────────────────────────────────────────
         self._ctr_tracker = CTRTrackerWidget(parent=self)
         self._main_tabs.addTab(self._ctr_tracker, "CTR Tracker")
         self._ctr_tracker.restore_settings()
+
+        # ── Settings: gear button at the left end of the tab bar ────────────
+        # Opens the Settings window (not a tab). A corner widget sits in the
+        # tab bar's own row, so it lines up with the tabs.
+        self._settings_dlg = SettingsDialog(self._ctr_gen, self)
+        self._settings_tab = self._settings_dlg.tab
+        self._gear_btn = QToolButton()
+        self._gear_btn.setIcon(gear_icon(20))
+        self._gear_btn.setIconSize(QSize(20, 20))
+        self._gear_btn.setAutoRaise(True)
+        self._gear_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._gear_btn.setToolTip("Settings — SAGE path, folders, saved aliases / renames / presets")
+        self._gear_btn.clicked.connect(self._settings_dlg.open_window)
+        _gear_box = QWidget()
+        _gl = QHBoxLayout(_gear_box)
+        _gl.setContentsMargins(4, 0, 6, 0)
+        _gl.addWidget(self._gear_btn)
+        self._main_tabs.setCornerWidget(_gear_box, Qt.Corner.TopLeftCorner)
 
     def _app_settings(self) -> QSettings:
         return QSettings("SOCAR", "CTRGenerator")
@@ -1748,6 +1911,9 @@ class MainWindow(QMainWindow):
 
         src_mr  = "_SourceFile_MR"  if "_SourceFile_MR"  in merged.columns else "_SourceFile"
         src_ctr = "_SourceFile_CTR" if "_SourceFile_CTR" in merged.columns else None
+        sheet_mr  = "_SourceSheet_MR"  if "_SourceSheet_MR"  in merged.columns else (
+            "_SourceSheet" if "_SourceSheet" in merged.columns else None)
+        sheet_ctr = "_SourceSheet_CTR" if "_SourceSheet_CTR" in merged.columns else None
 
         # Resolve column references once from the full merged frame so every
         # subset (matched / only_mr / only_ctr) can reuse them.
@@ -1787,14 +1953,16 @@ class MainWindow(QMainWindow):
             # Source documents — rightmost so they don't crowd the comparison columns
             out["MR Document"]  = df[src_mr].values  if src_mr  in df.columns else ""
             out["CTR Document"] = df[src_ctr].values if (src_ctr and src_ctr in df.columns) else ""
+            out["MR Sheet"]     = df[sheet_mr].values  if (sheet_mr  and sheet_mr  in df.columns) else ""
+            out["CTR Sheet"]    = df[sheet_ctr].values if (sheet_ctr and sheet_ctr in df.columns) else ""
             return out.sort_values("Stock Code").reset_index(drop=True)
 
         self._display_df = _build_display(matched)
         self._omr_dl     = _build_display(only_mr_df)
         self._octr_dl    = _build_display(only_ctr_df)
 
-        # Rate (CTR) vs Rechargeable (MR) consistency check — always runs on
-        # Compare, independent of the Compare Values toggle below.
+        # Rate (CTR) vs Rechargeable (MR) consistency check — computed on
+        # every Compare, but only highlighted once Compare Values is pressed.
         self._rate_rech_mismatch_cells = _find_rate_rechargeable_mismatches(self._display_df)
 
         # Combined view: per-Stock-Code MR/CTR Qty totals, restricted to keys
@@ -1825,32 +1993,44 @@ class MainWindow(QMainWindow):
         self._ctr_files_used = sorted(ctr["_SourceFile"].dropna().unique().tolist()) \
             if "_SourceFile" in ctr.columns else []
 
+        self._pending_stats = self._build_stats_items(mr, ctr)
         self._present_compare_results()
+        self._start_stats_job_later()
 
         now = datetime.now().strftime("%H:%M")
-        n_rate_rech = len({r for r, _ in self._rate_rech_mismatch_cells})
-        rate_rech_note = (
-            f" · {n_rate_rech} Rate/Rechargeable mismatch{'es' if n_rate_rech != 1 else ''}"
-            if n_rate_rech else ""
-        )
         self._set_status(
             f"Compared at {now} — "
             f"{len(matched)} matched · "
             f"{len(only_mr_df)} only in MR · "
-            f"{len(only_ctr_df)} only in CTR"
-            f"{rate_rech_note}."
+            f"{len(only_ctr_df)} only in CTR."
         )
         log.info("Compare finished: matched=%d only_mr=%d only_ctr=%d",
                   len(matched), len(only_mr_df), len(only_ctr_df))
 
     def _present_compare_results(self):
         """Populates the results panel — metrics, the three main tabs, the
-        Rate/Rechargeable baseline highlight, and the Combined/Needs
-        Review/Error Data tabs — from whatever is currently in
+        and the Combined/Needs Review/Error Data tabs — from whatever is currently in
         self._display_df/_omr_dl/_octr_dl/_combined_raw/_combined_decisions/
         _rate_rech_mismatch_cells. Shared by a fresh Compare and by
         reopening a saved comparison, so both end up in the same state."""
+        # Statistics belong to the Compare that made them (or to the saved
+        # comparison being reopened); set their state before the Needs Review
+        # list is built, since it lists the rows with no quantity.
+        self._stats_token += 1
+        self._stats_items, self._pending_stats = self._pending_stats, None
+        saved, self._pending_saved_stats = self._pending_saved_stats, None
+        restored = self._load_stats_state(saved)
         self._refresh_combined_tables()
+        if restored is not None:
+            rows, manual, use_qty = restored
+            self._stats_panel.restore(rows, manual, use_qty)
+            self._stats_panel.set_doc_filter(self._stats_doc_pred())
+        else:
+            self._stats_panel.clear(
+                "Statistics are calculated when you press Compare."
+                if self._stats_items is not None else
+                "This comparison has no cost statistics yet. Press Compare with the "
+                "original MR/CTR files to calculate them.")
 
         self._m_matched.setText(str(len(self._display_df)))
         self._m_only_mr.setText(str(len(self._omr_dl)))
@@ -1862,14 +2042,13 @@ class MainWindow(QMainWindow):
         _show_result(self._stack_only_ctr, self._tab_only_ctr, self._octr_dl)
         self._apply_doc_column_visibility(self._show_docs_btn.isChecked())
 
-        if not self._display_df.empty:
-            self._tab_matched.model().sourceModel().set_highlights(
-                {c: "mismatch" for c in self._rate_rech_mismatch_cells})
-
         self._tabs.setCurrentWidget(self._stack_matched)
         self._download_btn.setEnabled(True)
         self._save_btn.setEnabled(True)
         self._step_bar.set_step(2)
+
+        self._reset_doc_filter()
+        self._refresh_type_filter_state()
 
         # Reset value-comparison state (new data loaded, old highlights gone)
         self._compare_vals_btn.blockSignals(True)
@@ -1887,6 +2066,11 @@ class MainWindow(QMainWindow):
         self._combined_btn.setChecked(False)
         self._combined_btn.blockSignals(False)
         self._combined_btn.setEnabled(bool(self._combined_raw))
+        self._combined_cmp_btn.blockSignals(True)
+        self._combined_cmp_btn.setChecked(False)
+        self._combined_cmp_btn.blockSignals(False)
+        self._combined_cmp_btn.setVisible(False)
+        self._combined_cmp_btn.setEnabled(bool(self._combined_raw))
 
         # Expand results panel to take ~70 % of the window height, and drop
         # any stale Hide/Maximize state from a previous set of results.
@@ -1907,6 +2091,612 @@ class MainWindow(QMainWindow):
         total = self._splitter.height()
         self._splitter.setSizes([int(total * 0.30), int(total * 0.70)])
 
+    # ── Cost statistics (MA131) ───────────────────────────────────────────────
+
+    def _load_stats_state(self, saved: dict | None):
+        """Set the category map, the document-filter pairs and the rows with no
+        quantity from this Compare's items or from a saved comparison's
+        `stats` block. Returns (rows, manual costs, use_qty) to show in the
+        Statistics tab for a saved comparison, else None."""
+        empty_missing = pd.DataFrame(columns=cost_stats.MISSING_QTY_COLUMNS)
+        if self._stats_items is not None:
+            it = self._stats_items
+            self._category_by_key = cost_stats.ctr_category_map(it)
+            self._stats_pairs = it[["side", "key", "doc", "sheet"]]
+            self._missing_qty_df = cost_stats.missing_qty(it)
+            return None
+        self._category_by_key = None
+        self._stats_pairs = None
+        self._missing_qty_df = empty_missing
+        if not saved:
+            return None
+        try:
+            self._category_by_key = dict(saved.get("category_by_key") or {}) or None
+            self._missing_qty_df = pd.DataFrame(saved.get("missing_qty") or [],
+                                                columns=cost_stats.MISSING_QTY_COLUMNS)
+            if not saved.get("rows"):
+                return None
+            use_qty = bool(saved.get("use_qty", True))
+            rows = cost_stats.rows_from_records(saved["rows"], use_qty)
+            self._stats_pairs = rows[["side", "key", "doc", "sheet"]]
+            manual = {str(k): float(v) for k, v in (saved.get("manual") or {}).items()}
+            return rows, manual, use_qty
+        except Exception:
+            log.exception("Saved statistics could not be restored")
+            return None
+
+    def _stats_snapshot(self) -> dict | None:
+        """The statistics to store in a saved comparison (None = nothing to store)."""
+        rows = self._stats_panel.base_rows()
+        has_missing = not self._missing_qty_df.empty
+        if rows is None and not has_missing and not self._category_by_key:
+            return None
+        return {
+            "rows": cost_stats.rows_to_records(rows) if rows is not None else [],
+            "manual": self._stats_panel.manual_costs(),
+            "use_qty": self._stats_panel.use_qty(),
+            "category_by_key": self._category_by_key or {},
+            "missing_qty": self._missing_qty_df.to_dict(orient="records"),
+        }
+
+    def _on_stats_reload_clicked(self):
+        if self._stats_items is None:
+            QMessageBox.information(
+                self, "Reload statistics",
+                "These statistics were saved with the comparison, so there is nothing to "
+                "recalculate from.\n\nPress Compare with the original MR/CTR files to "
+                "calculate them again against the current SAGE Export.")
+            return
+        self._start_stats_job(force=True)
+
+    @staticmethod
+    def _build_stats_items(mr: pd.DataFrame, ctr: pd.DataFrame) -> pd.DataFrame:
+        """Every MR and CTR row of this Compare (matched or not) as the input
+        of cost_stats.cost_rows. Rechargeability comes from the documents:
+        MR's Rechargeable column, and for the CTR the Rate column (a number
+        means rechargeable, NONRECHARG means not) — same rule as the
+        Rate/Rechargeable check. Up for discussion with the department."""
+        parts = []
+        for side, df in (("MR", mr), ("CTR", ctr)):
+            if df.empty:
+                continue
+            n = len(df)
+            if side == "MR":
+                qty_c = _find_col(df, "Qty")
+                st_c = _find_col(df, "Rechargeable")
+                status = (df[st_c].map(lambda v: _norm_val(v).upper()
+                                       if _norm_val(v).upper() in ("RECHARGE", "NONRECHARG")
+                                       else None).values if st_c else [None] * n)
+            else:
+                qty_c = _find_col(df, "Quantity", "Qty")
+                rate_c = _find_col(df, "Rate")
+                status = df[rate_c].map(_rate_implied_status).values if rate_c else [None] * n
+            parts.append(pd.DataFrame({
+                "key":     df["_KEY_"].values,
+                "doc":     df["_SourceFile"].map(_norm_val).values if "_SourceFile" in df.columns else [""] * n,
+                "sheet":   df["_SourceSheet"].map(_norm_val).values if "_SourceSheet" in df.columns else [""] * n,
+                "side":    side,
+                "qty":     df[qty_c].values if qty_c else [float("nan")] * n,
+                "status":  status,
+                "section": df["_Section"].values if (side == "CTR" and "_Section" in df.columns) else [None] * n,
+            }))
+        if not parts:
+            return pd.DataFrame(columns=["key", "doc", "sheet", "side", "qty", "status", "section"])
+        return pd.concat(parts, ignore_index=True)
+
+    def _start_stats_job_later(self, delay_ms: int = 400):
+        """Start the statistics shortly AFTER the comparison is on screen, so
+        showing the results never waits for them. With no usable SAGE file
+        there is no work to defer, so that warning appears at once."""
+        path = self._sage_edit.text().strip()
+        if self._stats_items is None or not path or not Path(path).is_file():
+            self._start_stats_job()
+            return
+        self._stats_panel.clear(
+            "Statistics will appear here shortly — they are calculated in the background "
+            "after the comparison is shown. You can keep working meanwhile.", "info")
+        token = self._stats_token
+        QTimer.singleShot(
+            delay_ms,
+            lambda: self._start_stats_job() if token == self._stats_token else None)
+
+    def _start_stats_job(self, force: bool = False):
+        """(Re)start the background cost statistics for the last Compare.
+        force=True (Reload statistics) re-reads the SAGE file instead of
+        reusing the table the Generator already parsed."""
+        panel = self._stats_panel
+        if self._stats_items is None:
+            panel.clear("Statistics are calculated when you press Compare.")
+            return
+        path = self._sage_edit.text().strip()
+        if not path:
+            self._stats_token += 1
+            panel.clear("SAGE Export is not set, so statistics cannot be calculated. Choose the "
+                        "file in “SAGE Export” above the Compare button (it is shared with the "
+                        "CTR Generator tab). They will load as soon as it is set.")
+            return
+        if not Path(path).is_file():
+            self._stats_token += 1
+            panel.clear(f"The SAGE Export file was not found:\n{path}\n"
+                        "Choose it again above the Compare button.", "error")
+            return
+        self._stats_token += 1
+        panel.clear("Statistics are loading and will appear here shortly — reading the SAGE "
+                    "Export and costing every row. You can keep working meanwhile.", "info")
+        reuse = None if force else self._ctr_gen.loaded_sage_df(path)
+        w = StatsWorker(self._stats_token, self._stats_items, path, reuse, self)
+        w.done.connect(self._on_stats_done)
+        w.finished.connect(lambda w=w: self._stats_workers.remove(w) if w in self._stats_workers else None)
+        w.finished.connect(w.deleteLater)
+        self._stats_workers.append(w)
+        w.start(QThread.Priority.LowPriority)     # the window comes first
+
+    def _on_stats_done(self, token: int, rows, error: str):
+        if token != self._stats_token:
+            return                              # a newer Compare / Reload replaced this run
+        if error == _STATS_STOPPED:
+            self._stats_panel.clear("Statistics were stopped before they finished. "
+                                    "Press “Reload statistics” to run them again.")
+        elif error:
+            log.error("Statistics failed: %s", error)
+            self._stats_panel.clear(f"Statistics could not be calculated:\n{error}", "error")
+        else:
+            self._stats_panel.set_rows(rows)
+            self._stats_panel.set_doc_filter(self._stats_doc_pred())
+            log.info("Statistics ready: %d rows", len(rows))
+
+    def _on_sage_path_edited(self, _text: str):
+        if self._stats_items is not None:
+            self._start_stats_job()
+
+    def _stats_doc_pred(self):
+        """rows -> one bool per row for the document filter, or None when it
+        is off. Same pairing as the Matched / Only tabs: a row stays when its
+        own (document, sheet) satisfies the expression together with some
+        (document, sheet) of the OTHER side that has the same Stock Code — or
+        with no partner at all (the Only-in-MR / Only-in-CTR case)."""
+        tree, items = self._doc_filter_tree, self._stats_pairs
+        if tree is None or items is None or items.empty:
+            return None
+        partners: dict[str, dict[str, set]] = {"MR": {}, "CTR": {}}
+        for side, key, doc, sheet in zip(items["side"], items["key"], items["doc"], items["sheet"]):
+            partners[side].setdefault(key, set()).add((doc, sheet))
+
+        def pred(rows: pd.DataFrame) -> list[bool]:
+            cache: dict[tuple, bool] = {}
+            out = []
+            for side, doc, sheet, key in zip(rows["side"], rows["doc"], rows["sheet"], rows["key"]):
+                ck = (side, doc, sheet, key)
+                if ck not in cache:
+                    me = (doc, sheet)
+                    others = [None, *partners["CTR" if side == "MR" else "MR"].get(key, ())]
+                    cache[ck] = any(
+                        doc_filter.evaluate(tree, me, o) if side == "MR"
+                        else doc_filter.evaluate(tree, o, me)
+                        for o in others)
+                out.append(cache[ck])
+            return out
+        return pred
+
+    # ── SAGE Export path (shared with the CTR Generator tab) ─────────────────
+
+    def _build_sage_row(self) -> QHBoxLayout:
+        row, self._sage_edit = _file_picker_row("SAGE Export", "Excel (*.xlsx *.xlsm *.xls)")
+        self._sage_edit.setToolTip(
+            "SAGE Export used for the cost statistics.\n"
+            "Shared with the CTR Generator tab — setting it here sets it there too.")
+        return row
+
+    def _set_comparator_sage_path(self, path: str) -> None:
+        if self._sage_edit.text() != path:
+            self._sage_edit.setText(path)
+
+    # ── Document filter ───────────────────────────────────────────────────────
+
+    def _build_filter_row(self) -> QWidget:
+        row = QWidget()
+        lay = QHBoxLayout(row)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(6)
+        lbl = QLabel("Filter documents:")
+        lbl.setStyleSheet(f"color: {MUTED}; font-size: 11px;")
+        self._filter_edit = QLineEdit()
+        self._filter_edit.setPlaceholderText(
+            "e.g.  (MR:Jan>CH-01 or MR:Feb) and not CTR:draft   — type a name to get suggestions")
+        self._filter_edit.setClearButtonEnabled(True)
+        self._filter_edit.setEnabled(False)
+        self._filter_edit.setToolTip(
+            "Show only rows from the documents you choose. Results, Excel downloads and\n"
+            "saved comparisons still contain everything.\n\n"
+            "  MR:<document>   or   CTR:<document>   — part of the file name is enough\n"
+            "  MR:<document>><sheet>   — limit to one sheet of that file\n"
+            "  and / or / not, and ( ) brackets to group\n"
+            "  Quote names that contain ( ) > or the words and/or/not:\n"
+            '  MR:"Rock and Roll (1).xlsx"')
+        self._filter_info = QLabel("")
+        self._filter_info.setStyleSheet(f"color: {MUTED}; font-size: 11px;")
+
+        # Suggestions are an overlay list inside the window, not a popup
+        # window: a separate top-level popup was positioned wrongly / hidden
+        # behind other windows on some setups (WSLg). NoFocus keeps typing in
+        # the box; the box's key events drive the list (see eventFilter).
+        self._filter_items: list[tuple[str, str]] = []   # (label, text to insert)
+        self._filter_list = QListWidget(self._results_body_w)
+        self._filter_list.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._filter_list.setFrameShape(QFrame.Shape.Box)
+        self._filter_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._filter_list.setAutoFillBackground(True)
+        _pal = self._filter_list.palette()
+        _pal.setColor(QPalette.ColorRole.Base, QColor("#FFFFFF"))
+        _pal.setColor(QPalette.ColorRole.Highlight, QColor("#E3F2FD"))
+        _pal.setColor(QPalette.ColorRole.HighlightedText, QColor("#0D47A1"))
+        self._filter_list.setPalette(_pal)
+        self._filter_list.setMouseTracking(True)
+        self._filter_list.itemEntered.connect(self._filter_list.setCurrentItem)
+        self._filter_list.itemClicked.connect(lambda _it: self._accept_filter_suggestion())
+        self._filter_list.hide()
+        self._filter_edit.installEventFilter(self)
+
+        # Re-evaluate shortly after typing stops, not on every keystroke.
+        self._filter_timer = QTimer(self)
+        self._filter_timer.setSingleShot(True)
+        self._filter_timer.setInterval(250)
+        self._filter_timer.timeout.connect(self._commit_filter_text)
+        self._filter_edit.textEdited.connect(self._update_filter_suggestions)
+        self._filter_edit.textChanged.connect(lambda _t: self._filter_timer.start())
+
+        # Equipment / Consumable filter — the type comes from the CTR section
+        # the Stock Code is listed under, so it needs no SAGE file.
+        type_lbl = QLabel("Type:")
+        type_lbl.setStyleSheet(f"color: {MUTED}; font-size: 11px;")
+        self._type_combo = QComboBox()
+        self._type_combo.addItems(["All types", cost_stats.EQUIPMENT,
+                                   cost_stats.CONSUMABLE, cost_stats.UNCATEGORISED])
+        self._type_combo.setEnabled(False)
+        self._type_combo.setToolTip(
+            "Show only Equipment or only Consumable Stock Codes (view only — Excel\n"
+            "downloads and saved comparisons still contain everything).\n"
+            "The type is the CTR section the Stock Code is listed under; a Stock Code\n"
+            "that is in no CTR is Uncategorised.")
+        self._type_combo.currentIndexChanged.connect(lambda _=0: self._apply_doc_filter())
+
+        lay.addWidget(lbl)
+        lay.addWidget(self._filter_edit, 1)
+        lay.addWidget(type_lbl)
+        lay.addWidget(self._type_combo)
+        lay.addWidget(self._filter_info)
+        return row
+
+    def _update_filter_suggestions(self, _text: str = ""):
+        edit = self._filter_edit
+        prefix = edit.text()[:edit.cursorPosition()]
+        fragment = prefix[doc_filter.fragment_start(prefix):]
+        # Right after "(" / and / or / not the next name is about to start, so
+        # offer everything; only an entirely empty box stays quiet.
+        found = (doc_filter.suggest(fragment, self._filter_pairs)
+                 if fragment.strip() or prefix.strip() else [])
+        self._show_filter_suggestions(found)
+
+    def _show_filter_suggestions(self, found: list[tuple[str, str]]):
+        self._filter_items = found
+        lst = self._filter_list
+        if not found or not self._filter_edit.hasFocus():
+            lst.hide()
+            return
+        lst.clear()
+        lst.setTextElideMode(Qt.TextElideMode.ElideMiddle)   # long names keep their ends
+        lst.addItems([label for label, _ in found])
+        for k, (_label, insert) in enumerate(found):
+            lst.item(k).setToolTip(insert)
+        lst.setCurrentRow(0)
+        row_h = lst.sizeHintForRow(0) if lst.count() else 20
+        host = self._results_body_w
+        top_left = self._filter_edit.mapTo(host, self._filter_edit.rect().bottomLeft())
+        room = max(host.height() - top_left.y() - 4, row_h + 4)
+        rows = min(len(found), 10)
+        lst.setGeometry(top_left.x(), top_left.y() + 1, self._filter_edit.width(),
+                        min(rows * row_h + 4, room))
+        lst.show()
+        lst.raise_()
+
+    def _hide_filter_suggestions(self):
+        self._filter_items = []
+        self._filter_list.hide()
+
+    def _accept_filter_suggestion(self):
+        row = self._filter_list.currentRow()
+        if not self._filter_list.isVisible() or not (0 <= row < len(self._filter_items)):
+            log.info("Filter suggestion not accepted: visible=%s row=%s items=%d",
+                     self._filter_list.isVisible(), row, len(self._filter_items))
+            return
+        label, insert = self._filter_items[row]
+        edit = self._filter_edit
+        text, cur = edit.text(), edit.cursorPosition()
+        start = doc_filter.fragment_start(text[:cur])
+        log.info("Filter suggestion accepted: %r -> %r (replacing %r)", label, insert, text[start:cur])
+        edit.setText(text[:start] + insert + text[cur:])
+        edit.setCursorPosition(start + len(insert))
+        self._hide_filter_suggestions()      # setText doesn't re-trigger suggestions
+        edit.setFocus()
+        # A document (not a sheet) was just chosen: offer its sheets right
+        # away; Esc, or just typing on, ignores them.
+        if not label.startswith(doc_filter.SHEET_LABEL_PREFIX):
+            self._show_filter_suggestions(doc_filter.suggest(insert + ">", self._filter_pairs))
+
+    def eventFilter(self, obj, event):
+        if obj is self._filter_edit:
+            et = event.type()
+            lst = self._filter_list
+            if et == QEvent.Type.KeyPress and lst.isVisible():
+                key = event.key()
+                if key in (Qt.Key.Key_Down, Qt.Key.Key_Up):
+                    step = 1 if key == Qt.Key.Key_Down else -1
+                    lst.setCurrentRow((lst.currentRow() + step) % lst.count())
+                    return True
+                if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Tab):
+                    self._accept_filter_suggestion()
+                    return True
+                if key == Qt.Key.Key_Escape:
+                    self._hide_filter_suggestions()
+                    return True
+            elif et == QEvent.Type.KeyPress and event.key() == Qt.Key.Key_Down:
+                self._update_filter_suggestions()      # re-open the list on demand
+                return self._filter_list.isVisible()
+            elif et in (QEvent.Type.FocusOut, QEvent.Type.Hide):
+                self._hide_filter_suggestions()
+        return super().eventFilter(obj, event)
+
+    def _commit_filter_text(self):
+        """Parse the box and apply it. An expression that doesn't parse
+        yet (e.g. a bracket still open) leaves the last valid filter on."""
+        text = self._filter_edit.text().strip()
+        try:
+            tree = doc_filter.parse(text)
+        except doc_filter.FilterSyntaxError as exc:
+            self._filter_info.setText(f'<span style="color:#C62828;">{exc}</span>')
+            return
+        self._doc_filter_tree = tree
+        self._apply_doc_filter()
+        # A name that matches no file/sheet makes the table go empty with no
+        # explanation (typically a missing ">" before the sheet) — say so.
+        hints = [h for t in doc_filter.terms(tree)
+                 if (h := doc_filter.explain_unmatched(t, self._filter_pairs))]
+        if (hints and not self._filter_has_sheets
+                and any(t.sheet is not None for t in doc_filter.terms(tree))):
+            fix = ("Click Compare again (the uploaded files were restored with it)"
+                   if self._mr_tables and self._ctr_tables else
+                   "Upload the MR/CTR files again and Compare")
+            hints = ["This comparison has no sheet information (it was saved by an older "
+                     f"version), so “>sheet” can't match. {fix} to get sheet filtering."]
+        if hints:
+            self._filter_info.setText(
+                f'<span style="color:#E65100;">&#9888; no match — see status bar</span>  '
+                f'{self._filter_info.text()}')
+            self._set_status(hints[0])
+
+    def _reset_doc_filter(self):
+        """New results: clear the expression and rebuild the suggestions."""
+        self._filter_timer.stop()
+        self._filter_edit.blockSignals(True)
+        self._filter_edit.clear()
+        self._filter_edit.blockSignals(False)
+        self._doc_filter_tree = None
+        self._matched_mask = None
+        self._filter_info.setText("")
+        self._hide_filter_suggestions()
+        pairs: set[tuple[str, str, str]] = set()
+        for df in (self._display_df, self._omr_dl, self._octr_dl):
+            if df.empty:
+                continue
+            for side, dcol, scol in (("MR", "MR Document", "MR Sheet"),
+                                     ("CTR", "CTR Document", "CTR Sheet")):
+                if dcol not in df.columns:
+                    continue
+                sheets = df[scol] if scol in df.columns else [""] * len(df)
+                for d, sh in zip(df[dcol], sheets):
+                    if _norm_val(d):
+                        pairs.add((side, _norm_val(d), _norm_val(sh)))
+        self._filter_pairs = sorted(pairs)
+        self._filter_edit.setEnabled(bool(pairs))
+        # Comparisons saved before sheet filtering existed carry no sheet
+        # names, so ">sheet" can never match and no sheets can be suggested.
+        self._filter_has_sheets = any(sh for _s, _d, sh in pairs)
+        if pairs and not self._filter_has_sheets:
+            self._filter_info.setText(
+                '<span style="color:#E65100;">&#9888; no sheet info in these results '
+                '(saved by an older version) — run Compare again to filter by sheet</span>')
+
+    def _refresh_type_filter_state(self):
+        """New results: reset the Type box, and put the type on the Stock Code
+        tooltips of the three detail tabs (the filter's own tooltips are
+        applied by _apply_doc_filter)."""
+        known = self._category_by_key is not None
+        self._type_combo.blockSignals(True)
+        self._type_combo.setCurrentIndex(0)
+        self._type_combo.blockSignals(False)
+        self._type_combo.setEnabled(known)
+        if not known:
+            self._type_combo.setToolTip(
+                "Not available for a reopened saved comparison — press Compare with the "
+                "original files to filter by Equipment / Consumable.")
+        for view, df in ((self._tab_matched, self._display_df),
+                         (self._tab_only_mr, self._omr_dl),
+                         (self._tab_only_ctr, self._octr_dl)):
+            m = view.model()
+            if m is not None:
+                m.sourceModel().set_tooltips(self._type_tips(df))
+
+    def _type_of(self, stock_code) -> str:
+        return (self._category_by_key or {}).get(cost_stats.norm_key(stock_code),
+                                                 cost_stats.UNCATEGORISED)
+
+    def _type_tips(self, df: pd.DataFrame) -> dict[tuple[int, str], str]:
+        """Hover text on each Stock Code cell saying its type and where that
+        comes from."""
+        if self._category_by_key is None or df.empty or "Stock Code" not in df.columns:
+            return {}
+        why = {
+            cost_stats.EQUIPMENT: "Type: Equipment (CTR section “Plant & Equipment”)",
+            cost_stats.CONSUMABLE: "Type: Consumable (CTR section “Consumables & Materials”)",
+            cost_stats.UNCATEGORISED: "Type: Uncategorised — this Stock Code is not in any CTR "
+                                      "section (or is in both), so its type is unknown",
+        }
+        return {(i, "Stock Code"): why[self._type_of(k)] for i, k in enumerate(df["Stock Code"])}
+
+    def _type_mask(self, df: pd.DataFrame) -> list[bool] | None:
+        """Per-row result of the Type box (None = every row)."""
+        want = self._type_combo.currentText()
+        if (want == "All types" or self._category_by_key is None
+                or df.empty or "Stock Code" not in df.columns):
+            return None
+        return [self._type_of(k) == want for k in df["Stock Code"]]
+
+    @staticmethod
+    def _and_masks(a: list[bool] | None, b: list[bool] | None) -> list[bool] | None:
+        if a is None:
+            return b
+        if b is None:
+            return a
+        return [x and y for x, y in zip(a, b)]
+
+    @staticmethod
+    def _detail_mask(df: pd.DataFrame, tree) -> list[bool]:
+        """Per-row result of the expression for a Matched / Only in MR /
+        Only in CTR table (columns MR/CTR Document and Sheet)."""
+        def col(name):
+            return ([_norm_val(v) for v in df[name]] if name in df.columns
+                    else [""] * len(df))
+        mr_d, mr_s, ctr_d, ctr_s = (col("MR Document"), col("MR Sheet"),
+                                    col("CTR Document"), col("CTR Sheet"))
+        cache: dict[tuple, bool] = {}
+        mask = []
+        for key in zip(mr_d, mr_s, ctr_d, ctr_s):
+            if key not in cache:
+                mr  = (key[0], key[1]) if key[0] else None
+                ctr = (key[2], key[3]) if key[2] else None
+                cache[key] = doc_filter.evaluate(tree, mr, ctr)
+            mask.append(cache[key])
+        return mask
+
+    def _combined_mask_and_tips(self, tree):
+        """Combined view: a Stock Code stays when some pairing of one MR
+        (document, sheet) with one CTR (document, sheet) that contributed
+        to it satisfies the expression — the same pairing a Matched row is.
+        Tooltips on the Qty cells say how much of each total comes from the
+        documents that satisfied it."""
+        def parts(agg, side):
+            p = agg.get(f"{side}_parts")
+            if p:
+                return p
+            # Saved before per-sheet breakdowns existed: documents only.
+            return [{"doc": d, "sheet": "", "qty": None} for d in agg.get(f"{side}_docs", [])]
+
+        def fmt(x):
+            return f"{x:,.10g}"
+
+        mask: list[bool] = []
+        tips: dict[tuple[int, str], str] = {}
+        for row_idx, key in enumerate(self._combined_df["Stock Code"]):
+            agg = self._combined_raw.get(key, {})
+            mrs, ctrs = parts(agg, "mr"), parts(agg, "ctr")
+            used_mr: set[int] = set()
+            used_ctr: set[int] = set()
+            for i, m in enumerate([*mrs] or [None]):
+                for j, c in enumerate([*ctrs] or [None]):
+                    mp = (m["doc"], m["sheet"]) if m else None
+                    cp = (c["doc"], c["sheet"]) if c else None
+                    if doc_filter.evaluate(tree, mp, cp):
+                        if m: used_mr.add(i)
+                        if c: used_ctr.add(j)
+                        if not m: used_mr.add(-1)
+                        if not c: used_ctr.add(-1)
+            visible = bool(used_mr or used_ctr)
+            mask.append(visible)
+            if not visible:
+                continue
+
+            sel: dict[str, float | None] = {}
+            for side, plist, used, total in (("mr", mrs, used_mr, agg.get("mr_qty")),
+                                              ("ctr", ctrs, used_ctr, agg.get("ctr_qty"))):
+                chosen = [plist[i] for i in sorted(used) if i >= 0]
+                col = "Qty (MR) Total" if side == "mr" else "Qty (CTR) Total"
+                label = side.upper()
+                src = ", ".join(f"{p['doc']}" + (f" › {p['sheet']}" if p["sheet"] else "")
+                                for p in chosen) or "none"
+                if not chosen:
+                    tips[(row_idx, col)] = f"No {label} document matches the filter for this Stock Code."
+                    sel[side] = 0.0
+                elif any(p["qty"] is None for p in plist) or total is None:
+                    tips[(row_idx, col)] = (f"{label} from selected documents: {src}\n"
+                                            "Quantity breakdown isn't available for this row "
+                                            "(older saved comparison).")
+                    sel[side] = None
+                else:
+                    got = sum(p["qty"] for p in chosen)
+                    pct = f" ({got / total * 100:.0f}%)" if total else ""
+                    tips[(row_idx, col)] = (f"{label} from selected documents: {fmt(got)} of {fmt(total)}{pct}\n"
+                                            f"{src}")
+                    sel[side] = got
+            if sel.get("mr") is not None and sel.get("ctr") is not None:
+                tips[(row_idx, "Diff (CTR − MR)")] = (
+                    f"Selected documents only: CTR {fmt(sel['ctr'])} − MR {fmt(sel['mr'])} "
+                    f"= {fmt(sel['ctr'] - sel['mr'])}")
+        return mask, tips
+
+    def _apply_doc_filter(self, rehighlight: bool = True):
+        """Apply self._doc_filter_tree to every result table (hiding rows —
+        the data frames, downloads and saved comparisons are untouched) and
+        refresh the Combined tooltips and the counts label."""
+        tree = self._doc_filter_tree
+        combined = self._combined_btn.isChecked()
+        views = [
+            (self._tab_only_mr,  self._omr_dl,  "only in MR"),
+            (self._tab_only_ctr, self._octr_dl, "only in CTR"),
+        ]
+        info: list[str] = []
+        self._matched_mask = None
+
+        # Matched tab: detail rows, or the Combined rows.
+        proxy = self._tab_matched.model()
+        if proxy is not None:
+            src = proxy.sourceModel()
+            if tree is None:
+                mask, tips = None, {}
+            elif combined:
+                mask, tips = self._combined_mask_and_tips(tree)
+            else:
+                mask, tips = self._detail_mask(self._display_df, tree), {}
+            mask = self._and_masks(mask, self._type_mask(self._combined_df if combined
+                                                         else self._display_df))
+            proxy.set_mask(mask)
+            src.set_tooltips({**self._type_tips(self._combined_df if combined
+                                                else self._display_df), **tips})
+            self._matched_mask = mask
+            if mask is not None:
+                what = "Stock Codes" if combined else "matched"
+                info.append(f"{sum(mask)} of {len(mask)} {what}")
+
+        for view, df, label in views:
+            proxy = view.model()
+            if proxy is None:
+                continue
+            mask = None if tree is None or df.empty else self._detail_mask(df, tree)
+            mask = self._and_masks(mask, self._type_mask(df))
+            proxy.set_mask(mask)
+            proxy.sourceModel().set_tooltips(self._type_tips(df))
+            if mask is not None:
+                info.append(f"{sum(mask)} of {len(mask)} {label}")
+
+        self._filter_info.setText(
+            ("Showing " + " · ".join(info)) if info else "")
+        self._stats_panel.set_doc_filter(self._stats_doc_pred())
+        if rehighlight:
+            self._apply_value_highlights(self._compare_vals_btn.isChecked())
+
+    def _row_visible(self, src_row: int) -> bool:
+        m = self._matched_mask
+        return m is None or (src_row < len(m) and m[src_row])
+
     # ── Value comparison highlights ───────────────────────────────────────────
 
     def _apply_value_highlights(self, active: bool):
@@ -1920,10 +2710,9 @@ class MainWindow(QMainWindow):
             return
 
         if not active or self._display_df.empty:
-            # Turning this off doesn't clear the Rate/Rechargeable check —
-            # that one runs unconditionally on every Compare (see
-            # _run_compare), this toggle only adds/removes the Qty/Unit layer.
-            source.set_highlights({c: "mismatch" for c in self._rate_rech_mismatch_cells})
+            # Qty/Unit and Rate/Rechargeable mismatches are all highlighted
+            # only while this toggle is on.
+            source.set_highlights({})
             self._mismatch_rows = []
             self._mismatch_pos  = -1
             self._prev_mm_btn.setEnabled(False)
@@ -1967,7 +2756,7 @@ class MainWindow(QMainWindow):
                     mismatch_row_set.add(row_idx)
 
         source.set_highlights(mismatch_cells)
-        self._mismatch_rows = sorted(mismatch_row_set)
+        self._mismatch_rows = sorted(r for r in mismatch_row_set if self._row_visible(r))
         self._mismatch_pos  = 0 if self._mismatch_rows else -1
 
         has = len(self._mismatch_rows) > 0
@@ -1994,34 +2783,60 @@ class MainWindow(QMainWindow):
             self._set_status("Compare Values — no Qty, Unit, or Rate/Rechargeable mismatches found.")
 
     def _apply_combined_doc_highlights(self, source: "PandasModel", active: bool):
-        """Show Combined, the Combined-view replacement for Compare Values:
+        """Combined-view highlighting. `active` is Show Combined (orange):
         highlights every Stock Code whose combined total was built from more
         than one MR or CTR source document (regardless of whether the MR/CTR
         totals actually differ), and wires the ↑/↓ buttons to step between
         those rows — unlike the old Diff-colouring behaviour this replaced,
-        which left row navigation dead in Combined view."""
+        which left row navigation dead in Combined view. The separate
+        Compare Values button (_combined_cmp_btn) adds red Qty/Unit cells
+        on top and feeds the same ↑/↓ navigation."""
         self._mismatch_rows = []
         self._mismatch_pos  = -1
         self._prev_mm_btn.setEnabled(False)
         self._next_mm_btn.setEnabled(False)
 
-        if not active or self._combined_df.empty:
+        cmp_active = self._combined_cmp_btn.isChecked()
+        if self._combined_df.empty or not (active or cmp_active):
             source.set_highlights({})
             self._mismatch_lbl.setVisible(False)
             return
 
         cells: dict[tuple[int, str], str] = {}
-        rows: list[int] = []
+        row_set: set[int] = set()
+        n_doc = 0
         highlight_cols = [c for c in ("Stock Code", "Description (MR)", "Description (CTR)",
                                        "MR Document", "CTR Document")
                           if c in self._combined_df.columns]
         for row_idx, key in enumerate(self._combined_df["Stock Code"]):
             agg = self._combined_raw.get(key, {})
-            if len(agg.get("mr_docs", [])) > 1 or len(agg.get("ctr_docs", [])) > 1:
-                rows.append(row_idx)
+            if active and (len(agg.get("mr_docs", [])) > 1 or len(agg.get("ctr_docs", [])) > 1):
+                n_doc += 1
+                row_set.add(row_idx)
                 for col in highlight_cols:
                     cells[(row_idx, col)] = "combined"
 
+        # Compare Values (Combined): Qty totals, and MR-vs-CTR Units. Applied
+        # after the document colouring so red wins on any shared cell.
+        n_val = 0
+        if cmp_active:
+            for row_idx, key in enumerate(self._combined_df["Stock Code"]):
+                agg = self._combined_raw.get(key, {})
+                bad_cols: list[str] = []
+                mr_q, ctr_q = agg.get("mr_qty"), agg.get("ctr_qty")
+                if (mr_q is None) != (ctr_q is None) or (
+                        mr_q is not None and abs(mr_q - ctr_q) > 1e-9):
+                    bad_cols += ["Qty (MR) Total", "Qty (CTR) Total", "Diff (CTR − MR)"]
+                if sorted(agg.get("mr_units", [])) != sorted(agg.get("ctr_units", [])):
+                    bad_cols.append("Unit")
+                if bad_cols:
+                    n_val += 1
+                    row_set.add(row_idx)
+                    for col in bad_cols:
+                        if col in self._combined_df.columns:
+                            cells[(row_idx, col)] = "mismatch"
+
+        rows = sorted(r for r in row_set if self._row_visible(r))
         source.set_highlights(cells)
         self._mismatch_rows = rows
         self._mismatch_pos  = 0 if rows else -1
@@ -2030,26 +2845,29 @@ class MainWindow(QMainWindow):
         self._prev_mm_btn.setEnabled(has)
         self._next_mm_btn.setEnabled(has)
 
+        parts: list[str] = []
+        if n_val:
+            parts.append(f'<span style="color:#C62828;">&#9888;&nbsp; {n_val} Qty/Unit mismatch'
+                         f'{"es" if n_val != 1 else ""}</span>')
+        if n_doc:
+            parts.append(f'<span style="color:{_COMBINED_FG.name()};">&#9679;&nbsp; {n_doc} '
+                         'Stock Code(s) span multiple MR/CTR documents</span>')
         if has:
-            n = len(rows)
             self._mismatch_lbl.setText(
-                f'<span style="color:{_COMBINED_FG.name()}; font-size:11px;">'
-                f'&#9679;&nbsp; {n} Stock Code(s) span multiple MR/CTR documents'
-                f'</span>')
+                '<span style="font-size:11px;">' + " &nbsp;·&nbsp; ".join(parts) + '</span>')
             self._mismatch_lbl.setVisible(True)
             self._nav_mismatch(0, absolute=True)   # scroll to first match
             self._set_status(
-                f"Show Combined — {n} Stock Code(s) drew from more than one MR/CTR "
-                "document, highlighted in orange. Use ↑ ↓ to step through them.")
+                f"Combined — {len(rows)} highlighted Stock Code(s): red = Qty/Unit "
+                "differs between MR and CTR, orange = built from several documents. "
+                "Use ↑ ↓ to step through them.")
         else:
+            what = ("No Qty or Unit differences between MR and CTR" if cmp_active
+                    else "No Stock Code spans multiple documents")
             self._mismatch_lbl.setText(
-                '<span style="color:#2E7D32; font-size:11px;">'
-                '&#10003;&nbsp; No Stock Code spans multiple documents'
-                '</span>')
+                f'<span style="color:#2E7D32; font-size:11px;">&#10003;&nbsp; {what}</span>')
             self._mismatch_lbl.setVisible(True)
-            self._set_status(
-                "Show Combined — every Stock Code came from a single MR and single "
-                "CTR document.")
+            self._set_status(f"Combined — {what.lower()}.")
 
     def _nav_mismatch(self, step: int, absolute: bool = False):
         if not self._mismatch_rows:
@@ -2155,15 +2973,16 @@ class MainWindow(QMainWindow):
 
         if self._combined_btn.isChecked():
             _load_view(self._tab_matched, self._combined_df)
+            self._apply_doc_filter(rehighlight=False)
             # A fresh model has no highlights — reapply Show Combined's
             # multi-document highlighting if it was on before this rebuild.
             self._apply_value_highlights(self._compare_vals_btn.isChecked())
 
     def _update_review_tab_badge(self):
-        """So a pending unit-conflict review is visible on the tab bar
-        itself, without having to open the tab to find out."""
+        """So a pending review (unit conflicts, rows with no quantity) is
+        visible on the tab bar itself, without having to open the tab."""
         idx = self._tabs.indexOf(self._stack_review)
-        n = len(self._combined_review_df)
+        n = len(self._combined_review_df) + len(self._missing_qty_df)
         if n:
             self._tabs.setTabText(idx, f"Needs Review  ⚠ {n}")
             self._tabs.tabBar().setTabTextColor(idx, QColor("#E65100"))
@@ -2174,7 +2993,7 @@ class MainWindow(QMainWindow):
     def _fill_review_list(self):
         lw = self._review_list
         lw.clear()
-        if self._combined_review_df.empty:
+        if self._combined_review_df.empty and self._missing_qty_df.empty:
             self._stack_review.setCurrentIndex(0)
             return
         self._stack_review.setCurrentIndex(1)
@@ -2220,6 +3039,37 @@ class MainWindow(QMainWindow):
             lw.setItemWidget(item, row_w)
             item.setSizeHint(row_w.sizeHint())
 
+        self._fill_missing_qty_review(lw)
+
+    def _fill_missing_qty_review(self, lw: QListWidget, cap: int = 500):
+        """Rows with no numeric quantity: listed for information (there is
+        nothing to approve) — they are left out of the cost statistics until
+        a quantity is filled in in the source file."""
+        df = self._missing_qty_df
+        if df.empty:
+            return
+        head = QListWidgetItem(
+            f"No quantity — {len(df)} row(s) left out of the cost statistics "
+            "(fill in the quantity in the source file and Compare again)")
+        f = head.font()
+        f.setBold(True)
+        head.setFont(f)
+        head.setForeground(QBrush(QColor("#C62828")))
+        head.setFlags(Qt.ItemFlag.ItemIsEnabled)
+        lw.addItem(head)
+        for n, (side, doc, sheet, key) in enumerate(
+                zip(df["side"], df["doc"], df["sheet"], df["key"])):
+            if n >= cap:
+                more = QListWidgetItem(f"… {len(df) - cap} more (all of them are in the "
+                                       "Excel report's “No Quantity” sheet)")
+                more.setFlags(Qt.ItemFlag.ItemIsEnabled)
+                lw.addItem(more)
+                break
+            it = QListWidgetItem(f"{key}   ·   {side}   ·   {doc}" + (f"   ·   {sheet}" if sheet else ""))
+            it.setFlags(Qt.ItemFlag.ItemIsEnabled)
+            it.setForeground(QBrush(QColor("#C62828")))
+            lw.addItem(it)
+
     def _on_review_decision(self, stock_code: str, approved: bool):
         self._combined_decisions[stock_code] = approved
         self._refresh_combined_tables()
@@ -2233,9 +3083,11 @@ class MainWindow(QMainWindow):
         if self._tab_matched.model() is None:
             return
         _load_view(self._tab_matched, self._combined_df if active else self._display_df)
+        self._apply_doc_filter(rehighlight=False)
         # Compare Values doubles as Show Combined while this view is active —
         # same button/checked-state, different label/behaviour.
         self._set_compare_vals_mode(active)
+        self._combined_cmp_btn.setVisible(active)
         # A fresh model from _load_view above has no highlights, so reapply
         # whichever state the toggle was already in for the view we just
         # switched to (Qty/Unit/Rate mismatches in detail, multi-document
@@ -2243,12 +3095,41 @@ class MainWindow(QMainWindow):
         self._apply_value_highlights(self._compare_vals_btn.isChecked())
         self._apply_doc_column_visibility(self._show_docs_btn.isChecked())
 
+    def _arrange_toolbar(self, combined: bool):
+        """Lay out the corner toolbar. In Combined view the Compare Values
+        button (relabelled Show Combined) goes after Combined View so the
+        two orange-themed buttons aren't mistaken for one another; in the
+        detail view it keeps its original place before Combined View."""
+        cl = self._corner_layout
+        while cl.count():
+            cl.takeAt(0)          # detaches the item; widgets stay alive
+        cl.addWidget(self._prev_mm_btn)
+        cl.addWidget(self._next_mm_btn)
+        cl.addSpacing(4)
+        if combined:
+            cl.addWidget(self._combined_cmp_btn)
+            cl.addWidget(self._combined_btn)
+            cl.addSpacing(4)
+            cl.addWidget(self._compare_vals_btn)
+        else:
+            cl.addWidget(self._compare_vals_btn)
+            cl.addSpacing(4)
+            cl.addWidget(self._combined_cmp_btn)
+            cl.addWidget(self._combined_btn)
+        cl.addSpacing(4)
+        cl.addWidget(self._show_docs_btn)
+        cl.addSpacing(4)
+        cl.addWidget(self._cols_btn)
+        cl.addStretch(1)          # left-aligned toolbar row above the tabs
+
     def _set_compare_vals_mode(self, combined: bool):
         """Compare Values and Show Combined are the same button/state
         (_compare_vals_btn.isChecked(), dispatched in _apply_value_highlights)
         with a different label, tooltip, colour theme, and nav-arrow tooltips
         depending on whether Combined View is active. Normal (detail) view
         keeps 'Compare Values' exactly as it always has."""
+        if hasattr(self, "_corner_layout"):
+            self._arrange_toolbar(combined)
         if combined:
             self._compare_vals_btn.setText("Show Combined")
             self._compare_vals_btn.setToolTip(
@@ -2320,7 +3201,7 @@ class MainWindow(QMainWindow):
         ):
             if view.model() is None:
                 continue
-            for col_name in ("MR Document", "CTR Document"):
+            for col_name in ("MR Document", "CTR Document", "MR Sheet", "CTR Sheet"):
                 if col_name in df.columns:
                     idx = df.columns.get_loc(col_name)
                     view.setColumnHidden(idx, not show)
@@ -2344,6 +3225,16 @@ class MainWindow(QMainWindow):
                     self._combined_df.to_excel(writer, index=False, sheet_name="Combined")
                 if not self._combined_error_df.empty:
                     self._combined_error_df.to_excel(writer, index=False, sheet_name="Error Data")
+                # Cost statistics: every row, whatever the document / type
+                # filters show (the filters are view-only).
+                frames = self._stats_panel.report_frames()
+                if frames is not None:
+                    frames[0].to_excel(writer, index=False, sheet_name="Statistics")
+                    frames[1].to_excel(writer, index=False, sheet_name="Statistics Items")
+                if not self._missing_qty_df.empty:
+                    self._missing_qty_df.rename(columns={
+                        "side": "Side", "doc": "Document", "sheet": "Sheet", "key": "Stock Code",
+                    }).to_excel(writer, index=False, sheet_name="No Quantity")
             Path(path).write_bytes(buf.getvalue())
             log.info("Report saved: %s", path)
             QMessageBox.information(self, "Saved", f"Report saved:\n{path}")
@@ -2399,6 +3290,7 @@ class MainWindow(QMainWindow):
                 combined_decisions=self._combined_decisions,
                 mr_tables=self._mr_tables,
                 ctr_tables=self._ctr_tables,
+                stats=self._stats_snapshot(),
             )
             self._loaded_comparison_path = Path(path)
             log.info("Comparison saved: %s", path)
@@ -2476,6 +3368,8 @@ class MainWindow(QMainWindow):
             self._rate_rech_mismatch_cells = _find_rate_rechargeable_mismatches(self._display_df)
             self._loaded_comparison_path    = path
 
+            self._pending_stats = None
+            self._pending_saved_stats = data.get("stats")
             self._present_compare_results()
         except Exception as exc:
             log.exception("Failed to restore comparison: %s", path)
@@ -2493,6 +3387,7 @@ class MainWindow(QMainWindow):
             self._combined_decisions = {}
             self._rate_rech_mismatch_cells = set()
             self._loaded_comparison_path   = None
+            self._pending_saved_stats      = None
             self._results_w.setVisible(False)
             self._metrics_w.setVisible(False)
             self._download_btn.setEnabled(False)

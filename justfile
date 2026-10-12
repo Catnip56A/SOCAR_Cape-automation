@@ -8,8 +8,10 @@
 set windows-shell := ["powershell.exe", "-NoLogo", "-Command"]
 
 # Run the PySide6 desktop app
+# XCURSOR_SIZE: under WSLg the mouse pointer inside the app came out far too big;
+# 16 is a normal pointer size. Raise it (e.g. 20, 24) if it is now too small.
 run:
-    uv run python app.py
+    XCURSOR_SIZE=16 uv run python app.py
 
 # Set up the dev environment (installs all deps including dev extras)
 setup:

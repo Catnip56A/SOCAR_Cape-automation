@@ -117,6 +117,13 @@
     "NSB": ["night", "standby"]
   },
 
+  "encoding": {
+    "_comment": "Where the Combined DB workbook keeps the manpower encoding rules. variants_sheet_contains: part of the sheet name listing, per role (column A), every valid encoding in the following columns. onshore_sheet / onshore_col: the sheet and 0-based column holding the roles that are always Onshore (ENC_LIST column H).",
+    "variants_sheet_contains": "possible variants",
+    "onshore_sheet": "ENC_LIST",
+    "onshore_col": 7
+  },
+
   "sage_export": {
     "sheet_name": "FROM SAGE",
     "non_recharge_tags": ["NONRECHARG", "NONRECHAR"]

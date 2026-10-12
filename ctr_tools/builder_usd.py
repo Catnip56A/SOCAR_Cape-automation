@@ -440,6 +440,37 @@ def _safe_float(v, default: float = 0.0) -> float:
         return default
 
 
+def _require_float(row: dict, key: str, what: str) -> float:
+    """A figure the CTR must state: raises (naming the line) instead of
+    guessing when it is missing or not a number. The Generator tab leaves
+    incomplete rows out before building, so this only trips on a bug."""
+    try:
+        f = float(row.get(key))
+    except (TypeError, ValueError):
+        f = float("nan")
+    if f != f:
+        raise ValueError(
+            f"{what} has no valid {key!r} (got {row.get(key)!r}) — "
+            "a missing figure is never assumed.")
+    return f
+
+
+def _require_rate(row: dict, key: str, what: str) -> "float | str":
+    """A number, or the NONRECHARG sentinel (a non-rechargeable line needs no
+    rate; a rechargeable one must have it). Anything else raises."""
+    raw = row.get(key)
+    if str(raw).strip().upper() == _NONRECHARG:
+        return _NONRECHARG
+    return _require_float(row, key, what)
+
+
+def _require_text(row: dict, key: str, what: str) -> str:
+    text = str(row.get(key) or "").strip()
+    if not text:
+        raise ValueError(f"{what} has no {key!r} — a missing unit is never assumed.")
+    return text
+
+
 # Row-height estimate for wrapped comment text. Deliberately rough and
 # deliberately pessimistic: a column's width is expressed in characters of
 # the workbook's *default* font, so measuring a smaller cell font against it
@@ -545,8 +576,8 @@ def build_usd(
     """
     equip_rows: list of dicts with keys:
         description (str), quantity (float), unit (str),
-        rate_per_day (float or 'NONRECHARG'), days (float, or "" to leave
-        the cell blank for a line whose duration isn't known yet),
+        rate_per_day (float or 'NONRECHARG'), days (float — required; a
+        missing figure raises instead of being assumed),
         stock_code (str), sage_cost (float — SAGE's local_expect_cost for
         this item, independent of rate_per_day; feeds the Pricing sheet's
         internal "Total SC Eq Cost" column only, defaults to 0.0)
@@ -692,26 +723,20 @@ def build_usd(
         r         = _EQUIP_START + i
         item_no   = i + 1
         desc      = str(er.get("description", ""))
-        qty       = _safe_float(er.get("quantity", 1), 1.0)
-        unit      = str(er.get("unit", "DAY"))
-        rate_raw  = er.get("rate_per_day", 0)
-        # A blank duration is written as a blank cell, not as a default —
-        # see the Days handling in window._generate. Excel reads the empty
-        # cell as 0 in this row's total formula, so the line still shows
-        # its description, quantity and unit while totalling 0.00.
-        days_raw  = er.get("days", 30)
-        days      = "" if days_raw in (None, "") else _safe_float(days_raw, 30.0)
+        _what     = f"Equipment line {desc or item_no!r}"
+        qty       = _require_float(er, "quantity", _what)
+        unit      = _require_text(er, "unit", _what)
+        days      = _require_float(er, "days", _what)
         stock     = str(er.get("stock_code", ""))
-        sage_cost = round(_safe_float(er.get("sage_cost", 0), 0.0), 6)
+        # None = the item is not in SAGE and no cost was typed in: the
+        # internal SC cost cell is left empty, never filled with 0.
+        sage_cost = None if er.get("sage_cost") is None else round(_safe_float(er.get("sage_cost"), 0.0), 6)
 
         # A non-rechargeable item carries the "NONRECHARG" sentinel instead of
         # a numeric rate (set upstream once the pricebook/DB match marks it
         # non-rechargeable) — preserved verbatim so it prints instead of a
-        # misleading 0.00. Any other non-numeric junk still collapses to 0.0.
-        try:
-            rate: float | str = float(rate_raw)
-        except (TypeError, ValueError):
-            rate = _NONRECHARG if str(rate_raw).strip().upper() == _NONRECHARG else 0.0
+        # misleading 0.00. A rechargeable item must state its rate.
+        rate = _require_rate(er, "rate_per_day", _what)
 
         if desc:
             equip_cost_list.append((desc, f"='{pricing_sheet}'!G{r}"))
@@ -728,7 +753,7 @@ def build_usd(
         _set_cell(ws_p, r, 8,  f"=A{r}")
         # Internal-only: SAGE's local_expect_cost × quantity, independent of
         # this row's own billed total (G) — see the module docstring.
-        _set_cell(ws_p, r, 9,  f"=C{r}*{sage_cost}")
+        _set_cell(ws_p, r, 9,  None if sage_cost is None else f"=C{r}*{sage_cost}")
         _set_cell(ws_p, r, 10, stock)
 
     # Rows left blank because there were fewer items than the section's
@@ -773,18 +798,14 @@ def build_usd(
         r         = cons_start + i
         item_no   = i + 1
         desc      = str(cr.get("long_description", ""))
-        qty       = _safe_float(cr.get("quantity", 1), 1.0)
-        unit      = str(cr.get("unit_code", "EA"))
-        price_raw = cr.get("local_expect_cost", 0)
+        _what     = f"Consumable line {desc or item_no!r}"
+        qty       = _require_float(cr, "quantity", _what)
+        unit      = _require_text(cr, "unit_code", _what)
         product   = str(cr.get("product", ""))
-        sage_cost = round(_safe_float(cr.get("sage_cost", 0), 0.0), 6)
+        sage_cost = None if cr.get("sage_cost") is None else round(_safe_float(cr.get("sage_cost"), 0.0), 6)
 
-        # Same "NONRECHARG" sentinel handling as equipment above — preserved
-        # verbatim so it prints instead of a misleading 0.00.
-        try:
-            price: float | str = float(price_raw)
-        except (TypeError, ValueError):
-            price = _NONRECHARG if str(price_raw).strip().upper() == _NONRECHARG else 0.0
+        # Same "NONRECHARG" sentinel handling as equipment above.
+        price = _require_rate(cr, "local_expect_cost", _what)
 
         if desc:
             cons_cost_list.append((desc, f"='{pricing_sheet}'!F{r}"))
@@ -801,7 +822,7 @@ def build_usd(
         # Internal-only: SAGE's local_expect_cost × quantity, independent of
         # this row's own billed total (F) — see the module docstring. Unlike
         # F, this stays populated on a "NONRECHARG" row too.
-        _set_cell(ws_p, r, 9,  f"=C{r}*{sage_cost}")
+        _set_cell(ws_p, r, 9,  None if sage_cost is None else f"=C{r}*{sage_cost}")
         _set_cell(ws_p, r, 10, product)
 
     # Same expand-used / contract-unused pass as the equipment section above.

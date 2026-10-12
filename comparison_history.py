@@ -146,6 +146,7 @@ def save_comparison(
     combined_decisions: dict,
     mr_tables: list[dict] | None = None,
     ctr_tables: list[dict] | None = None,
+    stats: dict | None = None,
 ) -> None:
     data = {
         "version":             _SCHEMA_VERSION,
@@ -164,6 +165,12 @@ def save_comparison(
         # made before this was added (schema version 1).
         "mr_tables":           _tables_to_json(mr_tables or []),
         "ctr_tables":          _tables_to_json(ctr_tables or []),
+        # Cost statistics (MA131): costed rows, manual unit costs, the
+        # Stock Code -> Equipment/Consumable map and the rows with no
+        # quantity. Optional — absent on older saves and when statistics had
+        # not been calculated; the schema version is unchanged because an
+        # older reader simply ignores the key.
+        "stats":               stats,
     }
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -210,6 +217,7 @@ def load_comparison(path: Path) -> dict:
         # still be reopened, just not extended with more MR/CTR files.
         "mr_tables":           _tables_from_json(data.get("mr_tables") or []),
         "ctr_tables":          _tables_from_json(data.get("ctr_tables") or []),
+        "stats":               data.get("stats"),
     }
 
 

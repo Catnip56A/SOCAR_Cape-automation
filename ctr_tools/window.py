@@ -32,21 +32,26 @@ Worker thread follows the same ParseWorker pattern used in app.py.
 from __future__ import annotations
 
 import json
+import html
 import logging
+import time
 import weakref
 import re
-from datetime import date as _date
+from datetime import date as _date, datetime as _datetime
 from pathlib import Path
 
 import pandas as pd
 from ctr_tools import __version__ as _VERSION
-from PySide6.QtCore import Qt, QObject, QRunnable, QSettings, QThread, QThreadPool, Signal
-from PySide6.QtGui import QBrush, QColor
+from PySide6.QtCore import (
+    Qt, QItemSelectionModel, QObject, QPoint, QRunnable, QSettings, QThread, QThreadPool, QTimer, Signal,
+)
+from PySide6.QtGui import QBrush, QColor, QCursor, QPen
 from PySide6.QtWidgets import (
     QAbstractItemView, QComboBox, QDialog, QDoubleSpinBox, QFileDialog,
     QGroupBox, QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit,
-    QMessageBox, QProgressDialog, QPushButton, QScrollArea,
-    QSizePolicy, QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget,
+    QListWidget, QMenu, QMessageBox, QProgressDialog, QPushButton, QScrollArea,
+    QSizePolicy, QStyledItemDelegate, QTableWidget, QTableWidgetItem, QTabWidget,
+    QToolButton, QToolTip, QVBoxLayout, QWidget, QWidgetAction,
 )
 
 from ctr_tools.aliases import (
@@ -57,6 +62,10 @@ from ctr_tools.desc_renames import (
     save_desc_renames,
 )
 from ctr_tools.config import CFG
+import cost_stats
+from find_bar import install_find
+from hover_text import install_elided_tooltips
+from stats_view import StatsPanel
 from ctr_tools.presets import load_presets, save_presets, _PRESET_FIELDS
 from ctr_tools.builder_azn import (
     activities_label,
@@ -67,7 +76,7 @@ from ctr_tools.builder_azn import (
 from ctr_tools.builder_usd import build_usd
 from ctr_tools.parser import (
     parse_azn_pricebook, parse_usd_pricebook, parse_sage,
-    parse_ctr_request, parse_equip_names_db,
+    parse_ctr_request, parse_equip_names_db, parse_encoding_info,
 )
 from ctr_tools.pdf_exporter import export_to_pdf
 from ctr_tools.tasks import TASKS, Job
@@ -118,19 +127,20 @@ _PRESET_OMITS = (
 _MP_TYPE      = 0   # "Onshore" / "Offshore" — editable
 _MP_SHIFT     = 1   # "Day" / "Night" — editable
 _MP_SHIFTTYPE = 2   # "Normal" / "Overtime" / "Rotational" / "Standby" — editable
-_MP_DESC      = 3   # description — editable
-_MP_MATCH     = 4   # match-by search key (work name, or a literal stock code override) — editable
-_MP_MDESC     = 5   # matched pricebook item + stock code — read-only
-_MP_NUMEMP    = 6   # num employees — editable
-_MP_QTY       = 7   # quantity in hours (working days × hours/shift) — editable
-_MP_UOM       = 8   # UOM — always "Hours" for manpower, read-only
-_MP_RATE      = 9   # rate AZN — editable (auto-filled from match, overridable)
-_MP_TOTAL     = 10  # read-only, computed
-_MP_STATUS    = 11  # read-only: "✓ Matched" / "✓ Manual" / "✗ No match — ..."
-_MP_NAT       = 12  # nationality — editable
+_MP_ENC       = 3   # ENCODING, e.g. "NS-NAT-OFF-12" — from the request, or chosen from the role's valid variants
+_MP_DESC      = 4   # description — editable
+_MP_MATCH     = 5   # match-by search key (work name, or a literal stock code override) — editable
+_MP_MDESC     = 6   # matched pricebook item + stock code — read-only
+_MP_NUMEMP    = 7   # num employees — editable
+_MP_QTY       = 8   # quantity in hours (working days × hours/shift) — editable
+_MP_UOM       = 9   # UOM — always "Hours" for manpower, read-only
+_MP_RATE      = 10  # rate AZN — editable (auto-filled from match, overridable)
+_MP_TOTAL     = 11  # read-only, computed
+_MP_STATUS    = 12  # read-only: "✓ Matched" / "✓ Manual" / "✗ No match — ..."
+_MP_NAT       = 13  # nationality — editable
 
 _MANPOWER_HEADERS = [
-    "Type", "Shift", "Shift Type", "Description", "Match By", "Matched Item",
+    "Type", "Shift", "Shift Type", "Encoding", "Description", "Match By", "Matched Item",
     "Num\nEmployees", "Quantity (Hrs)", "UOM", "Rate AZN", "Total AZN", "Status", "Nationality",
 ]
 
@@ -444,8 +454,28 @@ def _group_css(color: str) -> str:
     """
 
 
+_JUMP_ROLE = Qt.UserRole + 5   # True on the one cell "Go to missing value" last jumped to
+
+
+class _JumpOverlayDelegate(QStyledItemDelegate):
+    """Default cell painting, plus an orange overlay and border on the cell
+    "Go to missing value" jumped to. It is drawn *over* the cell, because the
+    blue selection of the row would otherwise hide any cell background."""
+
+    def paint(self, painter, option, index):
+        super().paint(painter, option, index)
+        if index.data(_JUMP_ROLE):
+            painter.save()
+            r = option.rect.adjusted(1, 1, -1, -1)
+            painter.fillRect(r, QColor(255, 167, 38, 225))
+            painter.setPen(QPen(QColor("#E65100"), 2))
+            painter.drawRect(r)
+            painter.restore()
+
+
 def _make_table(headers: list[str], stretch_col: int = 0) -> QTableWidget:
     t = QTableWidget(0, len(headers))
+    t.setItemDelegate(_JumpOverlayDelegate(t))
     t.setHorizontalHeaderLabels(headers)
     t.setAlternatingRowColors(True)
     t.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
@@ -457,6 +487,8 @@ def _make_table(headers: list[str], stretch_col: int = 0) -> QTableWidget:
     t.horizontalHeader().setStretchLastSection(False)
     t.horizontalHeader().setSectionResizeMode(stretch_col, QHeaderView.ResizeMode.Stretch)
     t.itemSelectionChanged.connect(lambda: _on_table_selection_changed(t))
+    install_elided_tooltips(t)      # full text on hover when a cell is cut off
+    install_find(t)                 # Ctrl+F
     return t
 
 
@@ -469,6 +501,7 @@ def _ro_item(text: str) -> QTableWidgetItem:
 
 _ROW_TINT_ROLE = Qt.UserRole + 1   # stores a row's warning colour key ("red"/"yellow"/None)
 _DESC_ANCHOR_ROLE = Qt.UserRole + 2   # stores a row's original (un-renamed) requested Description
+_SCAFFOLD_ROLE = Qt.UserRole + 4   # True on the Description cell of the scaffold line (not costed by the statistics box)
 _SAGE_COST_ROLE = Qt.UserRole + 3   # stores a row's SAGE local_expect_cost (float) — independent
                                      # of the billed rate/price shown in the cell, and unaffected
                                      # by rechargeability, unlike that cell's "NONRECHARG" text.
@@ -678,8 +711,9 @@ def _transport_lines(transport_type: str, quantity: str, duration: str) -> list[
     several lines (a minibus charges vehicle+driver and its fuel
     separately, only the former marked up). A type that isn't in the table
     still produces one line — its requested wording, "_default"'s mark-up
-    and a 0.00 rate — so it shows up in the table to be priced by hand
-    instead of silently disappearing.
+    and a blank rate — so it shows up in the table, in red, to be priced
+    by hand instead of silently disappearing (Generate leaves it out until
+    it is priced).
     """
     rates = CFG.get("transport_rates", {})
     wanted = transport_type.strip().lower()
@@ -694,11 +728,23 @@ def _transport_lines(transport_type: str, quantity: str, duration: str) -> list[
             "quantity":       quantity,
             "duration":       duration,
             "uom":            spec.get("uom", "Days"),
-            "rate_azn":       spec.get("rate_azn", 0.0),
+            "rate_azn":       spec.get("rate_azn") or "",   # 0/missing = not priced
             "markup":         spec.get("markup", 0.0),
         }
         for spec in specs
     ]
+
+
+def _request_qty_text(raw) -> str:
+    """Quantity cell text for a CTR Request row: the number, or blank when the
+    request gives none. Blank is deliberate — a quantity nobody stated is not
+    1; the user has to enter it (see _incomplete_cells, which also keeps
+    Generate from including the row until they do)."""
+    try:
+        v = float(raw)
+    except (TypeError, ValueError):
+        return ""
+    return "" if v != v else str(v)
 
 
 def _scaffold_request_item(scaffold: dict) -> dict:
@@ -721,7 +767,7 @@ def _scaffold_request_item(scaffold: dict) -> dict:
         "stock_code":     "",
         "description":    str(scaffold.get("system", "") or "").strip(),
         "uom":            scaffold.get("uom") or CFG.get("scaffold", {}).get("default_uom", "TON"),
-        "quantity":       scaffold.get("tonnage", 0),
+        "quantity":       scaffold.get("tonnage"),
         "rechargability": "",
     }
 
@@ -896,7 +942,7 @@ def _match_azn_labor(df: pd.DataFrame, work_name: str, location: str, shift: str
     "NSB-NAT-ON-8" vs "NSB-NAT-ON-12"), only the row whose decoded hours
     equal `hours` is accepted — the wrong-but-similar row is never silently
     substituted. If `hours` is None (no request-encoded hint, e.g. a
-    manually added row), hours is left unconstrained. If no row matches the
+    manually added row), the description path refuses to match at all. If no row matches the
     known dimensions, returns None so the row surfaces as unmatched instead
     of picking a wrong rate.
 
@@ -922,6 +968,11 @@ def _match_azn_labor(df: pd.DataFrame, work_name: str, location: str, shift: str
     if ambiguous:
         return None
 
+    # Shift / Shift Type not stated (and no exact stock code given above): the
+    # row stays unmatched until the user picks them — never assumed Day/Normal.
+    if not (shift or "").strip() or not (shift_type or "").strip():
+        return None
+
     candidates = df[df["supplier_desc"].astype(str).str.strip().str.lower() == key_norm]
     if candidates.empty:
         return None
@@ -930,16 +981,26 @@ def _match_azn_labor(df: pd.DataFrame, work_name: str, location: str, shift: str
     sh  = _normalize_shift(shift)
     st  = _normalize_shift_type(shift_type)
 
+    # No shift length (no Encoding): never pick a rate from the description
+    # alone — the user chooses the Encoding (or gives an exact stock code).
+    if hours is None:
+        return None
+
+    hits = []
     for _, row in candidates.iterrows():
         decoded = _decode_azn_stock_code(row["stock_code"])
         if decoded is None:
             continue
         c_loc, c_shift, c_shift_type, c_hours = decoded
         if (c_loc == loc and c_shift == sh and c_shift_type == st
-                and (hours is None or c_hours == hours)):
-            return str(row["supplier_desc"]), float(row["unit_price"]), str(row["stock_code"])
+                and c_hours == hours):
+            hits.append(row)
 
-    return None
+    # Onshore and Offshore variants never mix: the location must be equal above.
+    if not hits:
+        return None
+    row = hits[0]
+    return str(row["supplier_desc"]), float(row["unit_price"]), str(row["stock_code"])
 
 
 def _is_dir_writable(path: Path) -> bool:
@@ -1093,6 +1154,8 @@ class AliasManagerDialog(QDialog):
         self._tbl.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self._tbl.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self._tbl.verticalHeader().setVisible(False)
+        install_elided_tooltips(self._tbl)
+        install_find(self._tbl)
         self._tbl.horizontalHeader().setStretchLastSection(True)
         # The Category column is redundant once the dialog is already scoped
         # to one category via its title — keep the data (still used by
@@ -1254,18 +1317,170 @@ class AliasManagerDialog(QDialog):
         )
 
 
+class _ChoiceDelegate(_JumpOverlayDelegate):
+    """A table cell edited with a drop-down (first entry empty = not chosen)."""
+
+    def __init__(self, choices, parent=None):
+        super().__init__(parent)
+        self._choices = list(choices)
+
+    def createEditor(self, parent, option, index):
+        box = QComboBox(parent)
+        box.addItems(["", *self._choices])
+        box.activated.connect(lambda _i, b=box: (self.commitData.emit(b), self.closeEditor.emit(b)))
+        return box
+
+    def setEditorData(self, editor, index):
+        editor.setCurrentText(str(index.data() or ""))
+
+    def setModelData(self, editor, model, index):
+        model.setData(index, editor.currentText())
+
+
+class _TypeAheadCombo(QComboBox):
+    """A plain (not editable) drop-down — so a click anywhere on it opens the
+    list, not just on a small arrow — that you can also type into: the typed
+    letters select the first entry that starts with (else contains) them, and
+    Enter confirms. Only a listed value can ever be chosen."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._typed = ""
+        self._typed_at = 0.0
+
+    def keyPressEvent(self, e):
+        txt = e.text()
+        if txt and txt.isprintable() and not (e.modifiers() & Qt.KeyboardModifier.ControlModifier):
+            now = time.monotonic()
+            self._typed = (self._typed if now - self._typed_at < 1.2 else "") + txt.upper()
+            self._typed_at = now
+            for flag in (Qt.MatchFlag.MatchStartsWith, Qt.MatchFlag.MatchContains):
+                i = self.findText(self._typed, flag | Qt.MatchFlag.MatchFixedString)
+                if i >= 0:
+                    self.setCurrentIndex(i)          # programmatic: nothing is committed yet
+                    break
+            e.accept()
+            return
+        super().keyPressEvent(e)
+
+
+class _EncodingDelegate(_JumpOverlayDelegate):
+    """The Encoding cell: a drop-down of the encodings valid for the row's role
+    and location (empty clears it). Typing selects within that list."""
+
+    def __init__(self, owner, parent=None):
+        super().__init__(parent)
+        self._owner = owner
+
+    def createEditor(self, parent, option, index):
+        box = _TypeAheadCombo(parent)
+        box.addItems(["", *self._owner._encoding_options(index.row())])
+        box.setMaxVisibleItems(15)
+        # Picking from the list commits once. (Enter on the closed combo is
+        # committed by the delegate itself, so it is not connected here — doing
+        # both made Qt commit an editor it had already closed.)
+        box.activated.connect(lambda _i, b=box: self._finish(b))
+        return box
+
+    def _finish(self, box) -> None:
+        if box.property("done"):
+            return
+        box.setProperty("done", True)
+        self.commitData.emit(box)
+        self.closeEditor.emit(box)
+
+    def setEditorData(self, editor, index):
+        editor.setCurrentText(str(index.data() or ""))
+
+    def setModelData(self, editor, model, index):
+        text = editor.currentText().strip().upper()
+        options = self._owner._encoding_options(index.row())
+        if text and text not in options:
+            self._owner._reject_encoding(index.row(), text, options)
+            return
+        model.setData(index, text)
+
+
+class _SaveLocationDialog(QDialog):
+    """Shows where a file is about to be saved — the folder remembered from
+    last time and the file name — so the user can approve it as it is or
+    change the folder first. With no remembered folder it opens the folder
+    chooser straight away and "Save" stays disabled until one is picked."""
+
+    def __init__(self, parent, title: str, folder: str, filename: str, start_dir: str = ""):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.setMinimumWidth(520)
+        self._folder = folder
+        self._start_dir = start_dir
+        lay = QVBoxLayout(self)
+        lay.addWidget(QLabel("The file will be saved in this folder:"))
+        row = QHBoxLayout()
+        self._edit = QLineEdit(folder)
+        self._edit.setReadOnly(True)
+        self._edit.setPlaceholderText("(no folder chosen yet)")
+        change = QPushButton("Change folder…")
+        change.clicked.connect(self._change)
+        row.addWidget(self._edit, 1)
+        row.addWidget(change)
+        lay.addLayout(row)
+        name = QLabel(f"File name: {filename}")
+        name.setStyleSheet(f"color: {MUTED}; font-size: 11px;")
+        lay.addWidget(name)
+        note = QLabel("The folder is remembered and offered again next time.")
+        note.setStyleSheet(f"color: {MUTED}; font-size: 11px;")
+        lay.addWidget(note)
+        btns = QHBoxLayout()
+        btns.addStretch(1)
+        self._save_btn = QPushButton("Save here")
+        self._save_btn.setDefault(True)
+        self._save_btn.clicked.connect(self.accept)
+        cancel = QPushButton("Cancel")
+        cancel.clicked.connect(self.reject)
+        btns.addWidget(self._save_btn)
+        btns.addWidget(cancel)
+        lay.addLayout(btns)
+        self._save_btn.setEnabled(bool(folder))
+        if not folder:
+            QTimer.singleShot(0, self._change)
+
+    def _change(self):
+        d = QFileDialog.getExistingDirectory(
+            self, "Choose the folder to save in", self._folder or self._start_dir)
+        if d:
+            self._folder = d
+            self._edit.setText(d)
+            self._save_btn.setEnabled(True)
+
+    def folder(self) -> str:
+        return self._folder
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Main dialog
 # ─────────────────────────────────────────────────────────────────────────────
 
 class CTRGeneratorWidget(QWidget):
+    # Emitted whenever the SAGE Export path text changes (typed, browsed or
+    # restored). The MR vs CTR tab keeps its own SAGE field in step with this
+    # one — see MainWindow, and set_sage_path() below.
+    sage_path_changed = Signal(str)
+
     def __init__(self, parent=None):
         super().__init__(parent)
 
         self._azn_df:      pd.DataFrame = pd.DataFrame()
         self._sage_df:     pd.DataFrame = pd.DataFrame()
+        # Which file _sage_df was parsed from, so the MR vs CTR statistics can
+        # reuse it instead of parsing the same 100k-row export a second time.
+        self._sage_df_path:      str = ""
+        self._sage_loading_path: str = ""
         self._usd_pb_df:   pd.DataFrame = pd.DataFrame()
         self._names_db_df: pd.DataFrame = pd.DataFrame()
+        # Manpower encoding rules from the Combined DB (parse_encoding_info):
+        # valid encodings per role, and the roles that are always Onshore.
+        self._enc_variants: dict[str, list[str]] = {}
+        self._onshore_roles: set[str] = set()
         self._workers:     list = []
         self._aliases:     dict = load_aliases()
         self._desc_renames: dict = load_desc_renames()
@@ -1293,9 +1508,11 @@ class CTRGeneratorWidget(QWidget):
 
         # Scrollable content
         scroll = QScrollArea()
+        self._content_scroll = scroll
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(scroll.Shape.NoFrame)
         content = QWidget()
+        self._content_widget = content
         cl = QVBoxLayout(content)
         cl.setSpacing(12)
         cl.setContentsMargins(4, 4, 4, 4)
@@ -1310,6 +1527,7 @@ class CTRGeneratorWidget(QWidget):
         self._build_equipment_section(cl)
         self._build_consumables_section(cl)
         self._build_extras_section(cl)
+        self._build_stats_section(cl)
 
         # ─── Section 3: Generate ─────────────────────────────────────────────
         self._build_generate_section(cl)
@@ -1368,6 +1586,7 @@ class CTRGeneratorWidget(QWidget):
         row1, self._azn_pb_edit = _file_picker_row("AZN Pricebook", "Excel (*.xlsx *.xls)")
         row2, self._sage_edit   = _file_picker_row("SAGE Export", "Excel (*.xlsx *.xlsm *.xls)")
         row3, self._usd_pb_edit = _file_picker_row("USD Pricebook", "Excel (*.xlsx *.xls)")
+        self._sage_edit.textChanged.connect(self.sage_path_changed)
         tl.addLayout(row1)
         tl.addLayout(row2)
         tl.addLayout(row3)
@@ -1495,6 +1714,15 @@ class CTRGeneratorWidget(QWidget):
         self._req_manpower_tbl.setMinimumHeight(220)
         self._req_manpower_tbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self._req_manpower_tbl.cellChanged.connect(self._on_manpower_changed)
+        # Shift / Shift Type are chosen from a list (blank until chosen).
+        self._req_manpower_tbl.setItemDelegateForColumn(
+            _MP_SHIFT, _ChoiceDelegate(("Day", "Night"), self._req_manpower_tbl))
+        self._req_manpower_tbl.setItemDelegateForColumn(
+            _MP_SHIFTTYPE, _ChoiceDelegate(("Normal", "Overtime", "Standby"), self._req_manpower_tbl))
+        self._req_manpower_tbl.setItemDelegateForColumn(
+            _MP_TYPE, _ChoiceDelegate(("Onshore", "Offshore"), self._req_manpower_tbl))
+        self._req_manpower_tbl.setItemDelegateForColumn(
+            _MP_ENC, _EncodingDelegate(self, self._req_manpower_tbl))
         gl.addWidget(self._req_manpower_tbl)
 
         btn_row = QHBoxLayout()
@@ -1765,6 +1993,514 @@ class CTRGeneratorWidget(QWidget):
 
         parent_layout.addWidget(grp)
 
+    # ── Cost statistics box (MA131) ───────────────────────────────────────────
+
+    def _build_stats_section(self, parent_layout: QVBoxLayout):
+        grp = QGroupBox("Cost statistics — SAGE expected cost of this request (Equipment & Consumables)")
+        gl = QVBoxLayout(grp)
+        gl.setSpacing(4)
+
+        info = QLabel(
+            "What the loaded CTR Request costs at SAGE's expected unit cost, split into "
+            "rechargeable and non-rechargeable. Rechargeability is read the way the CTR "
+            "itself is generated: a line priced NONRECHARG is non-rechargeable, a priced "
+            "line is rechargeable (up for discussion with the department). Only matched "
+            "(✓) lines are counted — the ones that go into the CTR — and scaffold is not "
+            "included. This is SAGE's expected cost, not what the client is billed."
+        )
+        info.setWordWrap(True)
+        info.setStyleSheet(f"color: {MUTED}; font-size: 11px;")
+        gl.addWidget(info)
+
+        warn_row = QHBoxLayout()
+        self._qty_warn_lbl = QLabel("")
+        self._qty_warn_lbl.setWordWrap(True)
+        self._qty_warn_lbl.setStyleSheet(
+            "background: #FFF8E1; color: #6D4C00; border: 1px solid #FFD54F;"
+            "border-radius: 4px; padding: 6px 10px; font-size: 12px;")
+        self._qty_warn_lbl.setVisible(False)
+        # One button, two ways in: clicking it goes to the next value (a missing
+        # required value, then a Stock Code not in SAGE); its ▾ arrow opens a
+        # list to choose from.
+        self._qty_jump_btn = QToolButton()
+        self._qty_jump_btn.setText("Go to value")
+        self._qty_jump_btn.setToolTip(
+            "Click: go to the next value that needs attention (a missing required value, "
+            "then a Stock Code that is not in SAGE).\nArrow: choose from the list.")
+        self._qty_jump_btn.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
+        self._qty_jump_btn.setVisible(False)
+        self._qty_jump_btn.clicked.connect(self._jump_empty_qty)
+        self._goto_menu = QMenu(self._qty_jump_btn)
+        self._goto_list = QListWidget()
+        self._goto_list.itemClicked.connect(self._on_goto_picked)
+        self._goto_list.itemActivated.connect(self._on_goto_picked)      # Enter
+        _act = QWidgetAction(self._goto_menu)
+        _act.setDefaultWidget(self._goto_list)
+        self._goto_menu.addAction(_act)
+        self._goto_menu.aboutToShow.connect(self._fill_goto_menu)
+        self._qty_jump_btn.setMenu(self._goto_menu)
+        self._goto_shown: list[dict] = []
+        warn_row.addWidget(self._qty_warn_lbl, 1)
+        warn_row.addWidget(self._qty_jump_btn)
+        gl.addLayout(warn_row)
+
+        self._stats_panel = StatsPanel(
+            group_labels={"CTR": "CTR Request — equipment & consumables"},
+            show_type_filter=False, min_tree_height=240,
+            no_sage_note="Please enter their cost by hand: a Stock Code that is not in SAGE has no SAGE "
+                         "cost, so the CTR's internal SC cost cell stays EMPTY for it until you do.")
+        self._stats_panel.reload_requested.connect(self._refresh_stats)
+        self._stats_panel.row_clicked.connect(self._show_stats_row)
+        gl.addWidget(self._stats_panel)
+
+        self._stats_note_lbl = QLabel("")
+        self._stats_note_lbl.setStyleSheet(f"color: {MUTED}; font-size: 11px;")
+        gl.addWidget(self._stats_note_lbl)
+
+        save_row = QHBoxLayout()
+        self._stats_save_btn = QPushButton("Save statistics (Excel)…")
+        self._stats_save_btn.setToolTip(
+            "Save these statistics as an Excel file: per-side summary, every line "
+            "with its unit cost, and a sheet of notes. You choose the folder; it is "
+            "remembered and shown again before each save.")
+        self._stats_save_btn.clicked.connect(self._save_stats_excel)
+        save_row.addWidget(self._stats_save_btn)
+        save_row.addStretch(1)
+        gl.addLayout(save_row)
+
+        # Refreshes shortly after any edit / load, not on every keystroke.
+        self._stats_timer = QTimer(self)
+        self._stats_timer.setSingleShot(True)
+        self._stats_timer.setInterval(250)
+        self._stats_timer.timeout.connect(self._refresh_stats)
+        self._empty_qty_idx = -1
+
+        parent_layout.addWidget(grp)
+        self._refresh_stats()
+
+    @staticmethod
+    def _num_missing(text: str, allow_nonrecharg: bool = False) -> bool:
+        """No usable number: blank, or not a number. A rate/price may also be
+        the NONRECHARG sentinel — a non-rechargeable line needs no rate, a
+        rechargeable one does."""
+        t = text.strip()
+        if allow_nonrecharg and t.upper() == "NONRECHARG":
+            return False
+        try:
+            v = float(t)
+        except ValueError:
+            return True
+        return v != v
+
+    def _required_specs(self):
+        """(table, section, description column, status column or None, restore
+        row tint, ((column, field name, kind), …)) for each Generator table.
+        kind: "num" = a number, "rate" = a number or NONRECHARG, "text" = any
+        text. Only rows that go into the CTR (✓ status; every transport row)
+        are checked."""
+        return (
+            (self._req_manpower_tbl, "Manpower", _MP_DESC, _MP_STATUS,
+             ((_MP_NUMEMP, "Num Employees", "num"), (_MP_QTY, "Qty (hours)", "num"),
+              (_MP_RATE, "Rate", "num"), (_MP_SHIFT, "Shift", "text"),
+              (_MP_SHIFTTYPE, "Shift Type", "text"), (_MP_NAT, "Nationality", "text"))),
+            (self._req_equip_tbl, "Equipment", _EQ_DESC, _EQ_STATUS,
+             ((_EQ_QTY, "Qty", "num"), (_EQ_UNIT, "Unit", "text"),
+              (_EQ_RATE, "Rate", "rate"), (_EQ_DAYS, "Days", "num"))),
+            (self._req_cons_tbl, "Consumables", _CS_DESC, _CS_STATUS,
+             ((_CS_QTY, "Qty", "num"), (_CS_UNIT, "Unit", "text"),
+              (_CS_PRICE, "Price", "rate"))),
+            (self._transport_tbl, "Transport", _TR_DESC, None,
+             ((_TR_QTY, "Qty", "num"), (_TR_DUR, "Duration", "num"),
+              (_TR_UOM, "Unit", "text"), (_TR_RATE, "Rate", "num"))),
+        )
+
+    def _incomplete_cells(self) -> list[dict]:
+        """Every required cell that is blank / not a number on a row that goes
+        into the CTR. Nothing is ever assumed in its place: Generate leaves
+        such a row out (after the user confirms), and the cell shows in red.
+        Each entry: {tbl, row, col, section, desc, field}."""
+        out = []
+        for tbl, section, c_desc, c_status, fields in self._required_specs():
+            for r in range(tbl.rowCount()):
+                if c_status is not None:
+                    st = tbl.item(r, c_status)
+                    if not (st and st.text().startswith("✓")):
+                        continue
+                d = tbl.item(r, c_desc)
+                desc = d.text().strip() if d else ""
+                if not desc and tbl is self._transport_tbl:
+                    ty = tbl.item(r, _TR_TYPE)
+                    desc = ty.text().strip() if ty else ""
+                for col, field, kind in fields:
+                    it = tbl.item(r, col)
+                    text = it.text() if it else ""
+                    if kind == "text":
+                        missing = not text.strip()
+                    else:
+                        missing = self._num_missing(text, kind == "rate")
+                    if missing:
+                        out.append({"tbl": tbl, "row": r, "col": col, "section": section,
+                                    "desc": desc or f"row {r + 1}", "field": field})
+        return out
+
+    def _mark_incomplete(self, cells: list[dict] | None = None):
+        """Tint the missing required cells red, and take the tint off cells
+        filled in since (the row goes back to its normal highlight)."""
+        red = QColor("#FFCDD2")
+        bad: dict[int, set[tuple[int, int]]] = {}
+        for c in (self._incomplete_cells() if cells is None else cells):
+            bad.setdefault(id(c["tbl"]), set()).add((c["row"], c["col"]))
+        tgt = getattr(self, "_jump_target", None)
+        if tgt is not None and (tgt[1], tgt[2]) not in bad.get(id(tgt[0]), set()):
+            self._set_jump_target(None)          # filled in since: the orange goes
+        for tbl, _sec, _c_desc, c_status, fields in self._required_specs():
+            wrong = bad.get(id(tbl), set())
+            tbl.blockSignals(True)     # setBackground would fire cellChanged
+            try:
+                for r in range(tbl.rowCount()):
+                    tinted = False
+                    for col, _f, _k in fields:
+                        it = tbl.item(r, col)
+                        if it is not None and (
+                                it.background().style() == Qt.BrushStyle.SolidPattern
+                                and it.background().color() == red):
+                            tinted = True
+                            break
+                    here = [col for col, _f, _k in fields if (r, col) in wrong]
+                    if not tinted and not here:
+                        continue
+                    if c_status is None:
+                        _set_row_tint(tbl, r, None)
+                    else:
+                        st = tbl.item(r, c_status)
+                        _highlight_row(tbl, r, bool(st) and st.text().startswith("✓"))
+                    for col in here:
+                        it = tbl.item(r, col)
+                        if it is not None:
+                            it.setBackground(QBrush(red))
+            finally:
+                tbl.blockSignals(False)
+
+    def _set_jump_target(self, target) -> None:
+        """Mark `target` = (table, row, col) as the orange "you are here" cell
+        (None clears it). The flag is data on the item, so signals are blocked."""
+        prev = getattr(self, "_jump_target", None)
+        for spot, on in ((prev, False), (target, True)):
+            if spot is None:
+                continue
+            tbl, r, c = spot
+            it = tbl.item(r, c) if r < tbl.rowCount() else None
+            if it is not None:
+                was = tbl.blockSignals(True)
+                it.setData(_JUMP_ROLE, True if on else None)
+                tbl.blockSignals(was)
+                tbl.viewport().update()
+        self._jump_target = target
+
+    def _show_stats_row(self, side: str, doc: str, key: str) -> None:
+        """A row of the Cost statistics list was clicked: show that line where it
+        lives — the Equipment or Consumables table — selected (blue) and scrolled
+        into view. A document row ("Equipment" / "Consumables") shows the table."""
+        if doc == "Equipment":
+            tbl, c_desc, c_match, c_code, c_status = (
+                self._req_equip_tbl, _EQ_DESC, _EQ_MATCH, _EQ_CODE, _EQ_STATUS)
+        elif doc == "Consumables":
+            tbl, c_desc, c_match, c_code, c_status = (
+                self._req_cons_tbl, _CS_DESC, _CS_MATCH, _CS_CODE, _CS_STATUS)
+        else:
+            return
+        rows = []
+        if key:
+            for r in range(tbl.rowCount()):
+                st = tbl.item(r, c_status)
+                d = tbl.item(r, c_desc)
+                if not (st and st.text().startswith("✓")) or (d is not None and d.data(_SCAFFOLD_ROLE)):
+                    continue
+                def _t(c, _r=r):
+                    it = tbl.item(_r, c)
+                    return it.text().strip() if it else ""
+                if cost_stats.norm_key(_t(c_match) or _t(c_code) or _t(c_desc)) == key:
+                    rows.append(r)
+            if not rows:
+                return
+        self._set_jump_target(None)
+        for other, *_rest in self._required_specs():
+            other.clearSelection()
+        if rows:
+            sel = tbl.selectionModel()
+            for r in rows:
+                sel.select(tbl.model().index(r, 0),
+                           QItemSelectionModel.SelectionFlag.Select | QItemSelectionModel.SelectionFlag.Rows)
+            tbl.scrollToItem(tbl.item(rows[0], c_desc), QAbstractItemView.ScrollHint.PositionAtCenter)
+            pt = tbl.viewport().mapTo(self._content_widget, tbl.visualItemRect(tbl.item(rows[0], c_desc)).center())
+            self._content_scroll.ensureVisible(pt.x(), pt.y(), 50, 200)
+        else:                                          # a document row: bring the whole table into view
+            pt = tbl.mapTo(self._content_widget, QPoint(0, 0))
+            self._content_scroll.verticalScrollBar().setValue(max(0, pt.y() - 70))
+
+    def _goto_items(self) -> list[dict]:
+        """Everything "Go to value" can take you to, in order: the required
+        values still missing, then the Stock Codes SAGE does not have (whose
+        cost has to be typed in by hand). Each: {label, kind, payload}."""
+        items = [{"label": f"{c['section']} — {c['desc']} — {c['field']}", "kind": "missing", "payload": c}
+                 for c in self._incomplete_cells()]
+        for side, doc, key in self._stats_panel.no_sage_keys():
+            items.append({"label": f"Not in SAGE — {key}  ({doc})", "kind": "sage",
+                          "payload": (side, doc, key)})
+        return items
+
+    def _goto_item(self, item: dict) -> None:
+        if item["kind"] == "missing":
+            self._jump_to_cell(item["payload"])
+            return
+        side, doc, key = item["payload"]
+        self._set_jump_target(None)
+        for tbl, *_rest in self._required_specs():
+            tbl.clearSelection()
+        panel = self._stats_panel
+        if panel.focus_key(side, doc, key):
+            pt = panel._tree.viewport().mapTo(self._content_widget, panel._tree.visualItemRect(
+                panel._tree.currentItem()).center()) if panel._tree.currentItem() else \
+                panel.mapTo(self._content_widget, panel.rect().topLeft())
+            self._content_scroll.ensureVisible(pt.x(), pt.y(), 50, 200)
+        else:
+            QMessageBox.information(
+                self, "Not shown",
+                f"“{key}” could not be shown in the statistics list (it may be beyond the "
+                "first rows of its group) — narrow the list with the filters above it.")
+
+    def _jump_to_cell(self, c: dict) -> None:
+        tbl, row, col = c["tbl"], c["row"], c["col"]
+        # Only one row selected (blue) across the four tables, and the missing
+        # cell itself marked orange so it stands out inside that row.
+        for other, *_rest in self._required_specs():
+            if other is not tbl:
+                other.clearSelection()
+        tbl.clearSelection()
+        # The tables open a cell editor whenever the current cell changes; hold
+        # that back while selecting, so the jump shows the highlight instead of
+        # an empty editor sitting in the row's first cell.
+        triggers = tbl.editTriggers()
+        tbl.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        try:
+            tbl.setCurrentCell(row, col)
+            tbl.selectRow(row)
+            tbl.setCurrentCell(row, col)
+        finally:
+            tbl.setEditTriggers(triggers)
+        self._set_jump_target((tbl, row, col))
+        item = tbl.item(row, col)
+        tbl.scrollToItem(item, QAbstractItemView.ScrollHint.EnsureVisible)
+        tbl.setFocus()
+        pt = tbl.viewport().mapTo(self._content_widget, tbl.visualItemRect(item).center())
+        self._content_scroll.ensureVisible(pt.x(), pt.y(), 50, 150)
+
+    def _jump_empty_qty(self):
+        """The button's click: go to the next value in the list — a missing
+        required value first, then the Stock Codes not in SAGE — and wrap round."""
+        items = self._goto_items()
+        if not items:
+            return
+        self._empty_qty_idx = (self._empty_qty_idx + 1) % len(items)
+        self._goto_item(items[self._empty_qty_idx])
+
+    def _fill_goto_menu(self) -> None:
+        """Rebuild the drop-down list from what is still missing right now."""
+        lst = self._goto_list
+        lst.clear()
+        self._goto_shown = self._goto_items()
+        for it in self._goto_shown:
+            lst.addItem(it["label"])
+        lst.setFixedHeight(min(320, 24 * max(1, len(self._goto_shown)) + 8))
+        lst.setMinimumWidth(460)
+
+    def _on_goto_picked(self, row_item) -> None:
+        idx = self._goto_list.row(row_item)
+        if 0 <= idx < len(self._goto_shown):
+            self._goto_menu.close()
+            self._empty_qty_idx = idx            # "next" continues from the chosen one
+            self._goto_item(self._goto_shown[idx])
+
+    def _update_goto_button(self) -> None:
+        n = len(self._goto_items())
+        self._qty_jump_btn.setVisible(n > 0)
+        if n:
+            self._qty_jump_btn.setText(f"Go to value ({n})")
+
+    def _stats_items(self) -> tuple[pd.DataFrame, int]:
+        """The Equipment and Consumables lines that go into the CTR, as input
+        for cost_stats. Returns (items, unmatched lines not counted)."""
+        specs = (
+            (self._req_equip_tbl, "Equipment", "Plant & Equipment",
+             _EQ_DESC, _EQ_CODE, _EQ_MATCH, _EQ_QTY, _EQ_RATE, _EQ_STATUS),
+            (self._req_cons_tbl, "Consumables", "Consumables & Materials",
+             _CS_DESC, _CS_CODE, _CS_MATCH, _CS_QTY, _CS_PRICE, _CS_STATUS),
+        )
+        rows, unmatched = [], 0
+        for tbl, label, section, c_desc, c_code, c_match, c_qty, c_rate, c_status in specs:
+            for r in range(tbl.rowCount()):
+                def txt(c, _r=r, _t=tbl):
+                    item = _t.item(_r, c)
+                    return item.text().strip() if item else ""
+                st = tbl.item(r, c_status)
+                if not (st and st.text().startswith("✓")):
+                    unmatched += 1
+                    continue
+                desc_item = tbl.item(r, c_desc)
+                if desc_item is not None and desc_item.data(_SCAFFOLD_ROLE):
+                    continue                      # scaffold has no SAGE cost
+                key = txt(c_match) or txt(c_code) or txt(c_desc)
+                if not key:
+                    continue
+                rate = txt(c_rate).upper()
+                try:
+                    float(rate)
+                    status = "RECHARGE"
+                except ValueError:
+                    status = "NONRECHARG" if rate == "NONRECHARG" else None
+                rows.append({"key": key, "doc": label, "sheet": "", "side": "CTR",
+                             "qty": txt(c_qty), "status": status, "section": section})
+        cols = ["key", "doc", "sheet", "side", "qty", "status", "section"]
+        return pd.DataFrame(rows, columns=cols), unmatched
+
+    def _refresh_stats(self):
+        """Recompute the statistics box from the Equipment and Consumables
+        tables. SAGE is already in memory (the same table the rows are
+        matched with), so this is instant and runs on the UI thread."""
+        self._refresh_stats_inner()
+        self._update_goto_button()      # after the panel is rebuilt (it knows the not-in-SAGE codes)
+
+    def _refresh_stats_inner(self):
+        cells = self._incomplete_cells()
+        self._mark_incomplete(cells)
+        self._qty_warn_lbl.setVisible(bool(cells))
+        if cells:
+            per: dict[str, set] = {}
+            for c in cells:
+                per.setdefault(c["section"], set()).add((id(c["tbl"]), c["row"]))
+            parts = ", ".join(f"{s}: {len(rows)} row(s)" for s, rows in per.items())
+            self._qty_warn_lbl.setText(
+                f"{len(cells)} required value(s) are missing (shown in red) — {parts}. "
+                "Nothing is assumed in their place: fill them in, or Generate will leave "
+                "those rows out of the CTR (after asking you). Equipment/Consumable rows "
+                "without a quantity are also left out of the statistics.")
+
+        panel = self._stats_panel
+        if self._sage_df.empty:
+            self._stats_note_lbl.setText("")
+            panel.clear("The SAGE Export is not loaded yet. These statistics appear here by "
+                        "themselves once the files are loaded: set the SAGE Export above and "
+                        "press “Load Files”.", "warn")
+            return
+        items, unmatched = self._stats_items()
+        self._stats_note_lbl.setText(
+            f"{unmatched} line(s) are not matched yet and are not counted." if unmatched else "")
+        if items.empty:
+            panel.clear("Load a CTR Request (and let its lines match) to see its cost statistics here.",
+                        "info")
+            return
+        cost_map: dict[str, float] = {}
+        for key in set(items["key"]):
+            m = _match_lookup(self._sage_df, "product", "long_description",
+                              "local_expect_cost", key)
+            if m:
+                cost_map[cost_stats.norm_key(key)] = m[1]
+        panel.set_rows(cost_stats.cost_rows(items, cost_map, True))
+
+    def _sage_cost_of(self, desc_item, key: str):
+        """SAGE's unit cost for a line — or the one typed into the statistics
+        box for a Stock Code SAGE does not have — or None when neither exists.
+        None is written to the CTR as an empty cell; 0 is never assumed."""
+        cost = desc_item.data(_SAGE_COST_ROLE) if desc_item is not None else None
+        if cost is None:
+            cost = self._stats_panel.manual_costs().get(cost_stats.norm_key(key))
+        return cost
+
+    def _lines_without_sage_cost(self, skip: set) -> list[str]:
+        """Descriptions of the ✓ Equipment/Consumable lines that will go into
+        the CTR but have no SAGE cost (scaffold excluded: it has none)."""
+        out = []
+        for tbl, c_desc, c_match, c_code, c_status in (
+                (self._req_equip_tbl, _EQ_DESC, _EQ_MATCH, _EQ_CODE, _EQ_STATUS),
+                (self._req_cons_tbl, _CS_DESC, _CS_MATCH, _CS_CODE, _CS_STATUS)):
+            for r in range(tbl.rowCount()):
+                st = tbl.item(r, c_status)
+                if not (st and st.text().startswith("✓")) or (id(tbl), r) in skip:
+                    continue
+                d = tbl.item(r, c_desc)
+                if d is not None and d.data(_SCAFFOLD_ROLE):
+                    continue
+                def _t(c, _r=r, _tb=tbl):
+                    it = _tb.item(_r, c)
+                    return it.text().strip() if it else ""
+                key = _t(c_match) or _t(c_code) or _t(c_desc)
+                if self._sage_cost_of(d, key) is None:
+                    out.append(_t(c_desc) or key)
+        return out
+
+    _STATS_DIR_KEY = "stats_save_dir"
+
+    def _save_stats_excel(self):
+        """Save the statistics box as an Excel file (Statistics, Statistics
+        Items, Info). The folder is asked for, remembered, and shown again
+        before every save so it can be changed or simply approved."""
+        self._refresh_stats()
+        frames = self._stats_panel.report_frames()
+        if frames is None:
+            QMessageBox.information(
+                self, "Nothing to save",
+                "There are no statistics yet — load the files and a CTR Request first "
+                "(the box above must show figures).")
+            return
+        settings = self._settings()
+        folder = str(settings.value(self._STATS_DIR_KEY, "") or "")
+        if folder and not Path(folder).is_dir():
+            folder = ""                       # remembered folder is gone: ask again
+        job = self._job_ref_edit.text().strip()
+        now = _datetime.now()
+        filename = f"CTR_Statistics_{job or 'request'}_{now:%Y-%m-%d_%H%M}.xlsx"
+        start = self._out_dir_edit.text().strip() or str(Path.home())
+        dlg = _SaveLocationDialog(self, "Save statistics", folder, filename, start)
+        if dlg.exec() != QDialog.DialogCode.Accepted or not dlg.folder():
+            return
+        folder = dlg.folder()
+        settings.setValue(self._STATS_DIR_KEY, folder)     # remembered right away
+        path = Path(folder) / filename
+
+        _items, unmatched = self._stats_items()
+        n_missing_rows = len({(id(c["tbl"]), c["row"]) for c in self._incomplete_cells()})
+        info = pd.DataFrame([
+            ("What this is", "SAGE expected cost of the loaded CTR Request (equipment & consumables), "
+                             "split by rechargeability. Not what the client is billed."),
+            ("Job ref", job),
+            ("Saved", f"{now:%Y-%m-%d %H:%M}"),
+            ("CTR Request file", self._combined_db_edit.text().strip()),
+            ("SAGE Export", str(getattr(self, "_sage_df_path", "") or self._sage_edit.text().strip())),
+            ("Cost basis", "unit cost × quantity" if self._stats_panel.use_qty() else "unit cost only"),
+            ("Rechargeability", "From CTR generation: a line priced NONRECHARG is non-rechargeable, "
+                                "a priced line is rechargeable (up for discussion with the department)."),
+            ("Lines not matched (not counted)", unmatched),
+            ("Rows with a required value missing", n_missing_rows),
+            ("Scaffold", "Not included."),
+        ], columns=["Item", "Value"])
+        try:
+            from io import BytesIO
+            buf = BytesIO()
+            with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+                for df, name in ((frames[0], "Statistics"), (frames[1], "Statistics Items"),
+                                 (info, "Info")):
+                    df.to_excel(writer, index=False, sheet_name=name)
+                    ws = writer.sheets[name]
+                    for i, col in enumerate(df.columns, start=1):
+                        longest = max([len(str(col))] + [len(str(v)) for v in df[col].head(200)])
+                        ws.column_dimensions[ws.cell(row=1, column=i).column_letter].width = min(70, longest + 2)
+            path.write_bytes(buf.getvalue())
+            log.info("Statistics saved: %s", path)
+            QMessageBox.information(self, "Saved", f"Statistics saved:\n{path}")
+        except Exception as exc:
+            log.exception("Failed to save statistics: %s", path)
+            QMessageBox.critical(self, "Save error", str(exc))
+
     def _transport_row_values(self, row: int) -> dict:
         """One transport table row as the dict build_azn expects (mark-up as
         a fraction, not the percentage the table shows)."""
@@ -1772,21 +2508,26 @@ class CTRGeneratorWidget(QWidget):
             item = self._transport_tbl.item(row, col)
             return item.text().strip() if item else ""
 
-        def _num(col: int, default: float) -> float:
+        def _num(col: int) -> float | None:
+            """The cell as a number, or None when blank / not a number —
+            never a stand-in value (see _incomplete_cells)."""
             try:
-                return float(_txt(col) or default)
+                v = float(_txt(col))
             except ValueError:
-                return default
+                return None
+            return v if v == v else None
 
         return {
             "comment":     "",
             "transport_type": _txt(_TR_TYPE),
             "description": _txt(_TR_DESC) or _txt(_TR_TYPE),
-            "quantity":    _num(_TR_QTY, 1.0),
-            "duration":    _num(_TR_DUR, 1.0),
+            "quantity":    _num(_TR_QTY),
+            "duration":    _num(_TR_DUR),
             "uom":         _txt(_TR_UOM),
-            "rate_azn":    _num(_TR_RATE, 0.0),
-            "markup":      _num(_TR_MARKUP, 0.0) / 100.0,
+            "rate_azn":    _num(_TR_RATE),
+            # A blank mark-up is "no mark-up" (a stated case, e.g. the fuel
+            # line), not a missing figure.
+            "markup":      (_num(_TR_MARKUP) or 0.0) / 100.0,
         }
 
     def _append_transport_row(self, line: dict):
@@ -1796,10 +2537,11 @@ class CTRGeneratorWidget(QWidget):
         tbl.insertRow(r)
         tbl.setItem(r, _TR_TYPE,   _ro_item(str(line.get("transport_type", ""))))
         tbl.setItem(r, _TR_DESC,   QTableWidgetItem(str(line.get("description", ""))))
-        tbl.setItem(r, _TR_QTY,    QTableWidgetItem(str(line.get("quantity", "") or 1)))
-        tbl.setItem(r, _TR_DUR,    QTableWidgetItem(str(line.get("duration", "") or 1)))
+        tbl.setItem(r, _TR_QTY,    QTableWidgetItem(_request_qty_text(line.get("quantity"))))
+        tbl.setItem(r, _TR_DUR,    QTableWidgetItem(_request_qty_text(line.get("duration"))))
         tbl.setItem(r, _TR_UOM,    QTableWidgetItem(str(line.get("uom", "Days"))))
-        tbl.setItem(r, _TR_RATE,   QTableWidgetItem(f"{float(line.get('rate_azn', 0) or 0):.2f}"))
+        _rate_txt = _request_qty_text(line.get("rate_azn"))
+        tbl.setItem(r, _TR_RATE,   QTableWidgetItem(f"{float(_rate_txt):.2f}" if _rate_txt else ""))
         # Trailing zeros trimmed so a plain rate reads "6.5", not "6.50",
         # while an odd one (6.25) keeps its precision.
         _pct = float(line.get("markup", 0) or 0) * 100
@@ -1810,8 +2552,8 @@ class CTRGeneratorWidget(QWidget):
 
     def _add_transport_row(self):
         self._append_transport_row({
-            "transport_type": "", "description": "", "quantity": 1, "duration": 1,
-            "uom": "Days", "rate_azn": 0.0, "markup": self._markup_rate(),
+            "transport_type": "", "description": "", "quantity": "", "duration": "",
+            "uom": "Days", "rate_azn": "", "markup": self._markup_rate(),
         })
         self._recalc_azn_totals()
 
@@ -1829,7 +2571,10 @@ class CTRGeneratorWidget(QWidget):
 
     def _recalc_transport_row(self, row: int):
         vals = self._transport_row_values(row)
-        total = vals["quantity"] * vals["rate_azn"] * vals["duration"] * (1 + vals["markup"])
+        # Display only: a blank cell counts as 0 in the shown total; the row
+        # is flagged and left out of the CTR until it is filled in.
+        total = ((vals["quantity"] or 0.0) * (vals["rate_azn"] or 0.0)
+                 * (vals["duration"] or 0.0) * (1 + vals["markup"]))
         self._transport_tbl.blockSignals(True)
         self._transport_tbl.setItem(row, _TR_TOTAL, _ro_item(f"{total:.2f}"))
         self._transport_tbl.blockSignals(False)
@@ -1988,6 +2733,65 @@ class CTRGeneratorWidget(QWidget):
     def _settings() -> QSettings:
         return QSettings("SOCAR", "CTRGenerator")
 
+    def sage_path(self) -> str:
+        return self._sage_edit.text().strip()
+
+    def set_sage_path(self, path: str) -> None:
+        """Set the SAGE Export path from outside (the MR vs CTR tab's field).
+        Does nothing when it already holds that path, which is what stops the
+        two fields from echoing each other forever."""
+        if self._sage_edit.text() != path:
+            self._sage_edit.setText(path)
+
+    # ── Used by the Settings tab ─────────────────────────────────────────────
+
+    def sage_path(self) -> str:
+        return self._sage_edit.text().strip()
+
+    def output_dir(self) -> str:
+        return self._out_dir_edit.text().strip()
+
+    def set_output_dir(self, path: str) -> None:
+        self._out_dir_edit.setText(path)
+
+    def stats_save_dir(self) -> str:
+        return str(self._settings().value(self._STATS_DIR_KEY, "") or "")
+
+    def set_stats_save_dir(self, path: str) -> None:
+        s = self._settings()
+        if path:
+            s.setValue(self._STATS_DIR_KEY, path)
+        else:
+            s.remove(self._STATS_DIR_KEY)
+
+    def saved_data_counts(self) -> dict[str, int]:
+        """How many Match By aliases, Description renames and presets are
+        currently saved."""
+        return {
+            "aliases": sum(len(v) for v in self._aliases.values()),
+            "renames": sum(len(v) for v in self._desc_renames.values()),
+            "presets": len(self._presets),
+        }
+
+    def reload_saved_data(self) -> None:
+        """Re-read aliases, renames and presets from disk (after the Settings
+        tab reset one of them). Rows already in the tables are left as they
+        are; the reloaded values apply from the next request load."""
+        self._aliases = load_aliases()
+        self._desc_renames = load_desc_renames()
+        self._presets = load_presets()
+        self._refresh_preset_combo()
+
+    def open_alias_manager(self, category: str | None = None) -> None:
+        self._open_alias_manager(category)
+
+    def loaded_sage_df(self, path: str) -> pd.DataFrame | None:
+        """The parsed SAGE table if it was loaded from exactly `path`, else
+        None (not loaded yet, or loaded from a different file)."""
+        if path and path == self._sage_df_path and not self._sage_df.empty:
+            return self._sage_df
+        return None
+
     def restore_settings(self) -> None:
         """Load last-used paths from QSettings. Call after the widget is shown."""
         s = self._settings()
@@ -2129,8 +2933,13 @@ class CTRGeneratorWidget(QWidget):
         # back to matching "Match By" directly against the USD Pricebook.
         if combined:
             tasks.append(("names_db", lambda p=combined: parse_equip_names_db(p)))
+            # The manpower encoding rules (valid encodings per role, roles that
+            # are always Onshore) live in the same workbook.
+            tasks.append(("enc_info", lambda p=combined: parse_encoding_info(p)))
 
-        job = TASKS.begin_job("Load pricebook files", [name for name, _fn in tasks])
+        self._sage_loading_path = sage
+        job = TASKS.begin_job("Load pricebook files", [name for name, _fn in tasks],
+                               parallel=True)
         self._pending_loads += len(tasks)
         self._load_errors.clear()
         self._load_status.clear()
@@ -2150,7 +2959,7 @@ class CTRGeneratorWidget(QWidget):
         if isinstance(result, _TaskStopped):
             self._load_status.append(f"{name}: not loaded (stopped on request)")
         elif isinstance(result, Exception):
-            is_warning = name == "names_db"
+            is_warning = name in ("names_db", "enc_info")
             self._load_errors.append((name, str(result), is_warning))
             log.error("Failed to load %s: %s", name, result)
         else:
@@ -2159,6 +2968,7 @@ class CTRGeneratorWidget(QWidget):
                 self._load_status.append(f"AZN Pricebook ({len(result)} rows)")
             elif name == "sage":
                 self._sage_df = result
+                self._sage_df_path = self._sage_loading_path
                 self._load_status.append(f"SAGE Export ({len(result)} rows)")
             elif name == "usd_pb":
                 self._usd_pb_df = result
@@ -2166,6 +2976,12 @@ class CTRGeneratorWidget(QWidget):
             elif name == "names_db":
                 self._names_db_df = result
                 self._load_status.append(f"Equipment Names DB ({len(result)} rows)")
+            elif name == "enc_info":
+                self._enc_variants = result["variants"]
+                self._onshore_roles = set(result["onshore"])
+                self._load_status.append(
+                    f"Encoding rules ({len(result['variants'])} roles, "
+                    f"{len(result['onshore'])} always-Onshore)")
 
         self._pending_loads -= 1
         if self._pending_loads <= 0:
@@ -2182,8 +2998,12 @@ class CTRGeneratorWidget(QWidget):
             "sage":     "SAGE Export",
             "usd_pb":   "USD Pricebook",
             "names_db": "Equipment Names DB",
+            "enc_info": "Encoding rules",
         }
         _fallback = {
+            "enc_info": ("The Encoding list in the Manpower table falls back to the AZN "
+                         "Pricebook's variants for the role, and no role is treated as "
+                         "always Onshore."),
             "names_db": ("Equipment matching will fall back to matching "
                          "\"Match By\" directly against the USD Pricebook "
                          "by description, without the request stock code's "
@@ -2280,6 +3100,8 @@ class CTRGeneratorWidget(QWidget):
         if scaffold:
             self._append_equip_row_from_request(_scaffold_request_item(scaffold))
             row = self._req_equip_tbl.rowCount() - 1
+            # Scaffold is equipment but has no SAGE cost; the statistics box skips it.
+            self._req_equip_tbl.item(row, _EQ_DESC).setData(_SCAFFOLD_ROLE, True)
             self._req_equip_tbl.blockSignals(True)
             # Days is left empty rather than taking the usual 30-day default:
             # the request block states no duration for scaffold, and a number
@@ -2535,6 +3357,133 @@ class CTRGeneratorWidget(QWidget):
 
     # -- manpower --
 
+    # -- manpower encoding --
+
+    def _job_location(self) -> str:
+        """"Onshore" / "Offshore" from the request's Project Type, or "" when it says neither."""
+        pt = self._project_type_edit.text().strip().lower()
+        return "Onshore" if "onshore" in pt else "Offshore" if "offshore" in pt else ""
+
+    def _is_onshore_role(self, *names) -> bool:
+        """True for a role the Combined DB lists as always Onshore (ENC_LIST)."""
+        return any((n or "").strip().upper() in self._onshore_roles for n in names)
+
+    def _row_role_names(self, row: int) -> list[str]:
+        """The names a manpower row's role can be looked up under (Match By
+        without the "support" keyword, then the Description), upper-case."""
+        tbl = self._req_manpower_tbl
+        out = []
+        for col in (_MP_MATCH, _MP_DESC):
+            it = tbl.item(row, col)
+            txt = it.text().strip() if it else ""
+            if txt:
+                out.append(strip_support_keyword(txt).strip().upper())
+                if col == _MP_DESC:
+                    out.append(txt.upper())
+        return list(dict.fromkeys(out))
+
+    def _default_location(self, desc: str) -> str:
+        """Location for a row whose request gives no encoding: Onshore for the
+        always-Onshore roles (or "(onshore)" in the text), otherwise the job's
+        Project Type — "" when that says neither."""
+        if self._is_onshore_role(strip_support_keyword(desc), desc) or "(onshore)" in desc.lower():
+            return "Onshore"
+        return self._job_location()
+
+    def _encoding_options(self, row: int) -> list[str]:
+        """Encodings valid for this row's role at its location. Onshore and
+        Offshore never mix: an always-Onshore role is offered only Onshore
+        codes, any other row only the codes of its Type. Source: the Combined
+        DB's Possible Variants sheet, else the AZN Pricebook rows of the role.
+        Only NAT codes for now (allowance codes like FLO-EXP-OFF are not
+        handled yet)."""
+        names = self._row_role_names(row)
+        codes = next((self._enc_variants[n] for n in names if n in self._enc_variants), None)
+        if codes is None:
+            codes = []
+            df = self._azn_df
+            if not df.empty:
+                for n in names:
+                    m = df[df["supplier_desc"].astype(str).str.strip().str.upper() == n]
+                    if not m.empty:
+                        codes = [str(c).strip().upper() for c in m["stock_code"]]
+                        break
+        codes = [c for c in dict.fromkeys(codes) if _decode_manpower_encoding_full(c)]
+        type_item = self._req_manpower_tbl.item(row, _MP_TYPE)
+        want = "Onshore" if self._is_onshore_role(*names) else (type_item.text().strip() if type_item else "")
+        if want:
+            codes = [c for c in codes if _decode_manpower_encoding_full(c)[0] == want]
+        return codes
+
+    def _reject_encoding(self, row: int, text: str, options: list[str]) -> None:
+        QToolTip.showText(
+            QCursor.pos(),
+            f"“{text}” is not a valid encoding for this role and location"
+            + (f" — choose one of the {len(options)} listed." if options else
+               " — none exists for this Type (choose the other Type, or add the role to the "
+               "always-Onshore list in the Combined DB)."),
+            self._req_manpower_tbl)
+
+    def _reset_manpower_match(self, row: int) -> None:
+        """Forget the matched item and rate of a row whose Encoding changed:
+        the rate must come from the new encoding, never linger from the old one
+        (a row that stayed "✓ Manual" would keep billing the old rate)."""
+        tbl = self._req_manpower_tbl
+        was = tbl.blockSignals(True)
+        tbl.setItem(row, _MP_MDESC, _ro_item(""))
+        tbl.setItem(row, _MP_RATE, QTableWidgetItem(""))
+        tbl.setItem(row, _MP_STATUS, _ro_item("✗ No match — edit Match By or Description"))
+        tbl.blockSignals(was)
+
+    def _apply_manpower_encoding(self, row: int) -> None:
+        """The Encoding cell decides Type, Shift, Shift Type and the shift
+        length: copy them into the row (and its hours hint) from it."""
+        tbl = self._req_manpower_tbl
+        enc_item, desc_item = tbl.item(row, _MP_ENC), tbl.item(row, _MP_DESC)
+        if enc_item is None or desc_item is None:
+            return
+        self._reset_manpower_match(row)
+        decoded = _decode_manpower_encoding_full(enc_item.text())
+        was = tbl.blockSignals(True)
+        try:
+            if decoded:
+                loc, sh, st, hours, amb = decoded
+                for col, val in ((_MP_TYPE, loc), (_MP_SHIFT, sh), (_MP_SHIFTTYPE, st)):
+                    if val:
+                        tbl.setItem(row, col, QTableWidgetItem(val))
+                desc_item.setData(Qt.UserRole, (hours or "", amb))
+            else:
+                desc_item.setData(Qt.UserRole, ("", False))
+        finally:
+            tbl.blockSignals(was)
+
+    def _drop_stale_encoding(self, row: int) -> None:
+        """Type / Shift / Shift Type was edited by hand: an Encoding that now
+        disagrees with them is cleared (the user is overriding it), so the row
+        never carries two different answers."""
+        tbl = self._req_manpower_tbl
+        enc_item, desc_item = tbl.item(row, _MP_ENC), tbl.item(row, _MP_DESC)
+        if enc_item is None or desc_item is None or not enc_item.text().strip():
+            return
+        decoded = _decode_manpower_encoding_full(enc_item.text())
+        cells = [(tbl.item(row, c).text().strip() if tbl.item(row, c) else "")
+                 for c in (_MP_TYPE, _MP_SHIFT, _MP_SHIFTTYPE)]
+        if decoded and all(not d or d == c for d, c in zip(decoded[:3], cells)):
+            return
+        was = tbl.blockSignals(True)
+        enc_item.setText("")
+        desc_item.setData(Qt.UserRole, ("", False))
+        tbl.blockSignals(was)
+        self._reset_manpower_match(row)
+
+    def _mark_waiting(self, tbl: QTableWidget, row: int, status_col: int) -> None:
+        """The reference files are not loaded yet, so the row cannot be matched
+        — that is not a problem with the row, so it is not shown in red."""
+        was = tbl.blockSignals(True)
+        tbl.setItem(row, status_col, _ro_item("⏳ Waiting for Load Files"))
+        _set_row_tint(tbl, row, None)
+        tbl.blockSignals(was)
+
     def _append_manpower_row_from_request(self, request_item: dict):
         tbl = self._req_manpower_tbl
         r = tbl.rowCount()
@@ -2552,22 +3501,22 @@ class CTRGeneratorWidget(QWidget):
         decoded = _decode_manpower_encoding_full(encoding)
         (encoded_location, encoded_shift, encoded_shift_type,
          encoded_hours, encoding_ambiguous) = decoded or (None, None, None, None, False)
-        row_type = encoded_location or ("Onshore" if "(onshore)" in desc.lower() else "Offshore")
+        row_type = encoded_location or self._default_location(desc)
         shift_type_raw = (request_item.get("status") or "").strip()
         # A recognized shift-type prefix in ENCODING (e.g. "MSU-NAT-OFF-12")
         # is authoritative over the free-text Shift/Status columns, since
         # requesters sometimes leave those stale/inconsistent with the code
         # they actually intend (see _decode_manpower_encoding_full).
-        shift      = encoded_shift or ("Night" if "night" in (request_item.get("shift") or "").lower() else "Day")
-        shift_type = encoded_shift_type or (shift_type_raw.title() if shift_type_raw else "Normal")
-        try:
-            num_emp = float(request_item.get("quantity") or 1)
-        except (TypeError, ValueError):
-            num_emp = 1.0
-        try:
-            working_days = float(request_item.get("working_days") or 0)
-        except (TypeError, ValueError):
-            working_days = 0.0
+        # Not stated -> blank (the row stays unmatched, in red, until the user
+        # picks one from the Shift / Shift Type drop-down) — never assumed.
+        _shift_req = (request_item.get("shift") or "").lower()
+        shift      = encoded_shift or ("Night" if "night" in _shift_req else "Day" if "day" in _shift_req else "")
+        shift_type = encoded_shift_type or (shift_type_raw.title() if shift_type_raw else "")
+        # A figure the request does not state stays blank (red) — it is
+        # never assumed to be 1 / 0 (see _incomplete_cells).
+        num_emp_text = _request_qty_text(request_item.get("quantity"))
+        wd_text = _request_qty_text(request_item.get("working_days"))
+        working_days = float(wd_text) if wd_text else None
         # Quantity is billed in hours (working days × hours/shift), not days
         # — the AZN pricebook's labor rows are all rated per hour (UOM
         # "HUR"), and the shift length lives in the matched stock code's
@@ -2579,11 +3528,14 @@ class CTRGeneratorWidget(QWidget):
         # changes the matched stock code's hours) can recompute from the
         # original day count instead of compounding onto an already-
         # multiplied value.
-        qty = working_days
+        qty_text = wd_text
 
         tbl.setItem(r, _MP_TYPE,      QTableWidgetItem(row_type))
         tbl.setItem(r, _MP_SHIFT,     QTableWidgetItem(shift))
         tbl.setItem(r, _MP_SHIFTTYPE, QTableWidgetItem(shift_type))
+        _was = tbl.blockSignals(True)
+        tbl.setItem(r, _MP_ENC,       QTableWidgetItem(encoding.strip().upper()))
+        tbl.blockSignals(_was)
         tbl.setItem(r, _MP_DESC,      QTableWidgetItem(desc_display))
         tbl.item(r, _MP_DESC).setData(Qt.UserRole, (encoded_hours or "", encoding_ambiguous))
         # Stashed so a later Description edit can learn/re-apply a rename
@@ -2592,8 +3544,8 @@ class CTRGeneratorWidget(QWidget):
         tbl.item(r, _MP_DESC).setData(_DESC_ANCHOR_ROLE, desc)
         tbl.setItem(r, _MP_MATCH,     QTableWidgetItem(default_key))
         tbl.setItem(r, _MP_MDESC,     _ro_item(""))
-        tbl.setItem(r, _MP_NUMEMP,    QTableWidgetItem(str(num_emp)))
-        tbl.setItem(r, _MP_QTY,       QTableWidgetItem(str(qty)))
+        tbl.setItem(r, _MP_NUMEMP,    QTableWidgetItem(num_emp_text))
+        tbl.setItem(r, _MP_QTY,       QTableWidgetItem(qty_text))
         # blockSignals: setData on an item already in the table fires
         # cellChanged same as a real edit would — without this, stashing
         # working_days here would immediately trip _on_manpower_changed's
@@ -2602,7 +3554,7 @@ class CTRGeneratorWidget(QWidget):
         tbl.item(r, _MP_QTY).setData(Qt.UserRole, working_days)
         tbl.blockSignals(False)
         tbl.setItem(r, _MP_UOM,       _ro_item("Hours"))
-        tbl.setItem(r, _MP_RATE,      QTableWidgetItem("0.00"))
+        tbl.setItem(r, _MP_RATE,      QTableWidgetItem(""))
         tbl.setItem(r, _MP_TOTAL,     _ro_item("0.00"))
         tbl.setItem(r, _MP_STATUS,    _ro_item("✗ No match — edit Match By or Description"))
         tbl.setItem(r, _MP_NAT,       QTableWidgetItem("NAT"))
@@ -2614,16 +3566,17 @@ class CTRGeneratorWidget(QWidget):
         tbl.blockSignals(True)
         r = tbl.rowCount()
         tbl.insertRow(r)
-        tbl.setItem(r, _MP_TYPE,      QTableWidgetItem("Offshore"))
-        tbl.setItem(r, _MP_SHIFT,     QTableWidgetItem("Day"))
-        tbl.setItem(r, _MP_SHIFTTYPE, QTableWidgetItem("Normal"))
+        tbl.setItem(r, _MP_TYPE,      QTableWidgetItem(self._job_location()))
+        tbl.setItem(r, _MP_SHIFT,     QTableWidgetItem(""))
+        tbl.setItem(r, _MP_SHIFTTYPE, QTableWidgetItem(""))
+        tbl.setItem(r, _MP_ENC,       QTableWidgetItem(""))
         tbl.setItem(r, _MP_DESC,      QTableWidgetItem(""))
         tbl.setItem(r, _MP_MATCH,     QTableWidgetItem(""))
         tbl.setItem(r, _MP_MDESC,     _ro_item(""))
-        tbl.setItem(r, _MP_NUMEMP,    QTableWidgetItem("1"))
-        tbl.setItem(r, _MP_QTY,       QTableWidgetItem("0"))
+        tbl.setItem(r, _MP_NUMEMP,    QTableWidgetItem(""))
+        tbl.setItem(r, _MP_QTY,       QTableWidgetItem(""))
         tbl.setItem(r, _MP_UOM,       _ro_item("Hours"))
-        tbl.setItem(r, _MP_RATE,      QTableWidgetItem("0.00"))
+        tbl.setItem(r, _MP_RATE,      QTableWidgetItem(""))
         tbl.setItem(r, _MP_TOTAL,     _ro_item("0.00"))
         tbl.setItem(r, _MP_STATUS,    _ro_item("✓ Manual"))
         tbl.setItem(r, _MP_NAT,       QTableWidgetItem("NAT"))
@@ -2640,7 +3593,12 @@ class CTRGeneratorWidget(QWidget):
         if col == _MP_DESC:
             self._apply_desc_alias_manpower(row)
             self._learn_desc_rename_manpower(row)
-        if col in (_MP_TYPE, _MP_SHIFT, _MP_SHIFTTYPE, _MP_MATCH):
+        if col == _MP_ENC:
+            self._apply_manpower_encoding(row)
+            self._rematch_manpower_row(row)
+        elif col in (_MP_TYPE, _MP_SHIFT, _MP_SHIFTTYPE, _MP_MATCH):
+            if col != _MP_MATCH:
+                self._drop_stale_encoding(row)
             self._rematch_manpower_row(row)
         elif col in (_MP_NUMEMP, _MP_QTY, _MP_RATE):
             if col == _MP_QTY:
@@ -2659,7 +3617,7 @@ class CTRGeneratorWidget(QWidget):
                     item.setData(Qt.UserRole, None)
                     self._req_manpower_tbl.blockSignals(False)
             self._recalc_manpower_row(row)
-        if col in (_MP_TYPE, _MP_SHIFT, _MP_SHIFTTYPE, _MP_MATCH, _MP_NUMEMP, _MP_QTY, _MP_RATE):
+        if col in (_MP_TYPE, _MP_SHIFT, _MP_SHIFTTYPE, _MP_ENC, _MP_MATCH, _MP_NUMEMP, _MP_QTY, _MP_RATE):
             self._recalc_azn_totals()
 
     def _apply_desc_alias_manpower(self, row: int):
@@ -2722,7 +3680,8 @@ class CTRGeneratorWidget(QWidget):
             try:
                 v = float(item.text())
             except ValueError:
-                item.setToolTip(f'"{item.text()}" is not a valid number — treated as 0 here.')
+                item.setToolTip("Empty — enter a value; treated as 0 here." if not item.text().strip()
+                                else f'"{item.text()}" is not a valid number — treated as 0 here.')
                 return 0.0
             item.setToolTip("")
             return v
@@ -2750,8 +3709,35 @@ class CTRGeneratorWidget(QWidget):
         hours, ambiguous = hint if isinstance(hint, tuple) else (hint, False)
         hours = hours or None
         was_includable = bool(status_item) and status_item.text().startswith("✓")
-        match = _match_azn_labor(self._azn_df, strip_support_keyword(key), location, shift,
-                                  shift_type, hours, ambiguous)
+        if self._azn_df.empty and not was_includable:
+            self._mark_waiting(tbl, row, _MP_STATUS)       # nothing to match against yet
+            return
+        enc_item = tbl.item(row, _MP_ENC)
+        enc = (enc_item.text() if enc_item else "").strip().upper()
+        names = self._row_role_names(row)
+        code_key = strip_support_keyword(key).strip().lower()
+        exact_code = (not self._azn_df.empty and bool(
+            (self._azn_df["stock_code"].astype(str).str.strip().str.lower() == code_key).any()))
+        # Why a row must stay unmatched even though a rate might exist: the
+        # Encoding is not a valid variant of the role, or it would mix Onshore
+        # and Offshore. (An exact stock code in Match By bypasses all of this.)
+        why = None
+        if not exact_code:
+            dec = _decode_manpower_encoding_full(enc) if enc else None
+            on_role = self._is_onshore_role(*names)
+            known = next((self._enc_variants[n] for n in names if n in self._enc_variants), None)
+            job_loc = self._job_location()
+            if enc and dec is None:
+                why = f"“{enc}” is not an encoding (expected like NS-NAT-OFF-12)"
+            elif enc and known is not None and enc not in known:
+                why = f"{enc} is not a valid variant of this role — choose one from the Encoding list"
+            elif dec and on_role and dec[0] == "Offshore":
+                why = "this role is always Onshore — choose an Onshore encoding"
+            elif dec and not on_role and job_loc and dec[0] != job_loc:
+                why = (f"{dec[0]} encoding in an {job_loc} request — Onshore and Offshore are "
+                       f"not mixed; choose an {job_loc} encoding")
+        match = None if why else _match_azn_labor(
+            self._azn_df, strip_support_keyword(key), location, shift, shift_type, hours, ambiguous)
 
         tbl.blockSignals(True)
         if match:
@@ -2763,8 +3749,18 @@ class CTRGeneratorWidget(QWidget):
             tbl.setItem(row, _MP_MDESC, _ro_item(""))
             if was_includable:
                 status_text = "✓ Manual"
+            elif why:
+                status_text = f"✗ No match — {why}"
             elif ambiguous:
                 status_text = "✗ No match — ENCODING prefix unrecognized/conflicts with Shift+Status; fix request or set Match By to the exact stock code"
+            elif not enc:
+                if not self._encoding_options(row) and (self._enc_variants or not self._azn_df.empty):
+                    status_text = ("✗ No match — no encoding exists for this role at this Type "
+                                   "(see the Combined DB's variants; an always-Onshore role is listed in ENC_LIST)")
+                else:
+                    status_text = "✗ No match — the request gives no Encoding: choose it from the Encoding list"
+            elif not shift.strip() or not shift_type.strip():
+                status_text = "✗ No match — the request does not give the Shift / Shift Type: choose them in the table"
             else:
                 status_text = "✗ No match — edit Match By or Description"
             tbl.setItem(row, _MP_STATUS, _ro_item(status_text))
@@ -2825,23 +3821,17 @@ class CTRGeneratorWidget(QWidget):
         # By alias lookup below uses the same composite key.
         desc_display = _get_desc_rename_by_stock(self._desc_renames, "equipment", desc, code) or desc
         default_key = _get_alias_by_stock(self._aliases, "equipment", desc, code) or code or desc
-        try:
-            qty = float(request_item.get("quantity") or 1)
-        except (TypeError, ValueError):
-            qty = 1.0
-        try:
-            days = float(request_item.get("days") or 30)
-        except (TypeError, ValueError):
-            days = 30.0
+        qty_text = _request_qty_text(request_item.get("quantity"))
+        days_text = _request_qty_text(request_item.get("days"))   # blank stays blank
 
         tbl.setItem(r, _EQ_DESC,   QTableWidgetItem(desc_display))
         tbl.setItem(r, _EQ_CODE,   QTableWidgetItem(code))
         tbl.setItem(r, _EQ_MATCH,  QTableWidgetItem(default_key))
         tbl.setItem(r, _EQ_MDESC,  _ro_item(""))
-        tbl.setItem(r, _EQ_QTY,    QTableWidgetItem(str(qty)))
-        tbl.setItem(r, _EQ_UNIT,   QTableWidgetItem(request_item.get("uom") or "DAY"))
-        tbl.setItem(r, _EQ_RATE,   QTableWidgetItem("0.00"))
-        tbl.setItem(r, _EQ_DAYS,   QTableWidgetItem(str(days)))
+        tbl.setItem(r, _EQ_QTY,    QTableWidgetItem(qty_text))
+        tbl.setItem(r, _EQ_UNIT,   QTableWidgetItem(request_item.get("uom") or ""))
+        tbl.setItem(r, _EQ_RATE,   QTableWidgetItem(""))
+        tbl.setItem(r, _EQ_DAYS,   QTableWidgetItem(days_text))
         tbl.setItem(r, _EQ_TOTAL,  _ro_item("0.00"))
         tbl.setItem(r, _EQ_STATUS, _ro_item("✗ No match — edit Match By or Description"))
         # Stash the request sheet's own Rechargability tag so _rematch_equip_row
@@ -2863,10 +3853,10 @@ class CTRGeneratorWidget(QWidget):
         tbl.setItem(r, _EQ_CODE,   QTableWidgetItem(""))
         tbl.setItem(r, _EQ_MATCH,  QTableWidgetItem(""))
         tbl.setItem(r, _EQ_MDESC,  _ro_item(""))
-        tbl.setItem(r, _EQ_QTY,    QTableWidgetItem("1"))
-        tbl.setItem(r, _EQ_UNIT,   QTableWidgetItem("DAY"))
-        tbl.setItem(r, _EQ_RATE,   QTableWidgetItem("0.00"))
-        tbl.setItem(r, _EQ_DAYS,   QTableWidgetItem("30"))
+        tbl.setItem(r, _EQ_QTY,    QTableWidgetItem(""))
+        tbl.setItem(r, _EQ_UNIT,   QTableWidgetItem(""))
+        tbl.setItem(r, _EQ_RATE,   QTableWidgetItem(""))
+        tbl.setItem(r, _EQ_DAYS,   QTableWidgetItem(""))
         tbl.setItem(r, _EQ_TOTAL,  _ro_item("0.00"))
         tbl.setItem(r, _EQ_STATUS, _ro_item("✓ Manual"))
         tbl.blockSignals(False)
@@ -2938,7 +3928,8 @@ class CTRGeneratorWidget(QWidget):
             try:
                 v = float(item.text())
             except ValueError:
-                item.setToolTip(f'"{item.text()}" is not a valid number — treated as 0 here.')
+                item.setToolTip("Empty — enter a value; treated as 0 here." if not item.text().strip()
+                                else f'"{item.text()}" is not a valid number — treated as 0 here.')
                 return 0.0
             item.setToolTip("")
             return v
@@ -2960,6 +3951,10 @@ class CTRGeneratorWidget(QWidget):
         code = code_item.text().strip() if code_item else ""
         identity = (code or desc).lower()
         was_includable = bool(status_item) and status_item.text().startswith("✓")
+
+        if self._usd_pb_df.empty and not was_includable:
+            self._mark_waiting(tbl, row, _EQ_STATUS)       # nothing to match against yet
+            return
 
         # Stage 1: Equipment Names DB bridge lookup by "Match By" as a stock
         # code — resolves the request's internal stock code to the canonical
@@ -3011,7 +4006,7 @@ class CTRGeneratorWidget(QWidget):
         # helper consumables already use for their own SAGE match.
         sage_match = _match_lookup(
             self._sage_df, "product", "long_description", "local_expect_cost", key)
-        sage_cost = sage_match[1] if sage_match else 0.0
+        sage_cost = sage_match[1] if sage_match else None     # None = not in SAGE
 
         tbl.blockSignals(True)
         desc_item.setData(_SAGE_COST_ROLE, sage_cost)
@@ -3050,18 +4045,15 @@ class CTRGeneratorWidget(QWidget):
         # By alias lookup below uses the same composite key.
         desc_display = _get_desc_rename_by_stock(self._desc_renames, "consumable", desc, code) or desc
         default_key = _get_alias_by_stock(self._aliases, "consumable", desc, code) or code or desc
-        try:
-            qty = float(request_item.get("quantity") or 1)
-        except (TypeError, ValueError):
-            qty = 1.0
+        qty_text = _request_qty_text(request_item.get("quantity"))
 
         tbl.setItem(r, _CS_DESC,   QTableWidgetItem(desc_display))
         tbl.setItem(r, _CS_CODE,   QTableWidgetItem(code))
         tbl.setItem(r, _CS_MATCH,  QTableWidgetItem(default_key))
         tbl.setItem(r, _CS_MDESC,  _ro_item(""))
-        tbl.setItem(r, _CS_QTY,    QTableWidgetItem(str(qty)))
-        tbl.setItem(r, _CS_UNIT,   QTableWidgetItem(request_item.get("uom") or "EA"))
-        tbl.setItem(r, _CS_PRICE,  QTableWidgetItem("0.00"))
+        tbl.setItem(r, _CS_QTY,    QTableWidgetItem(qty_text))
+        tbl.setItem(r, _CS_UNIT,   QTableWidgetItem(request_item.get("uom") or ""))
+        tbl.setItem(r, _CS_PRICE,  QTableWidgetItem(""))
         tbl.setItem(r, _CS_TOTAL,  _ro_item("0.00"))
         tbl.setItem(r, _CS_STATUS, _ro_item("✗ No match — edit Match By or Description"))
         # Stash the request sheet's own Rechargability tag so _rematch_cons_row
@@ -3083,9 +4075,9 @@ class CTRGeneratorWidget(QWidget):
         tbl.setItem(r, _CS_CODE,   QTableWidgetItem(""))
         tbl.setItem(r, _CS_MATCH,  QTableWidgetItem(""))
         tbl.setItem(r, _CS_MDESC,  _ro_item(""))
-        tbl.setItem(r, _CS_QTY,    QTableWidgetItem("1"))
-        tbl.setItem(r, _CS_UNIT,   QTableWidgetItem("EA"))
-        tbl.setItem(r, _CS_PRICE,  QTableWidgetItem("0.00"))
+        tbl.setItem(r, _CS_QTY,    QTableWidgetItem(""))
+        tbl.setItem(r, _CS_UNIT,   QTableWidgetItem(""))
+        tbl.setItem(r, _CS_PRICE,  QTableWidgetItem(""))
         tbl.setItem(r, _CS_TOTAL,  _ro_item("0.00"))
         tbl.setItem(r, _CS_STATUS, _ro_item("✓ Manual"))
         tbl.blockSignals(False)
@@ -3156,7 +4148,8 @@ class CTRGeneratorWidget(QWidget):
             try:
                 v = float(item.text())
             except ValueError:
-                item.setToolTip(f'"{item.text()}" is not a valid number — treated as 0 here.')
+                item.setToolTip("Empty — enter a value; treated as 0 here." if not item.text().strip()
+                                else f'"{item.text()}" is not a valid number — treated as 0 here.')
                 return 0.0
             item.setToolTip("")
             return v
@@ -3178,6 +4171,9 @@ class CTRGeneratorWidget(QWidget):
         code = code_item.text().strip() if code_item else ""
         identity = (code or desc).lower()
         was_includable = bool(status_item) and status_item.text().startswith("✓")
+        if self._sage_df.empty and not was_includable:
+            self._mark_waiting(tbl, row, _CS_STATUS)       # nothing to match against yet
+            return
         match = _match_lookup(self._sage_df, "product", "long_description", "local_expect_cost", key)
 
         # SAGE's own analysis_b flag is the rechargeability source for
@@ -3208,7 +4204,7 @@ class CTRGeneratorWidget(QWidget):
                 status += "  ⚠ Rechargability mismatch vs. request sheet — using SAGE"
             tbl.setItem(row, _CS_STATUS, _ro_item(status))
         else:
-            desc_item.setData(_SAGE_COST_ROLE, 0.0)
+            desc_item.setData(_SAGE_COST_ROLE, None)           # not in SAGE
             tbl.setItem(row, _CS_MDESC, _ro_item(""))
             tbl.setItem(row, _CS_STATUS, _ro_item(
                 "✓ Manual" if was_includable else "✗ No match — edit Match By or Description"))
@@ -3222,6 +4218,9 @@ class CTRGeneratorWidget(QWidget):
     # ── Totals ────────────────────────────────────────────────────────────────
 
     def _recalc_azn_totals(self):
+        timer = getattr(self, "_stats_timer", None)
+        if timer is not None:
+            timer.start()           # re-check the missing-value markers shortly
         tbl = self._req_manpower_tbl
         support_total = 0.0
         other_total = 0.0
@@ -3257,6 +4256,9 @@ class CTRGeneratorWidget(QWidget):
             f"AZN CTR Total:  ₼ {support_total + other_total + third_party_total:,.2f}")
 
     def _recalc_usd_totals(self):
+        timer = getattr(self, "_stats_timer", None)
+        if timer is not None:
+            timer.start()           # refresh the cost statistics box shortly
         equip_total = 0.0
         for r in range(self._req_equip_tbl.rowCount()):
             status_item = self._req_equip_tbl.item(r, _EQ_STATUS)
@@ -3375,6 +4377,15 @@ class CTRGeneratorWidget(QWidget):
         if self._req_manpower_tbl.rowCount() == 0:
             errors.append("Manpower table is empty — load a CTR Request or add rows first.")
 
+        _waiting = sum(
+            1 for tbl, c in ((self._req_manpower_tbl, _MP_STATUS), (self._req_equip_tbl, _EQ_STATUS),
+                             (self._req_cons_tbl, _CS_STATUS))
+            for r in range(tbl.rowCount())
+            if (tbl.item(r, c) or _ro_item("")).text().startswith("⏳"))
+        if _waiting:
+            errors.append(f"{_waiting} row(s) are still waiting for the reference files — press "
+                          "Load Files first, so they can be matched.")
+
         if not self._client_edit.text().strip():
             warnings.append("Client is empty — the template cell will be left blank.")
 
@@ -3393,23 +4404,59 @@ class CTRGeneratorWidget(QWidget):
                 "All manpower rows are unmatched (✗). The AZN CTR will have no labor rows."
             )
 
-        unpriced = [
-            (self._transport_tbl.item(r, _TR_DESC).text().strip()
-             if self._transport_tbl.item(r, _TR_DESC) else f"row {r + 1}")
-            for r in range(self._transport_tbl.rowCount())
-            if (self._transport_tbl.item(r, _TR_RATE) or _ro_item("0")).text().strip()
-            in ("", "0", "0.0", "0.00")
-        ]
-        if unpriced:
-            warnings.append(
-                "Transport line(s) with no rate: " + ", ".join(unpriced)
-                + ". They'll appear in Third Party Activities at 0.00."
-            )
-
         if errors:
             log.warning("Generate blocked: %s", "; ".join(errors))
             QMessageBox.warning(self, "Cannot generate", "\n".join(errors))
             return
+
+        # Rows with a required value missing are never filled with a stand-in
+        # (1, 0, 30, …): the user is told which, and if they still generate,
+        # those rows are left out of the CTR.
+        incomplete = self._incomplete_cells()
+        bad_rows = {(id(c["tbl"]), c["row"]) for c in incomplete}
+        no_sage = self._lines_without_sage_cost(bad_rows)
+        if no_sage:
+            if self._sage_df.empty:
+                warnings.append(
+                    "The SAGE Export is not loaded, so no SAGE cost is known: the CTR's internal "
+                    "SC cost cells (Pricing sheet) will be EMPTY. Load the files first if you want them filled.")
+            else:
+                shown_ns = ", ".join(no_sage[:6]) + (f" … (+{len(no_sage) - 6} more)" if len(no_sage) > 6 else "")
+                warnings.append(
+                    f"{len(no_sage)} line(s) are NOT IN SAGE ({shown_ns}) — their SAGE cost is unknown, "
+                    "so the internal SC cost cell in the CTR is left EMPTY for them. To fill it, press "
+                    "Cancel and type each cost into the Cost statistics box (double-click the red row's "
+                    "Unit cost); otherwise generate as it is.")
+        if incomplete:
+            self._mark_incomplete(incomplete)
+            per_row: dict[tuple, list] = {}
+            for c in incomplete:
+                per_row.setdefault((c["section"], id(c["tbl"]), c["row"], c["desc"]), []).append(c["field"])
+            lines = [f"{sec}: {desc} — missing {', '.join(fields)}"
+                     for (sec, _t, _r, desc), fields in per_row.items()]
+            shown = "<br>".join(html.escape(x) for x in lines[:15])
+            if len(lines) > 15:
+                shown += f"<br>… and {len(lines) - 15} more"
+            log.warning("Generate: %d row(s) with missing required values: %s",
+                        len(per_row), "; ".join(lines))
+            box = QMessageBox(self)
+            box.setIcon(QMessageBox.Icon.Warning)
+            box.setWindowTitle("Missing values — rows will not be included")
+            box.setTextFormat(Qt.TextFormat.RichText)
+            box.setText(
+                '<p style="color:#C62828"><b>'
+                f"{len(per_row)} row(s) are not filled in completely and will NOT be "
+                "included in the CTR.</b></p>"
+                f"<p>{shown}</p>"
+                "<p>Nothing is assumed in place of a missing value. Press <b>Cancel</b> to go "
+                "and fill them in (they are shown in red), or <b>Generate without them</b>.</p>")
+            go = box.addButton("Generate without them", QMessageBox.ButtonRole.AcceptRole)
+            box.addButton(QMessageBox.StandardButton.Cancel)
+            box.exec()
+            if box.clickedButton() is not go:
+                self._empty_qty_idx = -1
+                self._jump_empty_qty()
+                return
 
         if warnings:
             reply = QMessageBox.warning(
@@ -3427,28 +4474,23 @@ class CTRGeneratorWidget(QWidget):
         # unmatched requests never silently appear in the output at rate 0.
         support_rows, other_rows = [], []
         mp_skipped = 0
+        incomplete_skipped = len(bad_rows)    # rows left out for a missing value
         for r in range(self._req_manpower_tbl.rowCount()):
             status_item = self._req_manpower_tbl.item(r, _MP_STATUS)
             if not (status_item and status_item.text().startswith("✓")):
                 mp_skipped += 1
                 continue
+            if (id(self._req_manpower_tbl), r) in bad_rows:
+                continue
             def _txt(c, _r=r):
                 item = self._req_manpower_tbl.item(_r, c)
                 return item.text().strip() if item else ""
-            try:
-                num_emp = float(_txt(_MP_NUMEMP) or 1)
-            except ValueError:
-                num_emp = 1.0
-            try:
-                qty = float(_txt(_MP_QTY) or 0)
-            except ValueError:
-                qty = 0.0
-            try:
-                rate = float(_txt(_MP_RATE) or 0)
-            except ValueError:
-                rate = 0.0
-            shift      = _txt(_MP_SHIFT)     or "Day"
-            shift_type = _txt(_MP_SHIFTTYPE) or "Normal"
+            # Every figure below was checked by _incomplete_cells: no stand-ins.
+            num_emp = float(_txt(_MP_NUMEMP))
+            qty     = float(_txt(_MP_QTY))
+            rate    = float(_txt(_MP_RATE))
+            shift      = _txt(_MP_SHIFT)
+            shift_type = _txt(_MP_SHIFTTYPE)
             # "Normal" is the default Shift Type — worth calling out only
             # when it's something else (Overtime/Rotational/Standby).
             comment = f"{shift} Shift" if shift_type == "Normal" else f"{shift} Shift, {shift_type}"
@@ -3462,9 +4504,9 @@ class CTRGeneratorWidget(QWidget):
                 "num_employees": num_emp,
                 "description":   _txt(_MP_DESC),
                 "quantity":      qty,
-                "uom":           _txt(_MP_UOM) or "Hours",
+                "uom":           _txt(_MP_UOM),
                 "rate_azn":      rate,
-                "nationality":   _txt(_MP_NAT) or "NAT",
+                "nationality":   _txt(_MP_NAT),
             }
             if is_support_manpower(row_dict["description"]):
                 support_rows.append(row_dict)
@@ -3478,44 +4520,30 @@ class CTRGeneratorWidget(QWidget):
             if not (status_item and status_item.text().startswith("✓")):
                 eq_skipped += 1
                 continue
+            if (id(self._req_equip_tbl), r) in bad_rows:
+                continue
             def _etxt(c, _r=r):
                 item = self._req_equip_tbl.item(_r, c)
                 return item.text().strip() if item else ""
-            try:
-                qty = float(_etxt(_EQ_QTY) or 1)
-            except ValueError:
-                qty = 1.0
+            qty = float(_etxt(_EQ_QTY))     # checked by _incomplete_cells: no stand-ins
             rate_txt = _etxt(_EQ_RATE)
             try:
-                rate = float(rate_txt or 0)
+                rate = float(rate_txt)
             except ValueError:
-                # Non-numeric — e.g. "NONRECHARG" — passed through as-is so
-                # build_usd can print it instead of a misleading 0.00.
+                # Only "NONRECHARG" gets here (checked) — passed through as-is
+                # so build_usd can print it instead of a misleading 0.00.
                 rate = rate_txt
-            # An empty Days cell is passed through empty rather than
-            # defaulting to 30 — a scaffold line arrives with no duration
-            # stated (and the user may clear any row's Days for the same
-            # reason), and inventing one there would put a number nobody
-            # chose into a priced document. A non-numeric value still
-            # falls back to 30, as before.
-            days_txt = _etxt(_EQ_DAYS)
-            if not days_txt:
-                days = ""
-            else:
-                try:
-                    days = float(days_txt)
-                except ValueError:
-                    days = 30.0
+            days = float(_etxt(_EQ_DAYS))
             # Always show the requested description as typed in the CTR
             # Request, not the matched pricebook name — "Matched Item" is
             # only an internal lookup key used to find the rate, and isn't
             # client-facing text.
             eq_desc_item = self._req_equip_tbl.item(r, _EQ_DESC)
-            sage_cost = (eq_desc_item.data(_SAGE_COST_ROLE) if eq_desc_item else None) or 0.0
+            sage_cost = self._sage_cost_of(eq_desc_item, _etxt(_EQ_MATCH) or _etxt(_EQ_CODE) or _etxt(_EQ_DESC))
             equip_rows.append({
                 "description":  _etxt(_EQ_DESC),
                 "quantity":     qty,
-                "unit":         _etxt(_EQ_UNIT) or "DAY",
+                "unit":         _etxt(_EQ_UNIT),
                 "rate_per_day": rate,
                 "days":         days,
                 "stock_code":   _etxt(_EQ_CODE),
@@ -3529,39 +4557,39 @@ class CTRGeneratorWidget(QWidget):
             if not (status_item and status_item.text().startswith("✓")):
                 cs_skipped += 1
                 continue
+            if (id(self._req_cons_tbl), r) in bad_rows:
+                continue
             def _ctxt(c, _r=r):
                 item = self._req_cons_tbl.item(_r, c)
                 return item.text().strip() if item else ""
-            try:
-                qty = float(_ctxt(_CS_QTY) or 1)
-            except ValueError:
-                qty = 1.0
+            qty = float(_ctxt(_CS_QTY))     # checked by _incomplete_cells: no stand-ins
             price_txt = _ctxt(_CS_PRICE)
             try:
-                price = float(price_txt or 0)
+                price = float(price_txt)
             except ValueError:
-                # Non-numeric — e.g. "NONRECHARG" — passed through as-is so
-                # build_usd can print it instead of a misleading 0.00.
+                # Only "NONRECHARG" gets here (checked) — passed through as-is
+                # so build_usd can print it instead of a misleading 0.00.
                 price = price_txt
             # Same reasoning as equipment above — always show the requested
             # description, not the internal matched-item name.
             cs_desc_item = self._req_cons_tbl.item(r, _CS_DESC)
-            sage_cost = (cs_desc_item.data(_SAGE_COST_ROLE) if cs_desc_item else None) or 0.0
+            sage_cost = self._sage_cost_of(cs_desc_item, _ctxt(_CS_MATCH) or _ctxt(_CS_CODE) or _ctxt(_CS_DESC))
             consump_rows.append({
                 "long_description":  _ctxt(_CS_DESC),
                 "local_expect_cost": price,
-                "unit_code":         _ctxt(_CS_UNIT) or "EA",
+                "unit_code":         _ctxt(_CS_UNIT),
                 "product":           _ctxt(_CS_CODE),
                 "quantity":          qty,
                 "sage_cost":         sage_cost,
             })
 
         # Transport / hired services — the AZN CTR's "Third Party Activities"
-        # section. Unlike the tables above there's nothing to match against a
-        # pricebook here, so every row is included; a row still priced at 0
-        # is flagged as a warning before generating rather than skipped.
+        # section. Nothing to match against a pricebook here, so every row is
+        # included — except one with a quantity, duration, unit or rate still
+        # missing (checked above), which is left out like any other.
         third_party_rows = [
             self._transport_row_values(r) for r in range(self._transport_tbl.rowCount())
+            if (id(self._transport_tbl), r) not in bad_rows
         ]
 
         total_skipped = mp_skipped + eq_skipped + cs_skipped
@@ -3615,6 +4643,9 @@ class CTRGeneratorWidget(QWidget):
             note = (
                 f"\n\nSkipped {total_skipped} unmatched row(s) — not included "
                 f"in the output." if total_skipped else ""
+            ) + (
+                f"\n\n{incomplete_skipped} row(s) with a missing value were left out "
+                "(see the log for which)." if incomplete_skipped else ""
             )
             if worker.stopped:
                 QMessageBox.information(

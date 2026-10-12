@@ -1,0 +1,328 @@
+"""Maintain Task_Log_MagsudAbbaszade.xlsx (used by the /handoff command).
+
+    python3 .claude/task_log/task_log_append.py missing  [--xlsx PATH]
+    python3 .claude/task_log/task_log_append.py open     [--xlsx PATH]
+    python3 .claude/task_log/task_log_append.py add FILE.json [--xlsx PATH]
+    python3 .claude/task_log/task_log_append.py update "X - MA005" [--pct 100] [--remaining TEXT]
+                                              [--comment TEXT] [--phase VALUE] [--xlsx PATH]
+    python3 .claude/task_log/task_log_append.py refresh  [--xlsx PATH]
+
+missing  changelog versions that have no row in the log yet (version + date), then
+         "summary<TAB>key" for each Version|App Part group with no text in short_summaries.json
+open     rows whose Completion % < 100 (a note in Remaining on a 100% row is a
+         known limitation or idea, not unfinished work, so it is not listed)
+add      append rows; FILE.json is a list of objects with keys
+         version, part, name, functionality, priority, pct (0-100), remaining, comment,
+         phase (default 0; e.g. 1, "1A"), completed (default true; false = planned:
+         Start/Completion Date left blank)
+update   change Completion % / Remaining / Comments / Phase of one existing row
+refresh  rebuild sheets 2 and 3 only (use after editing short_summaries.json)
+Sheet 3 ("Shortened Form") has one row per Version x App Part: a one-line plain-language summary
+(from short_summaries.json, key "Version|App Part") plus figures computed from sheet 1.
+Columns are found by their header text in row 1, so the user may delete or move
+columns (e.g. the spare "Col N" ones); only the headers listed in NEEDED must exist.
+Existing rows are never rewritten except by `update`. Sheets 2 ("By App Part") and 3
+are rebuilt from sheet 1 after every change. Close the file in Excel first.
+Writes go through a temp file and an atomic swap. Before every write the current file is copied to .claude/task_log/backups/ (30 newest kept).
+"""
+import argparse
+import shutil
+import json
+import os
+import re
+import sys
+from datetime import date, datetime
+from pathlib import Path
+
+from openpyxl import load_workbook
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+from openpyxl.utils import get_column_letter
+from openpyxl.worksheet.table import Table, TableStyleInfo
+
+ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_XLSX = ROOT / "Task_Log_MagsudAbbaszade.xlsx"
+CHANGELOG = ROOT / "CHANGELOG.md"
+BACKUP_DIR = Path(__file__).resolve().parent / "backups"
+KEEP_BACKUPS = 30
+S1, S2, S3 = "All Tasks", "By App Part", "Shortened Form"
+SUMMARIES = Path(__file__).resolve().parent / "short_summaries.json"
+RANK = {"High": 3, "Medium": 2, "Low": 1}
+PARTS = ["CTR Generator", "MR vs CTR Comparator", "CTR Tracker", "App-wide / Infrastructure"]
+NEEDED = ["Task ID", "Task Name", "Functionality", "Version", "App Part", "Start Date", "Completion Date",
+          "Deadline", "Priority (importance)", "Total Units", "Completion %", "Remaining", "Comments"]
+CENTER = {"Task ID", "Version", "Start Date", "Completion Date", "Deadline", "Priority (importance)",
+          "Total Units", "Completion %", "Phase"}
+WRAP = {"Task Name", "Functionality", "App Part", "Remaining", "Comments"}
+
+_thin = Side(style="thin", color="BFBFBF")
+BORDER = Border(left=_thin, right=_thin, top=_thin, bottom=_thin)
+
+
+def changelog_versions():
+    out = {}
+    for m in re.finditer(r"^## \[([\d.]+)\] - (\d{4}-\d{2}-\d{2})", CHANGELOG.read_text(encoding="utf-8"), re.M):
+        out[m.group(1)] = datetime.strptime(m.group(2), "%Y-%m-%d").date()
+    return out
+
+
+class Layout:
+    """Header-driven view of sheet 1."""
+
+    def __init__(self, ws):
+        self.head = []
+        for c in range(1, ws.max_column + 1):
+            v = ws.cell(1, c).value
+            if v is None:
+                break
+            self.head.append(str(v))
+        self.n = len(self.head)
+        self.col = {h: i + 1 for i, h in enumerate(self.head)}
+        missing = [h for h in NEEDED if h not in self.col]
+        if missing:
+            sys.exit(f"Task log is missing column(s) {missing}; found {self.head}")
+        self.widths = [ws.column_dimensions[get_column_letter(c)].width or 12 for c in range(1, self.n + 1)]
+
+    def spare(self, c):
+        return self.head[c - 1].startswith("Col ")
+
+
+def data_rows(ws):
+    return [r for r in range(2, ws.max_row + 1) if ws.cell(r, 1).value]
+
+
+def style_row(ws, r, L):
+    for c, h in enumerate(L.head, 1):
+        cell = ws.cell(r, c)
+        cell.border = BORDER
+        cell.alignment = Alignment(vertical="top", wrap_text=h in WRAP, horizontal="center" if h in CENTER else None)
+        if h in ("Start Date", "Completion Date"):
+            cell.number_format = "yyyy-mm-dd"
+        if h == "Completion %":
+            cell.number_format = "0%"
+        if L.spare(c):
+            cell.fill = PatternFill("solid", fgColor="F2F2F2")
+
+
+def style_header(ws, row, L):
+    for c in range(1, L.n + 1):
+        cell = ws.cell(row, c)
+        spare = L.spare(c)
+        cell.font = Font(bold=True, color="7F7F7F" if spare else "FFFFFF", size=8 if spare else 11)
+        cell.fill = PatternFill("solid", fgColor="D9D9D9" if spare else "1F3864")
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        cell.border = BORDER
+    ws.row_dimensions[row].height = 32
+
+
+def rebuild_sheet2(wb, L):
+    ws1 = wb[S1]
+    rows = [[ws1.cell(r, c).value for c in range(1, L.n + 1)] for r in data_rows(ws1)]
+    part_i = L.col["App Part"] - 1
+    pct_l = get_column_letter(L.col["Completion %"])
+    if S2 in wb.sheetnames:
+        del wb[S2]
+    ws = wb.create_sheet(S2)
+    for c, w in enumerate(L.widths, 1):
+        ws.column_dimensions[get_column_letter(c)].width = w
+    ws.cell(1, 1, "Tasks grouped by App Part. Same columns as 'All Tasks'; copy of the data, not linked.").font = Font(italic=True, color="595959")
+    last_col = get_column_letter(L.n)
+    r = 3
+    extra = sorted({x[part_i] for x in rows} - set(PARTS))
+    for n, part in enumerate(PARTS + extra, 1):
+        data = [x for x in rows if x[part_i] == part]
+        if not data:
+            continue
+        ws.cell(r, 1, part).font = Font(bold=True, size=13)
+        for c in range(1, L.n + 1):
+            ws.cell(r, c).fill = PatternFill("solid", fgColor="D6E0F0")
+        hdr, first = r + 1, r + 2
+        last = hdr + len(data)
+        ws.cell(r, L.col["Total Units"], "Tasks:").font = Font(bold=True)
+        ws.cell(r, L.col["Completion %"], f"=COUNTA(A{first}:A{last})").font = Font(bold=True)
+        ws.cell(r, L.col["Remaining"],
+                f'="Average completion: "&TEXT(AVERAGE({pct_l}{first}:{pct_l}{last}),"0.0%")').font = Font(bold=True)
+        for c, h in enumerate(L.head, 1):
+            ws.cell(hdr, c, h)
+        style_header(ws, hdr, L)
+        for i, vals in enumerate(data):
+            for c, v in enumerate(vals, 1):
+                ws.cell(first + i, c, v)
+            style_row(ws, first + i, L)
+        tb = Table(displayName=f"Part{n}", ref=f"A{hdr}:{last_col}{last}")
+        tb.tableStyleInfo = TableStyleInfo(name="TableStyleLight1", showRowStripes=False)
+        ws.add_table(tb)
+        r = last + 3
+    ws.freeze_panes = "C1"
+
+
+def load_summaries():
+    return json.loads(SUMMARIES.read_text(encoding="utf-8")) if SUMMARIES.exists() else {}
+
+
+def groups(ws1, L):
+    """Rows of sheet 1 grouped by (Version, App Part), in order of first appearance."""
+    out = {}
+    for r in data_rows(ws1):
+        key = (str(ws1.cell(r, L.col["Version"]).value), ws1.cell(r, L.col["App Part"]).value)
+        out.setdefault(key, []).append({h: ws1.cell(r, c).value for h, c in L.col.items()})
+    return out
+
+
+def rebuild_sheet3(wb, L):
+    ws1 = wb[S1]
+    summ = load_summaries()
+    if S3 in wb.sheetnames:
+        del wb[S3]
+    ws = wb.create_sheet(S3)
+    head = ["Version", "App Part", "What was done", "Tasks", "Priority", "Started", "Finished", "Done %", "Still open", "Phase"]
+    for c, (h, w) in enumerate(zip(head, [11, 24, 80, 8, 10, 12, 12, 9, 34, 8]), 1):
+        ws.cell(1, c, h)
+        ws.column_dimensions[get_column_letter(c)].width = w
+    for c in range(1, len(head) + 1):
+        cell = ws.cell(1, c)
+        cell.font = Font(bold=True, color="FFFFFF")
+        cell.fill = PatternFill("solid", fgColor="1F3864")
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        cell.border = BORDER
+    ws.row_dimensions[1].height = 24
+    r = 1
+    for (ver, part), items in groups(ws1, L).items():
+        r += 1
+        starts = [i["Start Date"] for i in items if i.get("Start Date")]
+        ends = [i["Completion Date"] for i in items if i.get("Completion Date")]
+        pcts = [i["Completion %"] or 0 for i in items]
+        open_n = sum(1 for p in pcts if p < 1)
+        phases = sorted({str(i.get("Phase", 0)) for i in items})
+        vals = [ver, part, summ.get(f"{ver}|{part}", ""), len(items),
+                max((i["Priority (importance)"] for i in items), key=lambda x: RANK.get(x, 0)),
+                min(starts) if starts else None, max(ends) if ends else None, sum(pcts) / len(pcts),
+                f"{open_n} of {len(items)} not finished" if open_n else "-", ", ".join(phases)]
+        for c, v in enumerate(vals, 1):
+            cell = ws.cell(r, c, v)
+            cell.border = BORDER
+            cell.alignment = Alignment(vertical="top", wrap_text=c in (2, 3, 9), horizontal="center" if c in (1, 4, 5, 6, 7, 8, 10) else None)
+        ws.cell(r, 6).number_format = ws.cell(r, 7).number_format = "yyyy-mm-dd"
+        ws.cell(r, 8).number_format = "0%"
+        # Excel does not auto-fit rows written by a script; size by the longest wrapped cell (~1.1 chars per width unit).
+        lines = max(-(-len(str(vals[i])) // int(w * 1.1)) for i, w in ((1, 24), (2, 80), (8, 34)))
+        ws.row_dimensions[r].height = 15 * max(lines, 1)
+    tb = Table(displayName="ShortForm", ref=f"A1:{get_column_letter(len(head))}{max(r, 2)}")
+    tb.tableStyleInfo = TableStyleInfo(name="TableStyleLight1", showRowStripes=False)
+    ws.add_table(tb)
+    ws.freeze_panes = "A2"
+
+
+def refresh_table_ref(ws1, L):
+    last = max(data_rows(ws1))
+    ref = f"A1:{get_column_letter(L.n)}{last}"
+    ws1.tables["AllTasks"].ref = ref
+    ws1.tables["AllTasks"].autoFilter.ref = ref
+
+
+def backup(path):
+    """Copies the file as it is now, before a write. Returns the copy's path."""
+    BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+    dest = BACKUP_DIR / f"{path.stem}_{datetime.now():%Y%m%d_%H%M%S}{path.suffix}"
+    shutil.copy2(path, dest)
+    for old in sorted(BACKUP_DIR.glob(f"{path.stem}_*{path.suffix}"))[:-KEEP_BACKUPS]:
+        old.unlink()
+    return dest
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("cmd", choices=["missing", "open", "add", "update", "refresh"])
+    ap.add_argument("arg", nargs="?")
+    ap.add_argument("--xlsx", default=str(DEFAULT_XLSX))
+    ap.add_argument("--pct", type=float)
+    ap.add_argument("--remaining")
+    ap.add_argument("--comment")
+    ap.add_argument("--phase")
+    a = ap.parse_args()
+
+    path = Path(a.xlsx)
+    print(f"Task log: {path}", file=sys.stderr)
+    if a.cmd in ("add", "update", "refresh") and (path.parent / f"~${path.name}").exists():
+        sys.exit("The task log looks open in Excel (lock file found). Close it first.")
+    wb = load_workbook(path)
+    if a.cmd in ("add", "update", "refresh") and path.resolve() == DEFAULT_XLSX.resolve():
+        print(f"Backup: {backup(path)}", file=sys.stderr)
+    ws = wb[S1]
+    L = Layout(ws)
+    col = L.col
+    rows = data_rows(ws)
+
+    if a.cmd == "missing":
+        have = {str(ws.cell(r, col["Version"]).value) for r in rows}
+        for v, d in changelog_versions().items():
+            if v not in have:
+                print(f"{v}\t{d}")
+        summ = load_summaries()
+        for ver, part in groups(ws, L):
+            if f"{ver}|{part}" not in summ:
+                print(f"summary\t{ver}|{part}")
+        return
+
+    if a.cmd == "open":
+        for r in rows:
+            pct, rem = ws.cell(r, col["Completion %"]).value or 0, ws.cell(r, col["Remaining"]).value
+            if pct < 1:
+                print(f"{ws.cell(r, 1).value}\t{ws.cell(r, col['Version']).value}\t{ws.cell(r, col['App Part']).value}\t"
+                      f"{round(pct * 100)}%\t{ws.cell(r, col['Task Name']).value}\t| REMAINING: {rem}")
+        return
+
+    if a.cmd == "add":
+        items = json.loads(Path(a.arg).read_text(encoding="utf-8"))
+        vdates = changelog_versions()
+        nxt = max((int(re.search(r"(\d+)$", ws.cell(r, 1).value).group(1)) for r in rows), default=0)
+        r = max(rows) + 1
+        for it in items:
+            nxt += 1
+            done = it.get("completed", True)
+            vals = {
+                "Task ID": f"X - MA{nxt:03d}", "Task Name": it["name"], "Functionality": it["functionality"],
+                "Version": it["version"], "App Part": it["part"],
+                "Start Date": vdates.get(it["version"], date.today()) if done else None,
+                "Completion Date": date.today() if done else None, "Deadline": "None",
+                "Priority (importance)": it["priority"], "Total Units": 1,
+                "Completion %": it.get("pct", 100) / 100, "Remaining": it.get("remaining") or "-",
+                "Phase": it.get("phase", 0), "Comments": it.get("comment", ""),
+            }
+            for c, h in enumerate(L.head, 1):
+                ws.cell(r, c, vals.get(h))
+            style_row(ws, r, L)
+            print(f"added {vals['Task ID']}  {it['name']}")
+            r += 1
+        refresh_table_ref(ws, L)
+
+    if a.cmd == "update":
+        hit = [r for r in rows if ws.cell(r, 1).value == a.arg]
+        if not hit:
+            sys.exit(f"No row with id {a.arg!r}")
+        r = hit[0]
+        if a.pct is not None:
+            ws.cell(r, col["Completion %"], a.pct / 100)
+        if a.remaining is not None:
+            ws.cell(r, col["Remaining"], a.remaining)
+        if a.comment is not None:
+            ws.cell(r, col["Comments"], a.comment)
+        if a.phase is not None:
+            if "Phase" not in col:
+                sys.exit("No Phase column in the task log")
+            ws.cell(r, col["Phase"], int(a.phase) if a.phase.isdigit() else a.phase)
+        print(f"updated {a.arg}: {ws.cell(r, col['Task Name']).value}")
+
+    rebuild_sheet2(wb, L)
+    rebuild_sheet3(wb, L)
+    # Write to a temp file in the same folder, then swap it in, so a crash or a reader
+    # mid-write never sees a half-written file.
+    tmp = path.with_name(f".{path.stem}.tmp{path.suffix}")
+    try:
+        wb.save(tmp)
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+if __name__ == "__main__":
+    main()

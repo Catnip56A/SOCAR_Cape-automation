@@ -19,15 +19,20 @@ See [USER_GUIDE.md](USER_GUIDE.md) for full step-by-step usage of all three tool
 - Configurable join key (default Stock Code) and optional stock code filters, independently for each side
 - Comparison results across **Matched**, **Only in MR**, **Only in CTR**, **Needs Review**, and **Error Data** tabs
 - **Combined View** — aggregates matched rows to one line per Stock Code, summing Qty across every contributing document per side; Stock Codes whose rows disagree on Unit are held out for manual approval in Needs Review
-- **Compare Values** — highlights Qty/Unit mismatches (or, in Combined View, Stock Codes spanning more than one source document), with ↑/↓ navigation between them
+- **Filter documents** — show only rows from chosen MR/CTR files and sheets using `MR:<doc>><sheet>` terms joined with and/or/not and brackets; view-only, downloads keep everything
+- **Statistics** — SAGE expected cost of the MR and CTR files split into rechargeable / non-rechargeable / unknown (amounts and percentages, per document and in total, optional × quantity), calculated in the background; items not in SAGE or with no quantity are flagged and not counted. A **Type** filter (Equipment / Consumable) works on the result tabs; the SAGE Export path is shared with the CTR Generator; included in the Excel report and saved comparisons
+- **Compare Values** — highlights Qty/Unit and Rate-vs-Rechargeable mismatches (in Combined View, a separate Compare Values button flags Qty-total/Unit differences, while Show Combined marks Stock Codes spanning more than one source document), with ↑/↓ navigation between them
 - Download a multi-sheet Excel report, and save/reload a full comparison later without the original files
 - Sortable result tables (click any column header); right-click a header to hide a column (visual only — the Excel report keeps every column)
 
 ### CTR Generator
 - Reads a CTR Request (Manpower, Plant & Equipment, Consumables, plus an Additional Info/Scaffold/Transport block) from a Combined DB workbook
-- Matches each line against the AZN Pricebook (manpower) and SAGE/equipment-names reference data (equipment, consumables), with on-screen review and correction before anything is written
+- Matches each line against the AZN Pricebook (manpower) and USD Pricebook (equipment) and SAGE Export (consumables), with an optional equipment-names bridge, with on-screen review and correction before anything is written
+- Cost statistics for the loaded request (SAGE expected cost, rechargeable vs non-rechargeable); values the request does not state (quantities, days, rates, …) are never assumed — they stay blank and red, and Generate leaves those rows out after you confirm; the statistics can be saved as Excel
+- A **Go to value** button (next / pick from a list) for missing values and Stock Codes not in SAGE, and **Ctrl+F** find in every table
 - Remembers manual corrections ("Saved Renames") so the same CTR Request description matches automatically next time
 - Fills the AZN and USD CTR templates with all rows, totals, and header fields, and exports each to PDF via LibreOffice
+- A **Settings** window (gear button at the left of the tab bar) for the remembered SAGE path, folders and saved aliases / renames / presets (each list can be reset, with a backup copy)
 - Presets for recurring project field combinations (client, location, scope, revision, job ref, output folder)
 
 ### CTR Tracker
@@ -138,6 +143,9 @@ SOCAR_Cape-automation/
 ├── app.py                  # Main window: MR vs CTR Comparator tab + wiring for the other two
 ├── sheet_parser.py         # Comparator's Excel parsing logic (named-range table detection)
 ├── comparison_history.py   # Save/reload full comparisons
+├── doc_filter.py           # "Filter documents" expression parser/evaluator
+├── cost_stats.py           # Cost statistics logic (SAGE expected cost, rechargeable split) — no Qt
+├── stats_view.py           # Statistics tab widget + background worker (also embedded in the CTR Generator)
 ├── app_logging.py          # Rotating app.log / crash.log setup
 ├── ctr_tools/               # CTR Generator + CTR Tracker
 │   ├── window.py            # CTR Generator tab

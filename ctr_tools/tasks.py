@@ -45,6 +45,9 @@ class Job:
     label: str
     steps: list[Step]
     stoppable: bool = True
+    # Tasks all start at once (e.g. the pricebook load pool), so by the time
+    # Stop is pressed there is usually nothing left to skip.
+    parallel: bool = False
     created: float = field(default_factory=time.time)
     stop_requested: bool = False
     finished: float | None = None
@@ -129,8 +132,10 @@ class TaskRegistry:
         self._lock = threading.RLock()
         self._jobs: list[Job] = []
 
-    def begin_job(self, label: str, step_names: list[str], stoppable: bool = True) -> Job:
-        job = Job(label=label, steps=[Step(n) for n in step_names], stoppable=stoppable)
+    def begin_job(self, label: str, step_names: list[str], stoppable: bool = True,
+                  parallel: bool = False) -> Job:
+        job = Job(label=label, steps=[Step(n) for n in step_names], stoppable=stoppable,
+                  parallel=parallel)
         with self._lock:
             self._jobs.append(job)
             del self._jobs[:-_MAX_JOBS_KEPT]

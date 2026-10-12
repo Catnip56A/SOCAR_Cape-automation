@@ -1,89 +1,47 @@
-# Handoff — 2026-10-01
+# Handoff — 2026-10-11 (session 4)
 
 ## Working on
-CTR Tracker write path, released as v1.0.16 (committed, 41b6cfe, working tree
-clean at last check). After the release the session was Q&A on how the tracker
-and the MR vs CTR comparator behave; no code changed after the commit.
+**MA131 — cost statistics (SAGE expected cost, rechargeable vs non-rechargeable)** for the MR vs CTR Comparator and the CTR Generator.
+Built, documented (CHANGELOG `[Unreleased]`, USER_GUIDE, README) and **uncommitted**, on top of the still-uncommitted 1.0.19 work (document filter etc.).
+Only verified in an offscreen Qt window with the real `TEST_Files` MR/CTR/SAGE files (sandboxed XDG dirs; scratch tests live in the session scratchpad
+under `step1/`, not in the repo). **Nothing has been seen on the user's real screen yet** except that they ran it once and hit the crash below.
+- `cost_stats.py` (pure logic), `stats_view.py` (`StatsPanel`, `StatsWorker`, `_FlowLayout`), shared SAGE path, Statistics tab, Type filter, no-quantity rows in Needs Review, Excel sheets, saved-comparison `stats` block, Generator cost box, Non ÷ Rech column.
+- Late changes in the session: crash fix (window min height), top-area layout (Compare | or | Load Comparison on one line, SAGE field below), toolbar wrap, ratio column, deferred job start.
+- VERSION is still 1.0.19 (not bumped).
 
 ## Key decisions (with reasoning)
-- **Root cause of out-of-order revisions:** the user's real tracker pre-creates
-  *three* blank rows per CTR (rows 8296–8298 for CTR-26-281, height 31.5;
-  neighbouring CTRs have one 15-height row). The writer took the first blank
-  row and the "empty" branch skipped all revision-order logic. Confirmed against
-  the pristine `TEST_Files/CTR tracker/CTR-Tracker copy.xlsm`, not the
-  "error files" copy (that is an output).
-- **Fixed mode, no UI choices** (user's call after consulting their users):
-  every write is `allow_overwrite=True, revision_mode="separate"`. The old
-  "skip a filled row" default is gone; the backup checkbox (default on) is the
-  only safety net. A spare row is used only if it keeps ascending revision
-  order, else a row is inserted via Excel and the spare is listed in the results
-  dialog. No Excel → the entry is skipped with a message, never placed out of
-  order.
-- **Beyond the literal ask:** re-loading an existing revision now overwrites
-  that row in place even when spares exist (it used to fill another spare and
-  duplicate). The user believed it already did this; the memory rule says it must.
-- **USD-shows-as-date was OUR bug.** I first accepted the user's "it's the
-  file author's" without checking and was wrong: the template has the same
-  styles. A hard-coded style id (159) is a date format in the real tracker.
-  Lesson: compare template vs output before attributing a formatting problem to
-  the input. Fixed by looking up the style by number format in the tracker's own
-  `styles.xml` (`value_format_by_currency`). Old USD rows written by earlier
-  versions are NOT repaired.
-- **Empty formula cells after a write:** writer saves formulas with empty `<v/>`
-  and `calcPr` has no `fullCalcOnLoad`, so Excel doesn't recalculate on open.
-  The user chose docs-only: workaround is Ctrl+Alt+Shift+F9 (USER_GUIDE,
-  CHANGELOG "Known issues"). Plain F9 doesn't work.
-- `pyproject.toml` version deliberately left alone (VERSION is the source).
+- **Rechargeability comes from the documents, not SAGE.** Comparator: MR `Rechargeable` column; CTR `Rate` (number = rechargeable, `NONRECHARG` = not). Generator: the row's Rate/Price cell, i.e. "as in CTR generation" — the user rejected using the request sheet's own tag. SAGE supplies only `local_expect_cost`. User said the department may change this; marked "up for discussion" in code, USER_GUIDE, CHANGELOG and the MA131 task-log row.
+- **Not in SAGE ≠ Unknown.** Unknown = the document gives no rechargeability. A Stock Code with no SAGE cost is shown red, **not counted**; the user can type a unit cost (double-click Unit cost; per Stock Code; SAGE wins if it later has the code) or update SAGE and press Reload statistics. Percentages are shares of the costed total, so rech % + non % < 100 when Unknown exists.
+- **Non ÷ Rech** = Non-Rechargeable cost ÷ Rechargeable cost in money, derived from the cost columns so it follows the quantity switch (**on by default**, user's explicit requirement). `n/a` when there is no rechargeable cost; blank on item lines; blank in Excel when undefined.
+- **Equipment/Consumable type** = the CTR `_Section` the Stock Code is listed under ("rule 1"). MR-only codes are always Uncategorised; a code in both sections is Uncategorised. The SAGE `EQUIPMENT` tag was measured (only ~76% of the test CTR's equipment carries it) and not used.
+- **Costing duplicates:** SAGE has ~117k rows but ~4.9k products; first row per product wins — the Generator's `_match_lookup` rule; the Generator box calls `_match_lookup` itself so both tabs cost identically.
+- **Job model:** Comparator stats = parallel `Job` in `TASKS`, a token drops stale results; started ~0.4 s **after** the comparison is shown (`_start_stats_job_later`), low thread priority. Measured: statistics add only ~25 ms to Compare itself; the rest of the ~1.1 s Compare is existing work (`_aggregate_combined` alone 0.76 s). The first SAGE parse takes 14–17 s inside the app with one ~0.9 s UI freeze (GIL); a separate process would fix it but can't be tested for the PyInstaller Windows exe, so it was not done. Generator stats are synchronous + debounced (250 ms, via `_recalc_usd_totals`) since SAGE is already in memory.
+- **Document filter on Statistics pairs per Stock Code** (a row stays if its doc/sheet + a same-code partner on the other side — or none — satisfies the expression), like Matched/Only. Document-level pairing was too loose.
+- **Quantity is never assumed.** User said "remove the append function"; read as removing the silent `or 1` defaults at request load AND in `_generate` (a blank/invalid quantity and a scaffold with no tonnage became 1). Generate is now blocked with a jump-to-empty-cell warning. Quantity 0 stays 0. Equipment Days default (30) untouched.
+- **Excel/Save keep everything**; the document/type filters are view-only (user's earlier rule). Saved comparisons carry an optional `stats` key, schema version unchanged; old saves load without it and the Type box is disabled for them.
+- **Window minimum height matters on the user's WSLg screen.** Their log: `xdg_surface buffer (1280 x 790) does not match the configured maximized state (1280 x 752)` right after "Statistics ready". Measured cause: the Statistics tab page was 55 px taller than the other tab pages (a tab page's minimum height counts toward the window's; `setTabVisible(False)` does not remove it) → window min 729 vs 674 without it (v1.0.18 = 646; the document filter row of 1.0.19 is +28). Fix: the page is in a `QScrollArea` (`self._stats_tab`); Compare and Load Comparison share one line (user's layout request) with the SAGE field under them and 8 px spacing → min **650**. **Not confirmed on the user's machine** (their fonts/DPI make the real minimum larger than offscreen's). Any new row/tab/banner in the Comparator can break maximized windows again — check `w.minimumSizeHint().height()` after Compare.
+- No per-widget QSS on containers in the new UI (breaks tooltips for the subtree — see memory); only leaf QLabels are styled. The picker is in the pinned top area, not the results panel (hidden until the first Compare).
+- Statistics toolbar uses a `_FlowLayout` so it wraps in narrow windows (the dropdowns/Reload were cut off at 800 px). I read the user's "dropdowns hidden when the window is minimized" as this; not confirmed.
 
 ## Current state
-- v1.0.16 committed. The user checked the tracker changes on real Windows/Excel
-  ("I checked, its fine"), without detailing which cases they ran.
-- On Linux only the planning logic was replayed (fake row-inserter standing in
-  for Excel, on scratchpad copies); results dialog and confirm text were never
-  exercised on Linux.
-- Facts established this session that are not in the code comments:
-  - **AZN tracker rows** get C, K, L, N, O, P, S, AC, AI (if a revision exists)
-    and formulas AJ, AM (Labor), AU, AX. Equipment/3rd party/transport/
-    consumables columns are only filled for USD. **The AZN CTR's Third Party
-    section (transport) is not carried into the tracker's 3rd party column** —
-    looks like a gap, not traced whether intended.
-  - **MR vs CTR "Flag" column** (Combined view and its Excel report only):
-    blank = units agree; "⚠ Unit conflict — approved" = the user approved
-    summing an item whose MR/CTR units disagree (Needs Review → Approve);
-    Reject moves it to Error Data. Now documented in USER_GUIDE.md (see
-    "Decisions made after the commit").
-
-## Decisions made after the commit (2026-10-01)
-- **`fullCalcOnLoad` stays OFF for now.** The user will keep using the
-  Ctrl+Alt+Shift+F9 workaround (documented in USER_GUIDE + CHANGELOG "Known
-  issues"). Revisit only if it becomes a real pain for users. The permanent fix
-  would be `fullCalcOnLoad="1"` in `write_entries_fast`
-  (`ctr_tools/tracker_fast.py`); cost: slightly slower open and a "save
-  changes?" prompt on close. Worth timing on the real ~8000-row tracker first.
-- **Dropped:** read-only scan for old USD rows with the date style; AZN Third
-  Party → tracker gap. The user says neither is needed.
-- **Revision correction already exists:** after loading a CTR file, the add
-  form's Revision field (`tracker_window.py` `_revision_edit`, filled in
-  `_load_fields`, read in the add handler) is editable, so mistakes are fixed
-  there before the entry is added to the batch. This explains the `AI = 1` on
-  row 8297 of the "rev1" AZN file (E5 = 0): it was typed in the window. Not
-  checked: whether a revision can be changed after an entry is already in the
-  batch table.
-- **Flag column** is now explained in USER_GUIDE.md ("Combined View, Needs
-  Review and Error Data" section, after Compare Values). Doc-only; not checked
-  against a real Combined-view run.
+- Tested offscreen and passing (re-run after the last changes): cost_stats unit checks incl. manual costs; SAGE-path sync both ways; full Comparator flow (no-path warning → loading → ready, expand docs, manual unit cost, qty switch, type/bucket filters, document filter, Reload, stale-result ignore, bad path); Type filter in all tabs incl. Combined; no-quantity rows in Needs Review; Excel opened with openpyxl (all 286 item rows present while the view showed 74; totals add up); save → reopen restores the same totals without a SAGE job; old save without `stats` loads; Generator box (SAGE-not-loaded warning, auto-fill after Load Files, unit costs equal the Generator's own lookup — 0 mismatches, empty/invalid quantity tinted red, jump button, Generate blocked, scaffold excluded); ratio column (MR 1.34 / CTR 1.24, changes with the switch); deferred start (Compare returns before the job starts, double Compare → one job).
+- **Not verified:** real screen (layout, colours, column widths, the crash fix); the Inspector Stop button for the stats job; a PyInstaller build with `cost_stats.py`/`stats_view.py` (top-level imports like `doc_filter.py`, `app.spec` unchanged); the 1.0.19 installer upgrade; large real comparisons (saved `stats` holds one record per MR/CTR row; Excel sheets use default column widths).
+- `~/.config/SOCAR/CTRGenerator.conf` showed mtime 13:27:11 close to one of my early test runs; its content had none of my fake paths and later runs did not change it — most likely the user's own app. Unproven.
+- Task log (updated this session): MA131 at 90% (built; real-screen checks of the Statistics tab and Generator box + the department's rechargeability answer remain), MA124 at 8%, MA132 100% (visual part done), MA133 added (talk with operations about a new request form), MA134 added (user will test that a new version installs over the previous one without uninstalling by hand). `missing` still lists 1.0.19 — no rows added because it is uncommitted.
 
 ## Open questions
-- Carried over (to be discussed later): named-range scoping in `_collect_named_range_refs`, real-MR
-  check of the cover-sheet toggle, AZN `Estimated CTR Total` omitting
-  Contingency, Word template blocker, `cbar_rates.py` wiring.
+- **Rechargeability source** needs the department's answer (user already asked them); both tabs use the document/Generator rule for now.
+- **Scaffold in the Generator box** excluded for now — the user will clarify later. Unmatched (✗) Generator lines are left out of the box with a grey note rather than shown as a bucket — confirm that is wanted.
+- **Generator quantity change** (blank no longer = 1; Generate blocked) — warn the people who use the Generator; user may want the same for manpower `Num Employees` (its `or 1` default is untouched).
+- **Version:** MA131 entries sit under `[Unreleased]`; decide whether they ship in 1.0.19 or a new 1.0.20 (and bump VERSION).
+- **Offered, no answer:** (a) cache the SAGE costs next to the settings (keyed by path + mtime) so only the first run per SAGE file is slow; (b) speed up `_aggregate_combined` (0.76 s of Compare; a separate subsystem, wants a go-ahead first); (c) a separate-process SAGE read (needs a Windows exe test).
+- **Before calling 1.0.19 complete (carried over, and now a task-log row):** install 1.0.18, run `Commercial-automation_Setup_1.0.19.exe` over it with the app open and closed, without uninstalling the old version by hand; check Add/Remove, version, presets/renames, shortcuts. Go-ahead still needed to apply the proposed `setup.iss` changes (`CloseApplications=yes`, `RestartApplications=no`, `DisableDirPage=auto`, `DisableProgramGroupPage=auto`) and the "Updating" note, before building the installer.
+- Carried over from session 3: 3-state Diff sort vs header-click cycle; ↑/↓ mismatch arrows follow original row order, not sorted order; arrows that jump only between red or only orange rows; raising the 40-entry suggestion cap; add `logs/` to `.gitignore`; native-QSettings sandbox rule into CLAUDE.md "Testing Safety"; `fullCalcOnLoad="1"` for tracker formulas; who maintains the AZN/USD templates for Sara.
+- Commit? Everything above plus the earlier uncommitted work.
 
 ## Files changed
-None since commit 41b6cfe (this handoff aside). The commit touched
-`ctr_tools/tracker_fast.py`, `tracker_window.py`, `config.py`,
-`template_config.json`, `VERSION`, `CHANGELOG.md`, `USER_GUIDE.md`, `README.md`.
-`.kilo/worktrees/galvanized-plier/` holds stale copies — deliberately untouched.
+New: `cost_stats.py`, `stats_view.py` (plus `doc_filter.py` from session 3).
+Modified: `app.py` (SAGE row + new top-area layout, Statistics tab in a scroll area, `_start_stats_job_later`/`_start_stats_job`/`_on_stats_done`/`_stats_doc_pred`/`_load_stats_state`/`_stats_snapshot`, Type filter `_type_combo`/`_type_mask`/`_type_tips`, no-quantity section in Needs Review, extra Excel sheets), `ctr_tools/window.py` (`sage_path_changed`/`set_sage_path`/`loaded_sage_df`, `_build_stats_section` and helpers, `_request_qty_text`, `_SCAFFOLD_ROLE`, `_generate` quantity check), `comparison_history.py` (optional `stats`), `CHANGELOG.md`, `USER_GUIDE.md`, `README.md`.
 
 ## Next step
-Carried-over items, to be discussed with the user: real-MR check of the
-cover-sheet toggle first.
+Have the user try, on their own screen and with the window maximized: a **fresh Compare** with a real SAGE file (Statistics tab, banner, the crash fix, the new line layout) and the Generator box after Load Files on a real request (empty-quantity warning). If the crash returns, get the new `app.log` lines and how the window was sized. Then: version number + commit, apply the `setup.iss` change, build the installer on Windows and run the installer-upgrade test (new task-log row), then testing with Sara (MA124). Raise MA131 to 100% after the real-screen checks and the department's answer; run `/handoff` again when 1.0.19 is committed so its rows get logged.

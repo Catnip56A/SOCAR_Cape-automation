@@ -295,6 +295,48 @@ def parse_sage(src) -> pd.DataFrame:
 # Equipment names database (stock code → canonical SAGE lookup name)
 # ─────────────────────────────────────────────────────────────────────────────
 
+def parse_encoding_info(src) -> dict:
+    """
+    Reads the manpower encoding rules from the Combined DB workbook (the same
+    file as the CTR Request):
+
+      variants    {ROLE (upper): [valid encodings, in sheet order]} — from the
+                  "127 Doc - Possible Variants" sheet (role in column A, its
+                  valid encodings across the row).
+      onshore     [ROLE (upper), …] — the roles that are always Onshore, from
+                  ENC_LIST (column H; the sheet says "edit this list to change").
+
+    Either part is empty when its sheet is missing; nothing is assumed in its
+    place. Sheet names and the ENC_LIST column come from the "encoding"
+    section of template_config.json.
+    """
+    enc_cfg = CFG.get("encoding", {})
+    try:
+        xl = pd.ExcelFile(_open(src))
+    except Exception as e:
+        raise _friendly_open_error(e, src, "Encoding rules", "(workbook)") from e
+    variants: dict[str, list[str]] = {}
+    onshore: list[str] = []
+
+    needle = str(enc_cfg.get("variants_sheet_contains", "possible variants")).lower()
+    vname = next((n for n in xl.sheet_names if needle in n.lower()), None)
+    if vname:
+        df = xl.parse(vname, header=None, dtype=str).fillna("")
+        for row in df.itertuples(index=False):
+            role = str(row[0]).strip().upper()
+            if role:
+                variants[role] = [str(c).strip().upper() for c in row[1:] if str(c).strip()]
+
+    oname = next((n for n in xl.sheet_names
+                  if n.strip().lower() == str(enc_cfg.get("onshore_sheet", "ENC_LIST")).lower()), None)
+    if oname:
+        col = int(enc_cfg.get("onshore_col", 7))
+        df = xl.parse(oname, header=None, dtype=str).fillna("")
+        if df.shape[1] > col:
+            onshore = [str(v).strip().upper() for v in df.iloc[:, col] if str(v).strip()]
+    return {"variants": variants, "onshore": onshore}
+
+
 def parse_equip_names_db(src) -> pd.DataFrame:
     """
     Reads the "CTR_NAMES_DB_USD" sheet of the Combined DB workbook.

@@ -34,6 +34,7 @@ from html import escape
 from pathlib import Path
 
 import pandas as pd
+from find_bar import install_find
 from PySide6.QtCore import QSettings, QTimer, QUrl, Qt
 from PySide6.QtGui import QDesktopServices, QFont, QGuiApplication
 from PySide6.QtWidgets import (
@@ -458,6 +459,7 @@ def _table(headers: list[str], stretch_col: int | None = None) -> QTableWidget:
     t.horizontalHeader().setHighlightSections(False)
     if stretch_col is not None:
         t.horizontalHeader().setSectionResizeMode(stretch_col, QHeaderView.ResizeMode.Stretch)
+    install_find(t)
     return t
 
 
@@ -717,6 +719,7 @@ class StorageTab(QWidget):
         super().__init__()
         self._win = win
         self._tree = QTreeWidget()
+        install_find(self._tree)
         self._tree.setHeaderLabels(["Item", "Path", "✓", "Size", "Modified", "In app"])
         self._tree.headerItem().setToolTip(2, "Does the path exist?")
         self._tree.headerItem().setToolTip(5, "Does the app itself hold this file's contents in memory? (hover a row for details)")
@@ -908,6 +911,7 @@ class TasksTab(QWidget):
     def __init__(self):
         super().__init__()
         self._tree = QTreeWidget()
+        install_find(self._tree)
         self._tree.setHeaderLabels(["Task", "Status", "Time", "Detail"])
         self._tree.setRootIsDecorated(True)
         self._tree.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
@@ -920,7 +924,9 @@ class TasksTab(QWidget):
         note = QLabel("Tasks run in the order shown. Stop only takes effect between tasks — "
                       "one that has already started always finishes. Single-task jobs "
                       "(such as a tracker write) can't be stopped, because stopping half way "
-                      "is exactly what could damage the file.")
+                      "is exactly what could damage the file. Jobs whose tasks run at the same "
+                      "time (such as loading pricebook files) have already started all of "
+                      "them, so Stop has little or no effect on those.")
         note.setWordWrap(True)
         note.setStyleSheet(f"color: {MUTED}; font-size: 11px;")
         row = QHBoxLayout()
@@ -932,6 +938,14 @@ class TasksTab(QWidget):
         lay.addWidget(self._tree, 1)
         lay.addWidget(note)
 
+    @staticmethod
+    def _job_note(job) -> str:
+        if not job.stoppable:
+            return "can't be stopped"
+        if job.parallel:
+            return "runs in parallel — Stop has little effect"
+        return ""
+
     def _on_stop(self):
         TASKS.stop_all()
         self.refresh()
@@ -941,7 +955,7 @@ class TasksTab(QWidget):
         self._tree.clear()
         for job in reversed(TASKS.jobs()):
             top = QTreeWidgetItem([job.label, job.status, fmt_seconds(job.seconds),
-                                   "" if job.stoppable else "can't be stopped"])
+                                   self._job_note(job)])
             f = top.font(0)
             f.setBold(True)
             top.setFont(0, f)
@@ -1259,7 +1273,7 @@ def build_snapshot(win, dock=None) -> str:
         jobs = TASKS.jobs()
         for job in jobs:
             out.append(f"{job.label} — {job.status}, {fmt_seconds(job.seconds)}"
-                       + ("" if job.stoppable else " (can't be stopped)"))
+                       + (f" ({TasksTab._job_note(job)})" if TasksTab._job_note(job) else ""))
             for n, st in enumerate(job.steps, start=1):
                 out.append(f"    {n}. {st.name} — {st.status}, {fmt_seconds(st.seconds)}"
                            + (f" ({st.detail})" if st.detail else ""))
