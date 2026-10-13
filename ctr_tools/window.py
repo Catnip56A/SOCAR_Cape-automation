@@ -67,6 +67,7 @@ from find_bar import install_find
 from hover_text import install_elided_tooltips
 from stats_view import StatsPanel
 from ctr_tools.presets import load_presets, save_presets, _PRESET_FIELDS
+from ctr_tools.source_choices import load_choices, save_choices
 from ctr_tools.builder_azn import (
     activities_label,
     build_azn,
@@ -1465,6 +1466,7 @@ class CTRGeneratorWidget(QWidget):
     # restored). The MR vs CTR tab keeps its own SAGE field in step with this
     # one — see MainWindow, and set_sage_path() below.
     sage_path_changed = Signal(str)
+    choices_reloaded = Signal(object)          # the saved rechargeability choices were re-read (Settings reset / restore)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -2051,6 +2053,8 @@ class CTRGeneratorWidget(QWidget):
                          "cost, so the CTR's internal SC cost cell stays EMPTY for it until you do.")
         self._stats_panel.reload_requested.connect(self._refresh_stats)
         self._stats_panel.row_clicked.connect(self._show_stats_row)
+        self._stats_panel.choices_changed.connect(self._on_choices_changed)
+        self._stats_panel.set_choices(load_choices())          # remembered from earlier runs
         gl.addWidget(self._stats_panel)
 
         self._stats_note_lbl = QLabel("")
@@ -2367,6 +2371,8 @@ class CTRGeneratorWidget(QWidget):
         """Recompute the statistics box from the Equipment and Consumables
         tables. SAGE is already in memory (the same table the rows are
         matched with), so this is instant and runs on the UI thread."""
+        if self._apply_all_choices_to_lines():          # a chosen SAGE value changed a line: this runs again
+            return
         self._refresh_stats_inner()
         self._update_goto_button()      # after the panel is rebuilt (it knows the not-in-SAGE codes)
 
@@ -2405,7 +2411,21 @@ class CTRGeneratorWidget(QWidget):
                               "local_expect_cost", key)
             if m:
                 cost_map[cost_stats.norm_key(key)] = m[1]
-        panel.set_rows(cost_stats.cost_rows(items, cost_map, True))
+        # SAGE's own rechargeability for each code, to spot lines the CTR calls
+        # one thing and SAGE the other (those are listed under "Disparities").
+        sage_tags: dict[str, str] = {}
+        sage_names: dict[str, str] = {}
+        index = _lookup_index(self._sage_df, "product")
+        for key in set(items["key"]):
+            nr = _sage_non_recharge(self._sage_df, key)
+            if nr is not None:
+                nk = cost_stats.norm_key(key)
+                sage_tags[nk] = cost_stats.NON_RECHARGEABLE if nr else cost_stats.RECHARGEABLE
+                pos = index.get(key.strip().lower())
+                if pos is not None:
+                    sage_names[nk] = str(self._sage_df.iloc[pos]["long_description"]).strip()
+        panel.set_rows(cost_stats.cost_rows(items, cost_map, True, sage_tags=sage_tags,
+                                            sage_names=sage_names))
 
     def _sage_cost_of(self, desc_item, key: str):
         """SAGE's unit cost for a line — or the one typed into the statistics
@@ -2415,6 +2435,98 @@ class CTRGeneratorWidget(QWidget):
         if cost is None:
             cost = self._stats_panel.manual_costs().get(cost_stats.norm_key(key))
         return cost
+
+    # ── source choices for rechargeability (disparities) ─────────────────────
+
+    def stats_panel(self) -> StatsPanel:
+        return self._stats_panel
+
+    def source_choices(self) -> dict[str, str]:
+        return self._stats_panel.choices()
+
+    def set_source_choices(self, choices: dict[str, str]) -> None:
+        """The choices were changed in another statistics list: take them over."""
+        self._stats_panel.set_choices(choices)
+        save_choices(self._stats_panel.choices())
+        self._refresh_stats()
+
+    def _on_choices_changed(self, choices: dict) -> None:
+        save_choices(choices)
+        self._refresh_stats()
+
+    def _apply_all_choices_to_lines(self) -> bool:
+        """Where the user chose SAGE as the source of a Stock Code's rechargeability,
+        make the Equipment / Consumables lines of that code say what SAGE says:
+        SAGE non-rechargeable → the rate/price cell becomes NONRECHARG; SAGE
+        rechargeable and the cell is NONRECHARG → the cell is emptied (a rate or
+        price must be entered — nothing is assumed). Choosing the document changes
+        no cell. Returns True when a cell was changed."""
+        sage_codes = {k for k, v in self._stats_panel.choices().items() if v == "SAGE"}
+        if not sage_codes or self._sage_df.empty:
+            return False
+        changed = False
+        for tbl, c_match, c_code, c_desc, c_rate, c_status in (
+                (self._req_equip_tbl, _EQ_MATCH, _EQ_CODE, _EQ_DESC, _EQ_RATE, _EQ_STATUS),
+                (self._req_cons_tbl, _CS_MATCH, _CS_CODE, _CS_DESC, _CS_PRICE, _CS_STATUS)):
+            for r in range(tbl.rowCount()):
+                st = tbl.item(r, c_status)
+                if not (st and st.text().startswith("✓")):
+                    continue
+                d = tbl.item(r, c_desc)
+                if d is not None and d.data(_SCAFFOLD_ROLE):
+                    continue
+                def _t(c, _r=r, _tb=tbl):
+                    it = _tb.item(_r, c)
+                    return it.text().strip() if it else ""
+                key = _t(c_match) or _t(c_code) or _t(c_desc)
+                nk = cost_stats.norm_key(key)
+                if nk not in sage_codes:
+                    continue
+                nr = _sage_non_recharge(self._sage_df, key)
+                if nr is None:
+                    continue
+                cell = _t(c_rate).upper()
+                if nr and cell != "NONRECHARG":
+                    tbl.item(r, c_rate).setText("NONRECHARG")
+                    changed = True
+                elif not nr and cell == "NONRECHARG":
+                    tbl.item(r, c_rate).setText("")
+                    changed = True
+        return changed
+
+    def _nonpositive_quantities(self, skip: set) -> tuple[list[str], list[str]]:
+        """Quantities of 0 or less on the rows that will go into the CTR:
+        (manpower / equipment / consumables entries, transport entries). Missing
+        values are not listed here — those rows are handled by _incomplete_cells."""
+        def val(tbl, r, c):
+            it = tbl.item(r, c)
+            try:
+                return float(it.text()) if it else None
+            except ValueError:
+                return None
+        general, transport = [], []
+        for tbl, section, c_desc, c_status, fields in (
+                (self._req_manpower_tbl, "Manpower", _MP_DESC, _MP_STATUS,
+                 ((_MP_NUMEMP, "Num Employees"), (_MP_QTY, "Hours"))),
+                (self._req_equip_tbl, "Equipment", _EQ_DESC, _EQ_STATUS, ((_EQ_QTY, "Qty"),)),
+                (self._req_cons_tbl, "Consumables", _CS_DESC, _CS_STATUS, ((_CS_QTY, "Qty"),)),
+                (self._transport_tbl, "Transport", _TR_DESC, None, ((_TR_QTY, "Qty"),))):
+            for r in range(tbl.rowCount()):
+                if (id(tbl), r) in skip:
+                    continue
+                if c_status is not None:
+                    st = tbl.item(r, c_status)
+                    if not (st and st.text().startswith("✓")):
+                        continue
+                d = tbl.item(r, c_desc)
+                desc = (d.text().strip() if d else "") or f"row {r + 1}"
+                for col, field in fields:
+                    v = val(tbl, r, col)
+                    if v is not None and v <= 0:
+                        entry = f"{desc} — {field} {v:g}"
+                        (transport if tbl is self._transport_tbl else general).append(
+                            entry if tbl is self._transport_tbl else f"{section}: {entry}")
+        return general, transport
 
     def _lines_without_sage_cost(self, skip: set) -> list[str]:
         """Descriptions of the ✓ Equipment/Consumable lines that will go into
@@ -2771,6 +2883,7 @@ class CTRGeneratorWidget(QWidget):
             "aliases": sum(len(v) for v in self._aliases.values()),
             "renames": sum(len(v) for v in self._desc_renames.values()),
             "presets": len(self._presets),
+            "choices": len(self._stats_panel.choices()),
         }
 
     def reload_saved_data(self) -> None:
@@ -2781,6 +2894,9 @@ class CTRGeneratorWidget(QWidget):
         self._desc_renames = load_desc_renames()
         self._presets = load_presets()
         self._refresh_preset_combo()
+        self._stats_panel.set_choices(load_choices())
+        self._refresh_stats()
+        self.choices_reloaded.emit(self._stats_panel.choices())
 
     def open_alias_manager(self, category: str | None = None) -> None:
         self._open_alias_manager(category)
@@ -4377,6 +4493,16 @@ class CTRGeneratorWidget(QWidget):
         if self._req_manpower_tbl.rowCount() == 0:
             errors.append("Manpower table is empty — load a CTR Request or add rows first.")
 
+        self._refresh_stats()
+        open_disp = self._stats_panel.disparity_table()
+        if len(open_disp):
+            codes = sorted(set(open_disp["Stock Code"]))
+            shown_d = ", ".join(codes[:6]) + (f" … (+{len(codes) - 6} more)" if len(codes) > 6 else "")
+            errors.append(
+                f"{len(codes)} Stock Code(s) have a rechargeability that differs from SAGE: {shown_d}. "
+                "Open Disparities in the Cost statistics box and choose, for each, which source is right "
+                "(the document or SAGE) before generating.")
+
         _waiting = sum(
             1 for tbl, c in ((self._req_manpower_tbl, _MP_STATUS), (self._req_equip_tbl, _EQ_STATUS),
                              (self._req_cons_tbl, _CS_STATUS))
@@ -4427,6 +4553,17 @@ class CTRGeneratorWidget(QWidget):
                     "so the internal SC cost cell in the CTR is left EMPTY for them. To fill it, press "
                     "Cancel and type each cost into the Cost statistics box (double-click the red row's "
                     "Unit cost); otherwise generate as it is.")
+        zero_general, zero_transport = self._nonpositive_quantities(bad_rows)
+        if zero_transport:
+            warnings.append(
+                "Transport line(s) with a quantity of 0 or less are HIDDEN in the AZN CTR (their total "
+                "counts as 0, and if every line is like that the section is left out): "
+                + "; ".join(zero_transport))
+        if zero_general:
+            shown_z = "; ".join(zero_general[:8]) + (f"; … (+{len(zero_general) - 8} more)" if len(zero_general) > 8 else "")
+            warnings.append(
+                f"{len(zero_general)} quantity value(s) are 0 or less — they go into the CTR as entered, "
+                f"so check them: {shown_z}")
         if incomplete:
             self._mark_incomplete(incomplete)
             per_row: dict[tuple, list] = {}

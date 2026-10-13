@@ -53,3 +53,9 @@ ctr_generator/match_aliases.json
 
 # builds
 *Output/
+# User data - never commit (CTR presets, Inspector snapshots, backups, saved comparisons)
+# Config files that ship with the app (template_config.json, match_aliases.json) stay tracked.
+**/ctr_presets*.json
+logs/snapshots/
+*.bak-*
+**/Comparisons/

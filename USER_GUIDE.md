@@ -208,6 +208,8 @@ The **Statistics** tab shows how much of the **SAGE expected cost** of your MR a
 
 ---
 
+**Disparities.** A **Disparities** button (red exclamation mark, with the number of Stock Codes) appears in the toolbar when a Stock Code's rechargeability in the MR/CTR file contradicts SAGE's own tag. It opens a list; those lines are not counted in the totals and show in red. See the CTR Generator's *Cost statistics* for the same button.
+
 ## Downloading the report
 
 Click **Download Excel Report…** at the bottom of the results panel. Choose a save location and file name. The downloaded file contains three sheets:
@@ -460,6 +462,8 @@ The **Additional Info & Transport — AZN** group shows what the request's extra
 
 **Transport.** Each requested vehicle becomes one or more lines of the AZN CTR's **Third Party Activities** section (a section the template doesn't ship with — it's added only when there are transport lines, and the Summary block gains a matching *Total Other Activities* item). The request form only says which vehicle, how many, and for how long, so the **Description**, **Rate AZN**, **Mark Up %** and **Duration UOM** come from the transport rate table in `ctr_tools/template_config.json` and are editable in the table before generating:
 
+**Quantities of 0 or less.** Generate warns about any quantity that is 0 or negative (it goes into the CTR as entered, so check it). A *transport* line with a quantity of 0 or less is **hidden** in the AZN CTR (the row is written but hidden, so it does not print and counts as 0); if every transport line is like that, the Third Party Activities section is left out.
+
 - one requested vehicle can bill as several lines — a minibus charges vehicle+driver and its fuel separately, and only the former carries mark-up;
 - a vehicle that isn't in the rate table still gets a line, with the **Rate left empty** (red), so it's there to price by hand — generating leaves out any transport line whose Qty, Duration, Unit or Rate is still empty (after you confirm; see *Nothing is assumed* above). A quantity or duration the request does not state is left empty too, never assumed to be 1.
 
@@ -482,6 +486,7 @@ The **Cost statistics** box (after Additional Info & Transport) shows what the l
 - It needs SAGE: until the files have been loaded with **Load Files** a yellow warning says so; the figures then appear by themselves and follow every edit you make to the tables.
 - A line whose Match By is not in SAGE, or whose quantity is empty, is shown in red and not counted. For a code not in SAGE, double-click its *Unit cost* to type one in.
 - **Stock Codes not in SAGE have no SAGE cost.** The box says so in a yellow banner and asks you to type the cost by hand (double-click the red row's *Unit cost*). That cost fills the CTR's internal *SC cost* cell on the Pricing sheet; with none typed in, the cell is left **empty** (never 0), and **Generate** warns you which lines are affected before it goes ahead.
+- **Disparities.** When a Stock Code is Rechargeable in the document but Non-Rechargeable in SAGE (or the other way round), a **Disparities** button with a red exclamation mark appears in the toolbar of the list, with the number of Stock Codes. Click it for the list (each line shows the Stock Code and the item's name from SAGE) and press **Choose source…** on a line to say which source is right: **the document** or **SAGE**. Until you choose, the line is not counted (it shows in red) and the **CTR Generator will not generate**. Choosing SAGE makes the line in the Equipment / Consumables table say what SAGE says (non-rechargeable → `NONRECHARG`; rechargeable → the rate/price cell is emptied and you enter one); choosing the document changes nothing. Your choices are remembered per Stock Code, are the same in the MR vs CTR *Statistics* tab and in the Generator, and can be reset or restored in Settings. Only rechargeability is compared.
 - **Double-click a row to find it.** Double-click a Stock Code in the list and the same line is selected and scrolled to in the Equipment or Consumables table above (a code on several rows selects them all); double-click a document row to bring that table into view (it still opens/closes as well). Double-clicking the *Unit cost* cell types a cost instead, as before; a single click does nothing, so the page never scrolls by accident.
 - **Save statistics (Excel)…** (under the box) saves a workbook with *Statistics* (per side), *Statistics Items* (every line, its unit cost and why it was not counted) and *Info* (job, SAGE file, cost basis, lines not counted). A small window shows the folder remembered from last time: **Save here** uses it, **Change folder…** picks another one (the first time it opens the folder chooser straight away). The chosen folder is remembered and shown again before every save.
 
@@ -563,7 +568,7 @@ The **⚙ gear button** at the left end of the tab bar (same row as the tabs) op
 - **SAGE Export** — the path used by both the CTR Generator and the MR vs CTR statistics (changing it here changes it there).
 - **Default output folder** — where the CTR Generator saves generated CTRs.
 - **Statistics save folder** — where *Save statistics (Excel)* saves. It is still shown before every save; **Forget** makes the next save ask for a folder again.
-- **Match By aliases**, **Description renames** and **CTR presets** — how many are saved. *Open manager* opens the manager window for aliases and renames. **Reset…** asks for confirmation, copies the current file next to the original as `<name>.bak-<date>-<time>.json`, then restores the aliases/presets that ship with the app (renames become empty). The reset values apply from the next request load; rows already on screen are not changed. To undo a reset, close the app and copy the `.bak` file back over the original (the tab shows the folder).
+- **Match By aliases**, **Description renames** and **CTR presets** — how many are saved. *Open manager* opens the manager window for aliases and renames. **Reset…** asks for confirmation, copies the current file next to the original as `<name>.bak-<date>-<time>.json`, then restores the aliases that ship with the app and empties the renames and the presets (no preset ships with the app). The reset values apply from the next request load; rows already on screen are not changed. To undo a reset, press **Restore…** next to that list: it lists the backups (date and number of entries) and brings the one you choose back; the list as it is then is backed up first, so a restore can be undone too. Only the newest 5 backups of each list are kept. If the folder cannot be written to, the window says so and changes nothing.
 
 ---
 

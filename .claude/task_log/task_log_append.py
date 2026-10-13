@@ -4,18 +4,34 @@
     python3 .claude/task_log/task_log_append.py open     [--xlsx PATH]
     python3 .claude/task_log/task_log_append.py add FILE.json [--xlsx PATH]
     python3 .claude/task_log/task_log_append.py update "X - MA005" [--pct 100] [--remaining TEXT]
-                                              [--comment TEXT] [--phase VALUE] [--xlsx PATH]
+                                              [--comment TEXT] [--phase VALUE] [--version 1.0.20]
+                                              [--start YYYY-MM-DD] [--completion YYYY-MM-DD] [--xlsx PATH]
+    python3 .claude/task_log/task_log_append.py update-many FILE.json [--xlsx PATH]
+    python3 .claude/task_log/task_log_append.py drop-column "Total Units" [--xlsx PATH]
+    python3 .claude/task_log/task_log_append.py replace-text "OLD" "NEW" [--xlsx PATH]
     python3 .claude/task_log/task_log_append.py refresh  [--xlsx PATH]
 
 missing  changelog versions that have no row in the log yet (version + date), then
+         "version<TAB>id<TAB>value" for every row whose Version is not a release number
+         (Planned / Unreleased are not used any more), then
          "summary<TAB>key" for each Version|App Part group with no text in short_summaries.json
 open     rows whose Completion % < 100 (a note in Remaining on a 100% row is a
          known limitation or idea, not unfinished work, so it is not listed)
 add      append rows; FILE.json is a list of objects with keys
-         version, part, name, functionality, priority, pct (0-100), remaining, comment,
-         phase (default 0; e.g. 1, "1A"), completed (default true; false = planned:
-         Start/Completion Date left blank)
-update   change Completion % / Remaining / Comments / Phase of one existing row
+         version (a release number such as 1.0.20 - the release the work is for, planned work
+         included; default: the number in VERSION), part, name, functionality, priority,
+         pct (0-100), remaining, comment, phase (default 0; e.g. 1, "1A"),
+         completed (default true; false = not finished: Completion Date left blank),
+         start / completion (optional YYYY-MM-DD; completion default: today when completed)
+         Start Date is always filled: the day the row is logged, unless "start" is given.
+update   change Completion % / Remaining / Comments / Phase / Version / dates of one existing row.
+         Always: a blank Start Date is filled with today; reaching 100 % fills a blank
+         Completion Date with today; going below 100 % clears the Completion Date.
+update-many  the same for several rows in ONE write (one backup): FILE.json is a list of objects
+         with "id" and any of version, pct, remaining, comment, phase, start, completion
+drop-column  remove a column that is not required (e.g. "Total Units"); backs up first
+replace-text replace OLD with NEW in the Task Name, Remaining and Comments of every row (e.g. to
+         keep a person's name out of the log); sheets 2 and 3 are rebuilt
 refresh  rebuild sheets 2 and 3 only (use after editing short_summaries.json)
 Sheet 3 ("Shortened Form") has one row per Version x App Part: a one-line plain-language summary
 (from short_summaries.json, key "Version|App Part") plus figures computed from sheet 1.
@@ -23,7 +39,9 @@ Columns are found by their header text in row 1, so the user may delete or move
 columns (e.g. the spare "Col N" ones); only the headers listed in NEEDED must exist.
 Existing rows are never rewritten except by `update`. Sheets 2 ("By App Part") and 3
 are rebuilt from sheet 1 after every change. Close the file in Excel first.
-Writes go through a temp file and an atomic swap. Before every write the current file is copied to .claude/task_log/backups/ (30 newest kept).
+Writes go through a temp file and an atomic swap. Backups: ONE per release, not one per write - before the first write
+under a new number in VERSION the file is copied to .claude/task_log/backups/<name>_start_of_<version>.xlsx (= the log as it
+was at the end of the previous version); later writes of that version make no further copy.
 """
 import argparse
 import shutil
@@ -43,15 +61,37 @@ ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_XLSX = ROOT / "Task_Log_MagsudAbbaszade.xlsx"
 CHANGELOG = ROOT / "CHANGELOG.md"
 BACKUP_DIR = Path(__file__).resolve().parent / "backups"
-KEEP_BACKUPS = 30
 S1, S2, S3 = "All Tasks", "By App Part", "Shortened Form"
 SUMMARIES = Path(__file__).resolve().parent / "short_summaries.json"
 RANK = {"High": 3, "Medium": 2, "Low": 1}
 PARTS = ["CTR Generator", "MR vs CTR Comparator", "CTR Tracker", "App-wide / Infrastructure"]
 NEEDED = ["Task ID", "Task Name", "Functionality", "Version", "App Part", "Start Date", "Completion Date",
-          "Deadline", "Priority (importance)", "Total Units", "Completion %", "Remaining", "Comments"]
+          "Deadline", "Priority (importance)", "Completion %", "Remaining", "Comments"]
 CENTER = {"Task ID", "Version", "Start Date", "Completion Date", "Deadline", "Priority (importance)",
-          "Total Units", "Completion %", "Phase"}
+          "Completion %", "Phase"}
+VERSION_RE = re.compile(r"^\d+\.\d+\.\d+$")
+
+
+def parse_date(text, what):
+    try:
+        return datetime.strptime(str(text), "%Y-%m-%d").date()
+    except ValueError:
+        sys.exit(f"{what}: expected YYYY-MM-DD, got {text!r}")
+
+
+def to_date(v):
+    """Excel hands back datetimes, the script writes dates: compare them as dates."""
+    return v.date() if isinstance(v, datetime) else v
+
+
+def check_version(v, what="version"):
+    if not VERSION_RE.match(str(v)):
+        sys.exit(f"{what}: {v!r} is not a release number like 1.0.20 ('Planned'/'Unreleased' are not used)")
+    return str(v)
+
+
+def current_version():
+    return (ROOT / "VERSION").read_text(encoding="utf-8").strip()
 WRAP = {"Task Name", "Functionality", "App Part", "Remaining", "Comments"}
 
 _thin = Side(style="thin", color="BFBFBF")
@@ -137,7 +177,7 @@ def rebuild_sheet2(wb, L):
             ws.cell(r, c).fill = PatternFill("solid", fgColor="D6E0F0")
         hdr, first = r + 1, r + 2
         last = hdr + len(data)
-        ws.cell(r, L.col["Total Units"], "Tasks:").font = Font(bold=True)
+        ws.cell(r, L.col["Completion %"] - 1, "Tasks:").font = Font(bold=True)
         ws.cell(r, L.col["Completion %"], f"=COUNTA(A{first}:A{last})").font = Font(bold=True)
         ws.cell(r, L.col["Remaining"],
                 f'="Average completion: "&TEXT(AVERAGE({pct_l}{first}:{pct_l}{last}),"0.0%")').font = Font(bold=True)
@@ -188,8 +228,8 @@ def rebuild_sheet3(wb, L):
     r = 1
     for (ver, part), items in groups(ws1, L).items():
         r += 1
-        starts = [i["Start Date"] for i in items if i.get("Start Date")]
-        ends = [i["Completion Date"] for i in items if i.get("Completion Date")]
+        starts = [to_date(i["Start Date"]) for i in items if i.get("Start Date")]
+        ends = [to_date(i["Completion Date"]) for i in items if i.get("Completion Date")]
         pcts = [i["Completion %"] or 0 for i in items]
         open_n = sum(1 for p in pcts if p < 1)
         phases = sorted({str(i.get("Phase", 0)) for i in items})
@@ -212,6 +252,30 @@ def rebuild_sheet3(wb, L):
     ws.freeze_panes = "A2"
 
 
+def drop_column(ws, name):
+    """Delete a non-required column of sheet 1, keep the other columns' widths and
+    rebuild the AllTasks table over the remaining columns."""
+    head = [str(ws.cell(1, c).value) for c in range(1, ws.max_column + 1) if ws.cell(1, c).value is not None]
+    if name in NEEDED:
+        sys.exit(f"{name!r} is a required column and cannot be dropped")
+    if name not in head:
+        sys.exit(f"No column {name!r} (found {head})")
+    idx = head.index(name) + 1
+    widths = {c: ws.column_dimensions[get_column_letter(c)].width for c in range(1, len(head) + 1)}
+    style = ws.tables["AllTasks"].tableStyleInfo
+    del ws.tables["AllTasks"]
+    ws.delete_cols(idx)
+    for c in range(idx, len(head)):
+        ws.column_dimensions[get_column_letter(c)].width = widths[c + 1]
+    if get_column_letter(len(head)) in ws.column_dimensions:      # the now-empty last column
+        del ws.column_dimensions[get_column_letter(len(head))]
+    last = max(r for r in range(2, ws.max_row + 1) if ws.cell(r, 1).value)
+    ref = f"A1:{get_column_letter(len(head) - 1)}{last}"
+    tb = Table(displayName="AllTasks", ref=ref)
+    tb.tableStyleInfo = style
+    ws.add_table(tb)
+
+
 def refresh_table_ref(ws1, L):
     last = max(data_rows(ws1))
     ref = f"A1:{get_column_letter(L.n)}{last}"
@@ -220,33 +284,41 @@ def refresh_table_ref(ws1, L):
 
 
 def backup(path):
-    """Copies the file as it is now, before a write. Returns the copy's path."""
+    """One snapshot per release: the first write under the version now in VERSION copies the
+    file (= the log as it was at the end of the previous version). Returns (path, created)."""
     BACKUP_DIR.mkdir(parents=True, exist_ok=True)
-    dest = BACKUP_DIR / f"{path.stem}_{datetime.now():%Y%m%d_%H%M%S}{path.suffix}"
+    dest = BACKUP_DIR / f"{path.stem}_start_of_{current_version()}{path.suffix}"
+    if dest.exists():
+        return dest, False
     shutil.copy2(path, dest)
-    for old in sorted(BACKUP_DIR.glob(f"{path.stem}_*{path.suffix}"))[:-KEEP_BACKUPS]:
-        old.unlink()
-    return dest
+    return dest, True
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("cmd", choices=["missing", "open", "add", "update", "refresh"])
+    ap.add_argument("cmd", choices=["missing", "open", "add", "update", "update-many", "drop-column",
+                                      "replace-text", "refresh"])
     ap.add_argument("arg", nargs="?")
+    ap.add_argument("arg2", nargs="?")
     ap.add_argument("--xlsx", default=str(DEFAULT_XLSX))
     ap.add_argument("--pct", type=float)
     ap.add_argument("--remaining")
     ap.add_argument("--comment")
     ap.add_argument("--phase")
+    ap.add_argument("--version")
+    ap.add_argument("--start")
+    ap.add_argument("--completion")
     a = ap.parse_args()
 
     path = Path(a.xlsx)
     print(f"Task log: {path}", file=sys.stderr)
-    if a.cmd in ("add", "update", "refresh") and (path.parent / f"~${path.name}").exists():
+    writes = ("add", "update", "update-many", "drop-column", "replace-text", "refresh")
+    if a.cmd in writes and (path.parent / f"~${path.name}").exists():
         sys.exit("The task log looks open in Excel (lock file found). Close it first.")
     wb = load_workbook(path)
-    if a.cmd in ("add", "update", "refresh") and path.resolve() == DEFAULT_XLSX.resolve():
-        print(f"Backup: {backup(path)}", file=sys.stderr)
+    if a.cmd in writes and path.resolve() == DEFAULT_XLSX.resolve():
+        dest, created = backup(path)
+        print(f"Backup: {'saved' if created else 'already have'} {dest.name}", file=sys.stderr)
     ws = wb[S1]
     L = Layout(ws)
     col = L.col
@@ -257,6 +329,10 @@ def main():
         for v, d in changelog_versions().items():
             if v not in have:
                 print(f"{v}\t{d}")
+        for r in rows:
+            v = ws.cell(r, col["Version"]).value
+            if not VERSION_RE.match(str(v)):
+                print(f"version\t{ws.cell(r, 1).value}\t{v}")
         summ = load_summaries()
         for ver, part in groups(ws, L):
             if f"{ver}|{part}" not in summ:
@@ -279,12 +355,16 @@ def main():
         for it in items:
             nxt += 1
             done = it.get("completed", True)
+            ver = check_version(it.get("version") or current_version())
+            start = parse_date(it["start"], "start") if it.get("start") else (
+                vdates.get(ver, date.today()) if done else date.today())
             vals = {
                 "Task ID": f"X - MA{nxt:03d}", "Task Name": it["name"], "Functionality": it["functionality"],
-                "Version": it["version"], "App Part": it["part"],
-                "Start Date": vdates.get(it["version"], date.today()) if done else None,
-                "Completion Date": date.today() if done else None, "Deadline": "None",
-                "Priority (importance)": it["priority"], "Total Units": 1,
+                "Version": ver, "App Part": it["part"],
+                "Start Date": start,
+                "Completion Date": (parse_date(it["completion"], "completion") if it.get("completion")
+                                    else date.today()) if done else None, "Deadline": "None",
+                "Priority (importance)": it["priority"],
                 "Completion %": it.get("pct", 100) / 100, "Remaining": it.get("remaining") or "-",
                 "Phase": it.get("phase", 0), "Comments": it.get("comment", ""),
             }
@@ -295,22 +375,66 @@ def main():
             r += 1
         refresh_table_ref(ws, L)
 
-    if a.cmd == "update":
-        hit = [r for r in rows if ws.cell(r, 1).value == a.arg]
-        if not hit:
-            sys.exit(f"No row with id {a.arg!r}")
-        r = hit[0]
-        if a.pct is not None:
-            ws.cell(r, col["Completion %"], a.pct / 100)
-        if a.remaining is not None:
-            ws.cell(r, col["Remaining"], a.remaining)
-        if a.comment is not None:
-            ws.cell(r, col["Comments"], a.comment)
-        if a.phase is not None:
+    def apply_update(r, pct=None, remaining=None, comment=None, phase=None, version=None,
+                     start=None, completion=None):
+        if pct is not None:
+            ws.cell(r, col["Completion %"], float(pct) / 100)
+        if remaining is not None:
+            ws.cell(r, col["Remaining"], remaining)
+        if comment is not None:
+            ws.cell(r, col["Comments"], comment)
+        if phase is not None:
             if "Phase" not in col:
                 sys.exit("No Phase column in the task log")
-            ws.cell(r, col["Phase"], int(a.phase) if a.phase.isdigit() else a.phase)
-        print(f"updated {a.arg}: {ws.cell(r, col['Task Name']).value}")
+            ws.cell(r, col["Phase"], int(phase) if str(phase).isdigit() else phase)
+        if version is not None:
+            ws.cell(r, col["Version"], check_version(version))
+        if start is not None:
+            ws.cell(r, col["Start Date"], parse_date(start, "start"))
+        if completion is not None:
+            ws.cell(r, col["Completion Date"], parse_date(completion, "completion"))
+        # Dates are kept up to date on every change.
+        if not ws.cell(r, col["Start Date"]).value:
+            ws.cell(r, col["Start Date"], date.today())
+        pct_now = ws.cell(r, col["Completion %"]).value or 0
+        if pct_now >= 1 and not ws.cell(r, col["Completion Date"]).value:
+            ws.cell(r, col["Completion Date"], date.today())
+        elif pct_now < 1 and completion is None:
+            ws.cell(r, col["Completion Date"], None)
+        for h in ("Start Date", "Completion Date"):
+            ws.cell(r, col[h]).number_format = "yyyy-mm-dd"
+        print(f"updated {ws.cell(r, 1).value}: {ws.cell(r, col['Task Name']).value}")
+
+    def row_of(task_id):
+        hit = [r for r in rows if ws.cell(r, 1).value == task_id]
+        if not hit:
+            sys.exit(f"No row with id {task_id!r}")
+        return hit[0]
+
+    if a.cmd == "update":
+        apply_update(row_of(a.arg), a.pct, a.remaining, a.comment, a.phase, a.version, a.start, a.completion)
+
+    if a.cmd == "update-many":
+        for ch in json.loads(Path(a.arg).read_text(encoding="utf-8")):
+            apply_update(row_of(ch["id"]), ch.get("pct"), ch.get("remaining"), ch.get("comment"),
+                         ch.get("phase"), ch.get("version"), ch.get("start"), ch.get("completion"))
+
+    if a.cmd == "replace-text":
+        if not a.arg or a.arg2 is None:
+            sys.exit('usage: replace-text "OLD" "NEW"')
+        n = 0
+        for r in rows:
+            for h in ("Task Name", "Remaining", "Comments"):
+                cell = ws.cell(r, col[h])
+                if isinstance(cell.value, str) and a.arg in cell.value:
+                    cell.value = cell.value.replace(a.arg, a.arg2)
+                    n += 1
+        print(f"replaced in {n} cell(s)")
+
+    if a.cmd == "drop-column":
+        drop_column(ws, a.arg)
+        L = Layout(ws)
+        print(f"dropped column {a.arg!r}")
 
     rebuild_sheet2(wb, L)
     rebuild_sheet3(wb, L)

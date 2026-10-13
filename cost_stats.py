@@ -20,6 +20,13 @@ Input rows (one per MR or CTR line), columns:
 Buckets: Rechargeable, Non-Rechargeable, Unknown. A row is Unknown when its
 document gives no rechargeability. A row whose Stock Code is not in SAGE has no
 cost at all; it is counted separately (`no_cost`) and never in a percentage.
+A row whose document says Rechargeable (or Non-Rechargeable) while SAGE's own
+tag says the opposite is a *disparity* (DISPARITY): it is not costed either
+and is listed for the user to look at. SAGE's tag comes from `sage_tag_map`.
+The user resolves a disparity per Stock Code by choosing which source is right
+(`choices`: {STOCK CODE: "SAGE" | "DOC"}): "SAGE" makes the row use SAGE's
+rechargeability, "DOC" keeps the document's; either way it is no longer a
+disparity and the row is counted.
 Percentages are shares of the costed total, so when Unknown cost exists the
 Rechargeable % and Non-Rechargeable % do not add up to 100.
 """
@@ -41,12 +48,16 @@ TOTAL_LABEL = "Total"
 # Why a row was left out of the totals.
 NO_QTY = "No quantity"
 NO_SAGE = "Not in SAGE"
+DISPARITY = "Rechargeability differs from SAGE"
 
 SOURCE_SAGE = "SAGE"
 SOURCE_MANUAL = "Manual"
 
-ROW_COLUMNS = ["key", "doc", "sheet", "side", "category", "bucket", "qty",
-               "unit_cost", "source", "cost", "problem"]
+ROW_COLUMNS = ["key", "doc", "sheet", "side", "category", "bucket", "doc_bucket", "qty",
+               "unit_cost", "source", "sage_bucket", "choice", "name", "cost", "problem"]
+
+CHOICE_SAGE = "SAGE"
+CHOICE_DOC = "DOC"
 
 
 def norm_key(v) -> str:
@@ -66,6 +77,31 @@ def sage_cost_map(sage_df: pd.DataFrame | None) -> dict[str, float]:
     for k, c in zip(keys.tolist(), costs.tolist()):
         if k and k not in out and pd.notna(c):
             out[k] = float(c)
+    return out
+
+
+def sage_tag_map(sage_df: pd.DataFrame | None) -> dict[str, str]:
+    """{STOCK CODE: RECHARGEABLE | NON_RECHARGEABLE} from SAGE's own tag (the
+    `non_recharge` flag parse_sage derives from analysis_b). First row per
+    product wins — the same rule as sage_cost_map."""
+    if sage_df is None or sage_df.empty or "non_recharge" not in sage_df.columns:
+        return {}
+    out: dict[str, str] = {}
+    for k, nr in zip(sage_df["product"].map(norm_key).tolist(), sage_df["non_recharge"].tolist()):
+        if k and k not in out:
+            out[k] = NON_RECHARGEABLE if bool(nr) else RECHARGEABLE
+    return out
+
+
+def sage_name_map(sage_df: pd.DataFrame | None) -> dict[str, str]:
+    """{STOCK CODE: SAGE's long_description} — the item's name. First row per
+    product wins, like the cost and tag maps."""
+    if sage_df is None or sage_df.empty or "long_description" not in sage_df.columns:
+        return {}
+    out: dict[str, str] = {}
+    for k, n in zip(sage_df["product"].map(norm_key).tolist(), sage_df["long_description"].tolist()):
+        if k and k not in out and isinstance(n, str) and n.strip():
+            out[k] = n.strip()
     return out
 
 
@@ -108,11 +144,16 @@ def _bucket(status) -> str:
 
 def cost_rows(items: pd.DataFrame, cost_map: dict[str, float],
               use_qty: bool = True,
-              manual: dict[str, float] | None = None) -> pd.DataFrame:
+              manual: dict[str, float] | None = None,
+              sage_tags: dict[str, str] | None = None,
+              sage_names: dict[str, str] | None = None) -> pd.DataFrame:
     """One output row per input row: category, bucket, unit cost (+ where it
-    came from), cost and, when the row cannot be costed, `problem`
-    (NO_QTY / NO_SAGE). See recost() for how cost and problem are decided.
-    `manual` = unit costs typed in by the user for codes SAGE lacks."""
+    came from), SAGE's own rechargeability (`sage_bucket`, "" when unknown) and,
+    when the row cannot be costed, `problem` (NO_SAGE / DISPARITY / NO_QTY). See
+    recost() for how cost and problem are decided.
+    `manual` = unit costs typed in by the user for codes SAGE lacks;
+    `sage_tags` = sage_tag_map(), to find rows whose document disagrees with SAGE;
+    `sage_names` = sage_name_map(), so lists can show the item's name next to its code."""
     if items.empty:
         return pd.DataFrame(columns=ROW_COLUMNS)
 
@@ -132,16 +173,33 @@ def cost_rows(items: pd.DataFrame, cost_map: dict[str, float],
         "qty": qty,
         "unit_cost": unit_cost,
         "source": unit_cost.map(lambda v: SOURCE_SAGE if pd.notna(v) else ""),
+        "sage_bucket": keys.map(sage_tags or {}).fillna(""),
+        "name": keys.map(sage_names or {}).fillna(""),
     })
     return apply_manual(rows, manual or {}, use_qty)
 
 
 def apply_manual(rows: pd.DataFrame, manual: dict[str, float],
-                 use_qty: bool = True) -> pd.DataFrame:
+                 use_qty: bool = True,
+                 choices: dict[str, str] | None = None) -> pd.DataFrame:
     """Fill the unit cost of rows SAGE does not know from `manual`
-    ({STOCK CODE: unit cost}), then recost. SAGE always wins over a manual
-    value, so once SAGE gains the code the typed-in number stops applying."""
+    ({STOCK CODE: unit cost}) and apply the user's source `choices`
+    ({STOCK CODE: "SAGE" | "DOC"}), then recost. SAGE always wins over a manual
+    value, so once SAGE gains the code the typed-in number stops applying.
+    `rows` must be the rows as costed from the documents (their `bucket` is the
+    document's); the original document value is kept in `doc_bucket`."""
     rows = rows.copy()
+    rows["doc_bucket"] = rows["bucket"]
+    rows["choice"] = ""
+    both = (RECHARGEABLE, NON_RECHARGEABLE)
+    if choices and "sage_bucket" in rows.columns:
+        for key, ch in choices.items():
+            m = (rows["key"] == key) & rows["sage_bucket"].isin(both)
+            if ch == CHOICE_SAGE:
+                rows.loc[m, "bucket"] = rows.loc[m, "sage_bucket"]
+                rows.loc[m, "choice"] = CHOICE_SAGE
+            elif ch == CHOICE_DOC:
+                rows.loc[m, "choice"] = CHOICE_DOC
     if len(rows):
         # Reset to what SAGE said before applying (idempotent on repeat calls).
         manual_mask = rows["source"] == SOURCE_MANUAL
@@ -160,10 +218,27 @@ def recost(rows: pd.DataFrame, use_qty: bool = True) -> pd.DataFrame:
     use_qty=True : cost = unit cost x quantity; a row without a numeric
                    quantity is not costed (problem = NO_QTY).
     use_qty=False: cost = unit cost alone; quantity is not needed.
-    A row with no unit cost is never costed (problem = NO_SAGE)."""
+    A row with no unit cost is never costed (problem = NO_SAGE). A row whose
+    document rechargeability contradicts SAGE's tag is not costed either
+    (problem = DISPARITY), whatever the quantity."""
     rows = rows.copy()
+    if "sage_bucket" not in rows.columns:
+        rows["sage_bucket"] = ""
+    rows["sage_bucket"] = rows["sage_bucket"].fillna("")
+    if "choice" not in rows.columns:
+        rows["choice"] = ""
+    rows["choice"] = rows["choice"].fillna("")
+    if "name" not in rows.columns:
+        rows["name"] = ""
+    rows["name"] = rows["name"].fillna("")
+    if "doc_bucket" not in rows.columns:
+        rows["doc_bucket"] = rows["bucket"]
     problem = pd.Series("", index=rows.index, dtype=object)
     problem[rows["unit_cost"].isna()] = NO_SAGE
+    both = (RECHARGEABLE, NON_RECHARGEABLE)
+    differs = (rows["bucket"].isin(both) & rows["sage_bucket"].isin(both)
+               & (rows["bucket"] != rows["sage_bucket"]) & (rows["choice"] == ""))
+    problem[(problem == "") & differs] = DISPARITY
     if use_qty:
         problem[(problem == "") & rows["qty"].isna()] = NO_QTY
     cost = rows["unit_cost"] * rows["qty"] if use_qty else rows["unit_cost"].astype(float)
@@ -204,11 +279,12 @@ def summarize(rows: pd.DataFrame, by: list[str] | None = None) -> pd.DataFrame:
     Unknown cost, Total cost, a `%` column for each bucket (None when the group
     has no cost), `Non/Rech` (Non-Rechargeable cost ÷ Rechargeable cost — money,
     so it follows the quantity switch; None when there is no rechargeable cost),
-    `items` (rows costed), `no_cost` (rows left out) and `no_qty` (the subset of
-    those lacking a quantity)."""
+    `items` (rows costed), `no_cost` (rows left out), `no_qty` (the subset of
+    those lacking a quantity) and `disparity` (the subset whose rechargeability
+    differs from SAGE)."""
     by = by or ["side", "doc"]
     cols = by + list(BUCKETS) + ["Total cost"] + [f"{b} %" for b in BUCKETS] + \
-        ["Non/Rech", "items", "no_cost", "no_qty"]
+        ["Non/Rech", "items", "no_cost", "no_qty", "disparity"]
     if rows.empty:
         return pd.DataFrame(columns=cols)
 
@@ -225,6 +301,7 @@ def summarize(rows: pd.DataFrame, by: list[str] | None = None) -> pd.DataFrame:
         out["items"] = int(len(costed))
         out["no_cost"] = int((g["problem"] != "").sum())
         out["no_qty"] = int((g["problem"] == NO_QTY).sum())
+        out["disparity"] = int((g["problem"] == DISPARITY).sum())
         return out
 
     recs = []
@@ -244,7 +321,36 @@ def summarize(rows: pd.DataFrame, by: list[str] | None = None) -> pd.DataFrame:
 # ── saving / reporting ───────────────────────────────────────────────────────
 
 BASE_COLUMNS = ["key", "doc", "sheet", "side", "category", "bucket", "qty",
-                "unit_cost", "source"]
+                "unit_cost", "source", "sage_bucket", "name"]
+
+DISPARITY_COLUMNS = ["Side", "Document", "Stock Code", "Item", "Document says", "SAGE says", "Chosen", "Lines"]
+
+
+def disparities(rows: pd.DataFrame, include_resolved: bool = False) -> pd.DataFrame:
+    """The Stock Codes whose rechargeability in the document differs from SAGE,
+    one line per side / document / Stock Code (with how many lines it covers).
+    Unresolved ones only (the rows left out of the totals), or — with
+    include_resolved — also those the user has already chosen a source for
+    ("Chosen" says which)."""
+    empty = pd.DataFrame(columns=DISPARITY_COLUMNS)
+    if rows is None or rows.empty or "problem" not in rows.columns:
+        return empty
+    both = (RECHARGEABLE, NON_RECHARGEABLE)
+    doc = rows["doc_bucket"] if "doc_bucket" in rows.columns else rows["bucket"]
+    choice = rows["choice"] if "choice" in rows.columns else pd.Series("", index=rows.index)
+    unresolved = rows["problem"] == DISPARITY
+    resolved = (choice != "") & doc.isin(both) & rows["sage_bucket"].isin(both) & (doc != rows["sage_bucket"])
+    bad = rows[unresolved | resolved] if include_resolved else rows[unresolved]
+    if bad.empty:
+        return empty
+    bad = bad.assign(_doc=doc.loc[bad.index], _choice=choice.loc[bad.index])
+    g = bad.groupby(["side", "doc", "key"], sort=True).agg(
+        d=("_doc", "first"), sage=("sage_bucket", "first"), ch=("_choice", "first"),
+        nm=("name", "first"), n=("key", "size")).reset_index()
+    names = {CHOICE_SAGE: "SAGE", CHOICE_DOC: "Document", "": ""}
+    return pd.DataFrame({"Side": g["side"], "Document": g["doc"], "Stock Code": g["key"],
+                         "Item": g["nm"], "Document says": g["d"], "SAGE says": g["sage"],
+                         "Chosen": g["ch"].map(lambda c: names.get(c, c)), "Lines": g["n"]})
 
 
 def rows_to_records(rows: pd.DataFrame) -> list[dict]:
@@ -259,14 +365,17 @@ def rows_from_records(records: list[dict], use_qty: bool = True) -> pd.DataFrame
     df["qty"] = pd.to_numeric(df["qty"], errors="coerce")
     df["unit_cost"] = pd.to_numeric(df["unit_cost"], errors="coerce")
     df["source"] = df["source"].fillna("")
+    df["sage_bucket"] = df["sage_bucket"].fillna("")        # saved before this existed: no disparities
+    df["name"] = df["name"].fillna("")
     return recost(df, use_qty)
 
 
 def report_frames(rows: pd.DataFrame, use_qty: bool = True,
-                  manual: dict[str, float] | None = None) -> tuple[pd.DataFrame, pd.DataFrame]:
+                  manual: dict[str, float] | None = None,
+                  choices: dict[str, str] | None = None) -> tuple[pd.DataFrame, pd.DataFrame]:
     """(summary, items) for the Excel report — every row, no document or type
     filter applied. `summary` has one line per document and a total per side."""
-    rows = apply_manual(rows, manual or {}, use_qty)
+    rows = apply_manual(rows, manual or {}, use_qty, choices)
     basis = "unit cost × quantity" if use_qty else "unit cost only"
     s = summarize(rows)
     summary = pd.DataFrame({
@@ -283,13 +392,16 @@ def report_frames(rows: pd.DataFrame, use_qty: bool = True,
         "Items counted": s["items"],
         "Items not counted": s["no_cost"],
         "…of which no quantity": s["no_qty"],
+        "…of which differs from SAGE": s["disparity"],
         "Cost basis": basis,
     })
     items = pd.DataFrame({
         "Side": rows["side"], "Document": rows["doc"], "Sheet": rows["sheet"],
-        "Stock Code": rows["key"], "Type": rows["category"],
-        "Rechargeability": rows["bucket"], "Qty": rows["qty"],
-        "Unit cost (SAGE expected)": rows["unit_cost"], "Unit cost source": rows["source"],
+        "Stock Code": rows["key"], "Item (SAGE name)": rows["name"], "Type": rows["category"],
+        "Rechargeability": rows["bucket"], "Document says (rechargeability)": rows["doc_bucket"],
+        "SAGE says (rechargeability)": rows["sage_bucket"],
+        "Source chosen": rows["choice"].map({CHOICE_SAGE: "SAGE", CHOICE_DOC: "Document"}).fillna(""),
+        "Qty": rows["qty"], "Unit cost (SAGE expected)": rows["unit_cost"], "Unit cost source": rows["source"],
         "Cost": rows["cost"], "Not counted because": rows["problem"],
     }).sort_values(["Side", "Document", "Cost"], ascending=[True, True, False],
                    na_position="last", kind="mergesort").reset_index(drop=True)

@@ -1431,6 +1431,13 @@ class MainWindow(QMainWindow):
         # fills the other (each side ignores a value it already holds, so
         # they cannot echo forever). Connected before restore_settings() so
         # the saved path reaches the MR vs CTR field too.
+        # Which source is right for a Stock Code's rechargeability (a disparity between a
+        # document and SAGE) is one list for the whole app: a choice made in either
+        # statistics list shows up in the other, and is remembered between runs.
+        self._stats_panel.set_choices(self._ctr_gen.source_choices())
+        self._stats_panel.choices_changed.connect(self._ctr_gen.set_source_choices)
+        self._ctr_gen.stats_panel().choices_changed.connect(self._stats_panel.set_choices)
+        self._ctr_gen.choices_reloaded.connect(self._stats_panel.set_choices)
         self._ctr_gen.sage_path_changed.connect(self._set_comparator_sage_path)
         self._sage_edit.textChanged.connect(self._ctr_gen.set_sage_path)
         self._sage_edit.textChanged.connect(self._on_sage_path_edited)

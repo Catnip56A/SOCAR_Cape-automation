@@ -14,10 +14,10 @@ from __future__ import annotations
 
 import pandas as pd
 from PySide6.QtCore import QPoint, QRect, QSize, Qt, QThread, QTimer, Signal
-from PySide6.QtGui import QBrush, QColor, QFont
+from PySide6.QtGui import QBrush, QColor, QFont, QIcon, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
-    QAbstractItemView, QCheckBox, QComboBox, QLabel, QLayout, QPushButton,
-    QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
+    QAbstractItemView, QCheckBox, QComboBox, QDialog, QHBoxLayout, QLabel, QLayout, QMenu, QPushButton,
+    QTableWidget, QTableWidgetItem, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
 import cost_stats as cs
@@ -136,6 +136,106 @@ class _FlowLayout(QLayout):
         return y + line_h - rect.y() + m.bottom()
 
 
+def alert_icon(px: int = 16) -> QIcon:
+    """A red circle with a white exclamation mark, drawn in code (no font or image
+    file, so it looks the same everywhere)."""
+    scale = 2
+    pm = QPixmap(px * scale, px * scale)
+    pm.setDevicePixelRatio(scale)
+    pm.fill(Qt.GlobalColor.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    p.setBrush(QColor("#D32F2F"))
+    p.setPen(Qt.PenStyle.NoPen)
+    p.drawEllipse(0, 0, px, px)
+    pen = QPen(QColor("white"))
+    pen.setWidthF(px * 0.14)
+    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+    p.setPen(pen)
+    cx = px / 2
+    p.drawLine(QPoint(round(cx), round(px * 0.22)), QPoint(round(cx), round(px * 0.60)))
+    p.drawPoint(QPoint(round(cx), round(px * 0.78)))
+    p.end()
+    return QIcon(pm)
+
+
+class DisparitiesDialog(QDialog):
+    """The Stock Codes whose rechargeability in the document differs from SAGE, and
+    a button per code to choose which source is right. The choice is kept per
+    Stock Code, shared by every statistics list in the app, and remembered."""
+
+    def __init__(self, parent, panel: "StatsPanel"):
+        super().__init__(parent)
+        self._panel = panel
+        self.setWindowTitle("Disparities between the documents and SAGE")
+        self.setMinimumSize(900, 420)
+        self.resize(1100, 480)
+        lay = QVBoxLayout(self)
+        note = QLabel(
+            "These Stock Codes are Rechargeable in one place and Non-Rechargeable in the other "
+            "(the document against SAGE's own tag). Until a source is chosen they are NOT counted in "
+            "the statistics, and the CTR Generator will not generate. Choose, for each code, which "
+            "source is right: the document, or SAGE.")
+        note.setWordWrap(True)
+        lay.addWidget(note)
+        self._show_resolved = QCheckBox("Also show the ones I have already chosen a source for")
+        self._show_resolved.toggled.connect(lambda _=False: self._fill())
+        lay.addWidget(self._show_resolved)
+        self.table = QTableWidget(0, len(cs.DISPARITY_COLUMNS) + 1)
+        self.table.setHorizontalHeaderLabels(cs.DISPARITY_COLUMNS + [""])
+        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.verticalHeader().setVisible(False)
+        install_elided_tooltips(self.table)
+        install_find(self.table)
+        lay.addWidget(self.table, 1)
+        row = QHBoxLayout()
+        self.count = QLabel("")
+        self.count.setStyleSheet("color: #757575; font-size: 11px;")
+        close = QPushButton("Close")
+        close.clicked.connect(self.accept)
+        row.addWidget(self.count, 1)
+        row.addWidget(close)
+        lay.addLayout(row)
+        self._fill()
+
+    def _fill(self) -> None:
+        table = self._panel.disparity_table(include_resolved=self._show_resolved.isChecked())
+        self.table.setRowCount(0)                     # drops the old rows' buttons too
+        self.table.setRowCount(len(table))
+        for r, rec in enumerate(table.itertuples(index=False)):
+            for c, v in enumerate(rec):
+                self.table.setItem(r, c, QTableWidgetItem("" if v is None else str(v)))
+            btn = QPushButton("Choose source…")
+            btn.clicked.connect(lambda _=False, b=btn, key=str(rec[2]), nm=str(rec[3]), d=str(rec[4]),
+                                s=str(rec[5]), ch=str(rec[6]): self._choose(b, key, nm, d, s, ch))
+            self.table.setCellWidget(r, len(cs.DISPARITY_COLUMNS), btn)
+        self.table.resizeColumnsToContents()
+        self.table.horizontalHeader().setStretchLastSection(False)
+        item_col = cs.DISPARITY_COLUMNS.index("Item")
+        if self.table.columnWidth(item_col) > 300:                       # long names are cut (hover shows them all)
+            self.table.setColumnWidth(item_col, 300)
+        self.table.setColumnWidth(len(cs.DISPARITY_COLUMNS), 130)     # the button column: not stretched
+        open_n = len(self._panel.disparity_table())
+        self.count.setText(f"{open_n} Stock Code(s) still need a choice" if open_n
+                           else "Nothing left to choose — all disparities are resolved")
+
+    def _choose(self, button, key: str, name: str, doc_says: str, sage_says: str, chosen: str) -> None:
+        menu = QMenu(self)
+        title = menu.addAction(f"{key}" + (f" — {name}" if name else ""))     # which item this is about
+        title.setEnabled(False)
+        menu.addSeparator()
+        a_doc = menu.addAction(f"Use the document: {doc_says}" + ("   ✓" if chosen == "Document" else ""))
+        a_sage = menu.addAction(f"Use SAGE: {sage_says}" + ("   ✓" if chosen == "SAGE" else ""))
+        a_clear = menu.addAction("Clear my choice") if chosen else None
+        act = menu.exec(button.mapToGlobal(button.rect().bottomLeft()))
+        if act is None:
+            return
+        self._panel.set_choice(key, cs.CHOICE_DOC if act is a_doc else
+                               cs.CHOICE_SAGE if act is a_sage else None)
+        self._fill()
+
+
 class StatsWorker(QThread):
     """Reads SAGE and costs every row. Emits done(token, rows | None, error);
     `token` lets the window ignore a result that a newer run has replaced."""
@@ -161,6 +261,8 @@ class StatsWorker(QThread):
             job.start(0)
             df = self._sage_df if self._sage_df is not None else parse_sage(self._path)
             cost_map = cs.sage_cost_map(df)
+            sage_tags = cs.sage_tag_map(df)
+            sage_names = cs.sage_name_map(df)
             job.done(0, f"{len(cost_map)} products"
                         + (" (reused)" if self._sage_df is not None else ""))
             # Checked between tasks only, like every other job.
@@ -170,7 +272,7 @@ class StatsWorker(QThread):
                 self.done.emit(self._token, None, STOPPED)
                 return
             job.start(1)
-            rows = cs.cost_rows(self._items, cost_map, True)
+            rows = cs.cost_rows(self._items, cost_map, True, sage_tags=sage_tags, sage_names=sage_names)
             job.done(1, f"{len(rows)} rows")
             job.finish()
             self.done.emit(self._token, rows, "")
@@ -185,6 +287,9 @@ class StatsPanel(QWidget):
     # A row was double-clicked: (side, document, Stock Code) — the Stock Code is "" for a
     # document row. The CTR Generator uses it to show that line in its own table.
     row_clicked = Signal(str, str, str)
+    # The user chose (or cleared) which source is right for a Stock Code's
+    # rechargeability; payload = the whole {STOCK CODE: "SAGE" | "DOC"} dict.
+    choices_changed = Signal(object)
 
     def __init__(self, parent=None, *, group_labels: dict[str, str] | None = None,
                  show_type_filter: bool = True, min_tree_height: int | None = None,
@@ -197,6 +302,7 @@ class StatsPanel(QWidget):
         self._no_sage_note = no_sage_note        # extra sentence on the "not in SAGE" banner
         self._base: pd.DataFrame | None = None     # rows as costed from SAGE (use_qty on)
         self._manual: dict[str, float] = {}        # typed-in unit costs, by Stock Code
+        self._choices: dict[str, str] = {}         # which source is right per Stock Code: "SAGE" | "DOC"
         self._pred = None                          # rows -> list[bool], or None
         self._view: pd.DataFrame = pd.DataFrame()  # rows after manual costs + filters
         self._summary: pd.DataFrame = pd.DataFrame()
@@ -247,6 +353,14 @@ class StatsPanel(QWidget):
             "Use it after updating SAGE.")
         self._reload_btn.clicked.connect(self.reload_requested)
 
+        self._dispar_btn = QPushButton("Disparities")
+        self._dispar_btn.setIcon(alert_icon(16))
+        self._dispar_btn.setToolTip(
+            "Stock Codes whose rechargeability in the document differs from SAGE's own tag.\n"
+            "They are not counted in the statistics. Click to see the list.")
+        self._dispar_btn.setVisible(False)
+        self._dispar_btn.clicked.connect(self._show_disparities)
+
         self._counts = QLabel("")
         self._counts.setStyleSheet("color: #757575; font-size: 11px;")
 
@@ -256,6 +370,7 @@ class StatsPanel(QWidget):
         bar.addWidget(self._bucket_combo)
         bar.addWidget(self._sort_combo)
         bar.addWidget(self._reload_btn)
+        bar.addWidget(self._dispar_btn)
         bar.addWidget(self._counts)
         lay.addLayout(bar)
 
@@ -332,9 +447,31 @@ class StatsPanel(QWidget):
     def manual_costs(self) -> dict[str, float]:
         return dict(self._manual)
 
-    def restore(self, rows: pd.DataFrame, manual: dict[str, float], use_qty: bool = True) -> None:
+    def choices(self) -> dict[str, str]:
+        return dict(self._choices)
+
+    def set_choices(self, choices: dict[str, str]) -> None:
+        """Replace the source choices (from another list, or from disk) without
+        announcing it, and recalculate."""
+        self._choices = {str(k): v for k, v in (choices or {}).items() if v in (cs.CHOICE_SAGE, cs.CHOICE_DOC)}
+        if self._base is not None:
+            self.refresh()
+
+    def set_choice(self, key: str, choice: str | None) -> None:
+        """The user chose which source is right for `key` (None = clear it)."""
+        if choice is None:
+            self._choices.pop(key, None)
+        else:
+            self._choices[key] = choice
+        self.refresh()
+        self.choices_changed.emit(self.choices())
+
+    def restore(self, rows: pd.DataFrame, manual: dict[str, float], use_qty: bool = True,
+                choices: dict[str, str] | None = None) -> None:
         """Show statistics that were saved with a comparison."""
         self._manual = dict(manual)
+        if choices is not None:
+            self._choices = dict(choices)
         self._qty_chk.blockSignals(True)
         self._qty_chk.setChecked(use_qty)
         self._qty_chk.blockSignals(False)
@@ -345,7 +482,7 @@ class StatsPanel(QWidget):
         statistics. Every row — the panel's filters do not apply."""
         if self._base is None or self._base.empty:
             return None
-        return cs.report_frames(self._base, self.use_qty(), self._manual)
+        return cs.report_frames(self._base, self.use_qty(), self._manual, self._choices)
 
     def _style_banner(self, kind: str) -> None:
         bg, fg, border = {
@@ -360,7 +497,7 @@ class StatsPanel(QWidget):
     def _filtered(self) -> pd.DataFrame:
         if self._base is None or self._base.empty:
             return pd.DataFrame(columns=cs.ROW_COLUMNS)
-        rows = cs.apply_manual(self._base, self._manual, self._qty_chk.isChecked())
+        rows = cs.apply_manual(self._base, self._manual, self._qty_chk.isChecked(), self._choices)
         self._costed_all = rows
         if self._pred is not None:
             rows = rows[self._pred(rows)]
@@ -518,6 +655,9 @@ class StatsPanel(QWidget):
         notes = [r.sheet] if r.sheet else []
         if r.source == cs.SOURCE_MANUAL:
             notes.append("unit cost entered manually")
+        if r.choice:
+            notes.append("rechargeability: " + ("SAGE's value chosen" if r.choice == cs.CHOICE_SAGE
+                                                else "the document's value chosen"))
         if r.problem == cs.NO_SAGE:
             it.setText(C_UNIT, "not in SAGE")
             notes.append("not counted — double-click Unit cost to enter it, or update SAGE and reload")
@@ -525,6 +665,9 @@ class StatsPanel(QWidget):
             it.setText(C_UNIT, _money(r.unit_cost))
             if r.problem == cs.NO_QTY:
                 notes.append("not counted — no quantity")
+            elif r.problem == cs.DISPARITY:
+                notes.append(f"not counted — rechargeability differs from SAGE "
+                             f"(document: {r.bucket}, SAGE: {r.sage_bucket})")
         it.setText(C_NOTE, " · ".join(notes))
         if counted:
             cv, cp = _BUCKET_COLS[r.bucket]
@@ -627,7 +770,22 @@ class StatsPanel(QWidget):
 
     # ── banner about uncosted rows ───────────────────────────────────────────
 
+    def disparity_table(self, include_resolved: bool = False) -> pd.DataFrame:
+        """The Stock Codes whose rechargeability differs from SAGE (see cost_stats.disparities)."""
+        return cs.disparities(getattr(self, "_costed_all", None), include_resolved)
+
+    def _show_disparities(self) -> None:
+        DisparitiesDialog(self, self).exec()
+
     def _update_note_banner(self) -> None:
+        table = self.disparity_table() if self._state_kind is None else pd.DataFrame()
+        n_disp = int(table["Stock Code"].nunique()) if len(table) else 0
+        n_all = (int(self.disparity_table(True)["Stock Code"].nunique())
+                 if self._state_kind is None and getattr(self, "_costed_all", None) is not None else 0)
+        self._dispar_btn.setVisible(n_all > 0)             # also when all are resolved: to change a choice
+        self._dispar_btn.setIcon(alert_icon(16) if n_disp else QIcon())
+        if n_all:
+            self._dispar_btn.setText(f"Disparities ({n_disp})" if n_disp else "Disparities (resolved)")
         if self._state_kind is not None:        # a state from the window wins
             return
         n = 0
@@ -635,12 +793,19 @@ class StatsPanel(QWidget):
             costed = getattr(self, "_costed_all", None)
             if costed is not None:
                 n = costed.loc[costed["problem"] == cs.NO_SAGE, "key"].nunique()
+        parts = []
         if n:
-            self._style_banner("warn")
-            self._banner.setText(
+            parts.append(
                 f"{n} Stock Code(s) are not in the SAGE Export and are NOT counted (shown in red). "
                 "Double-click a red row's Unit cost to type it in, or update SAGE and press "
                 "Reload statistics." + (f" {self._no_sage_note}" if self._no_sage_note else ""))
+        if n_disp:
+            parts.append(
+                f"{n_disp} Stock Code(s) have a rechargeability that differs from SAGE and are NOT "
+                "counted (shown in red) — press Disparities to see them.")
+        if parts:
+            self._style_banner("warn")
+            self._banner.setText("\n".join(parts))
             self._banner.setVisible(True)
         else:
             self._banner.setVisible(False)

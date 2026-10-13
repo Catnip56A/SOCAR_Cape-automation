@@ -546,6 +546,10 @@ def _write_comments(ws, addr: str, text: str) -> None:
 _DURATION_NUMBER = '_xlfn.NUMBERVALUE(LEFT({cell},FIND(" ",{cell}&" ")-1),".")'
 
 
+def _third_party_qty(tp: dict) -> float:
+    return _require_float(tp, "quantity", f"Third Party line {tp.get('description')!r}")
+
+
 def _write_third_party_section(
     ws, after_row: int, rows: list[dict], col_count: int, labor_data_start: int,
 ) -> tuple[int, int]:
@@ -568,6 +572,11 @@ def _write_third_party_section(
     all above the insertion point, so they're still where the caller found
     them (which is not where the template had them, if the request needed
     extra manpower rows inserted earlier).
+
+    A line whose quantity is 0 or less is written but its row is HIDDEN (like the
+    labor section's unused rows, so the PDF omits it too) and its total cell is
+    0, so a hidden line can never change the section total. (The caller skips the
+    section altogether when every line is like that.)
 
     Each row's total is qty x rate x duration x (1 + mark-up). The duration
     cell is text ("6 Days" / "2 Trips" — the unit varies per line), so the
@@ -633,6 +642,11 @@ def _write_third_party_section(
 
     for r in range(hdr_row, total_row + 1):
         ws.row_dimensions[r].hidden = False
+    for i, tp in enumerate(rows):                       # quantity 0 or less: hide the line
+        if _third_party_qty(tp) <= 0:
+            r = data_start + i
+            ws.row_dimensions[r].hidden = True
+            ws.cell(row=r, column=7).value = 0
 
     ws.cell(row=total_row, column=1).value = _azn.get(
         "third_party_total_label", "Total Third Party Activities")
@@ -870,7 +884,8 @@ def build_azn(
     #    Summary block, and only when the request actually has transport /
     #    hired-service lines (the template ships without the section). ─────
     third_party_total_row = None
-    if third_party_rows:
+    # No section at all when every line has a quantity of 0 or less.
+    if any(_third_party_qty(tp) > 0 for tp in third_party_rows):
         third_party_total_row, tp_inserted = _write_third_party_section(
             ws, other_total_row, third_party_rows, _COLS, other_start)
         _row_shift += tp_inserted

@@ -33,9 +33,11 @@
   "1.0.18|CTR Generator": "Much faster: Generator table fills in 0.5 s instead of 35 s; CTR Request no longer loads the huge SAGE sheet.",
   "1.0.18|MR vs CTR Comparator": "Comparator tables 3-4x faster and use less memory.",
   "1.0.18|CTR Tracker": "Loading fields from a CTR file no longer freezes the screen.",
-  "Unreleased|App-wide / Infrastructure": "Inspector now explains that Stop has little effect while pricebooks load.",
-  "Planned|App-wide / Infrastructure": "IT permission is granted and testing the app with Sara has begun; next the user will test that a new version installs over the old one without uninstalling it by hand.",
-  "Planned|Proposals / Documents": "Short and long Word proposals, plus contract terms and pricebooks for each company.",
-  "Planned|CTR Generator": "Add notes per section (with filtering by scope); the CTR Request look is done, the new request form still has to be discussed with operations.",
-  "Planned|MR vs CTR Comparator": "Rechargeable vs non-rechargeable cost totals (Statistics tab) are built; checks on screen and the department's answer on the rechargeability source are still to do."
+  "1.0.19|CTR Generator": "Nothing is guessed any more: missing values stay blank and red, manpower rates come from a chosen Encoding (Onshore and Offshore never mixed), and rows stay neutral until the files are loaded. Also a cost statistics box with Excel export, a 'Go to value' button and drop-downs. Still open: how empty transport lines are handled and allowance encodings.",
+  "1.0.19|MR vs CTR Comparator": "New document filter for the result tabs, a Compare Values button in the Combined View, numbers sort as numbers, and a Statistics tab with rechargeable vs non-rechargeable cost totals.",
+  "1.0.19|App-wide / Infrastructure": "New Settings window, Ctrl+F search and full-text hover in every table, a smaller mouse pointer under WSL, and IT permission granted. Still to do on Windows: build the app, compile the installer and test that it installs over the old version.",
+  "1.0.20|App-wide / Infrastructure": "Saved offscreen tests, user data kept out of git, one task-log backup per release, and testing the app with the commercial assistant.",
+  "1.0.20|Proposals / Documents": "Short and long Word proposals, plus contract terms and pricebooks for each company.",
+  "1.0.20|CTR Generator": "Transport lines with a quantity of 0 or less are hidden in the CTR, Reset presets no longer brings back a developer preset, Settings can restore a backup of aliases, renames or presets, and the CTR Request look is done; notes per section and the talk about a new request form are still open.",
+  "1.0.20|MR vs CTR Comparator": "A Disparities button (red exclamation mark) lists Stock Codes whose rechargeability in the documents contradicts SAGE; those items are left out of the statistics."
 }

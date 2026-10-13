@@ -5,14 +5,16 @@
 import os
 
 # JSON config/data files that must travel with the exe.
-# match_aliases.json and ctr_presets.json are written at runtime if they
-# don't exist, but bundling any current copy means user renames/presets
-# carry over into the freshly built exe automatically.
+# match_aliases.json is written at runtime if it doesn't exist, but bundling the
+# current copy means the shipped renames carry over into the freshly built exe.
+# ctr_presets.json is deliberately NOT bundled: a preset is a person's own
+# client/location/path, and the one that used to ship was a developer preset
+# (with a Linux path) that came back on every "Reset presets".
 _DATA_FILES = [
     ("ctr_tools/template_config.json", "ctr_tools"),
     ("VERSION", "."),
 ]
-for _fname in ("match_aliases.json", "ctr_presets.json"):
+for _fname in ("match_aliases.json",):
     _src = os.path.join("ctr_tools", _fname)
     if os.path.exists(_src):
         _DATA_FILES.append((_src, "ctr_tools"))
