@@ -1,30 +1,41 @@
-# Handoff — 2026-10-19 (end of session 6)
+# Handoff — 2026-10-19
 
-## Working on
-**1.0.21 is committed locally (not pushed) and was built, installed and checked by the user on Windows** (MA179 and MA192 = 100 %). Two commits on `main`: `4d351f2` (restructure into `comparator/`, `stats/`, `common/`, split out with a temporary worktree so it contains no feature code; subset of tests passed there) and `5e6fb66` (all 1.0.21 features). Last full offscreen run before the final two small changes: 192 tests passing under `.venv/bin/python` (Py 3.13, same as `just run`), run file by file so each run stayed under 5 minutes.
+## Goal
+MR vs CTR Comparator + workflow setup, version 1.0.21 (next build's version number not decided).
 
-## Key decisions (with reasoning)
-- **Nothing is assumed** (still the core rule): a missing Days, Stock Code type or rate is shown blank/orange/red with a reason and a "how to fix", never guessed. MR line days come from the matching CTR (user picks if CTRs disagree, or types their own).
-- **Equipment vs consumable** comes from the shipped Stock Code types list (confirmed > list > CTR section > unknown; unknown/conflict is not priced). The shipped `ctr_tools/stockcode_types.json` is **git-ignored on purpose (privacy; repo is public)** — builds must be made from this folder, not a fresh clone, or the installed app has no list.
-- **Reload changed files** (MA192): re-reads from the path remembered at Browse; any failure keeps the old tables and is reported; unticked sheets stay unticked; **two loaded files with the same name are NOT guessed between** (skipped with a message — I deviated from my first proposal "reload the latest" because it could swap the wrong tables); saved-comparison files have no origin and just get an explanatory tooltip.
-- **Scaffold is not in MR vs CTR statistics** (`StatsPanel(show_scaffold=False)`, toolbar says "Scaffold: not included here"); the Generator keeps Include scaffold. Path-font shrinking was dropped by the user.
-- **Two commits chosen by the user (option A)**; the restructure commit deliberately has no feature code (the `doc_filter` limit change etc. are in the second).
-- CLAUDE.md rule remembered: list files/functions and wait for the go-ahead before editing; user's explicit "do this" was taken as the go-ahead for small changes.
+## Done
+- 1.0.21 built, installed and checked by the user on Windows (MA179, MA192 = 100 %).
+- Reload/Browse fixes after the challenger review (commit e377659): same-name Browse replaces, Compare anyway in the report, ticks kept on rename, no remove/clear/add during reload, activation check off the UI thread. Verified offscreen only: 23/23 in test_file_changes (.venv Py 3.13 and system 3.10) + 132 tests in 10 other files via the test-runner agent.
+- Workflow files (commit 07dd4e7): /handoff (writes this file only), /tasklog (Excel log), /pickup (start from handoff), /release skill, agents test-runner / reviewer / challenger in .claude/agents/, CLAUDE.md sections (Session workflow, Versioning, UI Testing Limits, Handoff & Task Log, Debugging). All three agents were trial-run and worked.
+- MR vs CTR no longer has "Include scaffold" (shows "Scaffold: not included here"); path-font shrinking dropped by the user.
 
-## Current state
-- `main` = `5e6fb66`, 2 commits ahead of `origin/main` (`afbf7b1`). **Not pushed — user was asked, no answer yet.**
-- Working tree clean. Task log: MA179, MA192 = 100 %. Open: MA124 (8 %), MA127–MA130, MA133 (0 %, ignored until the user says), **MA164 (70 %: still to test on the specific screen ratios — 1080p at 150 % — for the "Unable to set geometry … minimum size" log line and Download Excel Report reachable after Compare)**.
-- Disparities segfault (crash.log 2026-10-15) not reproduced; user chose to watch for it.
-- Not seen in the real window by me: appearance of the Files-changed / File-not-found dialogs (the user reports MA192 works).
+## In progress / not fully done
+- MA193 (90 %): the e377659 fixes are NOT tested on Windows and not built. Row is filed under 1.0.21; change its version when the new number is decided.
+- MA164 (70 %): screen-ratio test (1080p at 150 %) still to do by the user.
+- Known, unfixed: a save in Excel without content change still shows the file as changed; reloading a file also removes saved-comparison tables sharing its name.
+- .claude/settings.local.json still has stale ctr_generator/user-data permissions (left on purpose; git-ignored, not recoverable).
+
+## Decisions (with reasoning)
+- Same-name Browse replaces rather than adds: the old behaviour doubled data and hid the stale copy. Two same-named files can no longer coexist.
+- Subagents: only 3 (test-runner haiku, reviewer sonnet read-only, challenger). No custom explorer (built-in Explore suffices) and no release-checker agent (a deterministic check inside /release is better).
+- Caveman (token-saving plugin) rejected: wrong cost driver (long-session input), adds ~1,160 input tokens/request, telemetry and cloud sending of prompts.
+- Session rule: one session per app part + version; ask the user at commits/topic changes whether to switch.
+
+## Next
+1. User decides the next version number and whether it is a new release (ask; never bump VERSION unasked; use /release).
+2. Windows test of MA193, then MA164 screen-ratio test.
 
 ## Open questions
-- Push the two commits to `origin/main`? (Normal push; no history rewrite needed.)
-- Which installers in `Output/` to keep (undecided; never delete them; `just clean` keeps `Output/`).
+- Push the local commits (4d351f2, 5e6fb66, 07dd4e7, e377659 and handoff commits) to origin? Not pushed; user hasn't answered.
+- New version number for the build containing e377659.
 
-## Files changed
-(Details are in the two commits.) Key places: `app.py` (Reload: `_reload_changed_files`, `_mark_changed_files`, `_swap_file_tables`, `_ask_missing_file`, `_ask_changed_files`; `_parse(replace=, on_done=)`), `stats/stats_view.py` (`show_scaffold`), `tests/test_file_changes.py` (18 tests), `tests/test_price_stats.py`, `CHANGELOG.md`, `USER_GUIDE.md`, `tests/README.md`. Task-log rows MA192 added.
+## Parked
+- MA124, MA127–MA130, MA133 stay ignored until the user says.
+- Disparities segfault (crash.log 2026-10-15) not reproduced; user is watching.
 
-## Next step
-1. Push when the user says so.
-2. MA164 screen-ratio test (user, later).
-3. Next release work only when the user names it; MA127–MA130 and MA133 stay ignored until told.
+## Windows checks
+- Browse an already-added file: replaces it, no doubled data; a failed replace keeps the old tables.
+- Reload them and compare with a deleted file kept: report offers Compare anyway.
+- Locate with a renamed file keeps unticked sheets unticked.
+- Switch back to the window after saving in Excel (also on a network drive): orange ⟳ appears, no freeze.
+- Remove/Clear/Browse refused while a reload parses; ⟳ glyph and colours render.
