@@ -3,6 +3,18 @@
 Python + PySide6 desktop app. Source lives in `ctr_tools/`; template
 layout positions are config, not code — see `ctr_tools/template_config.json`.
 
+## Session workflow
+
+- One session per app part + version (e.g. MR vs CTR Comparator 1.0.21). Off-topic items go under *Parked* in `.claude/handoff.md`, not into the current work.
+- Start with `/pickup`; end with `/handoff` (writes handoff.md only), then `/clear` or a new session. `/tasklog` updates the Excel log on request - remind the user.
+- Ask the user whether to switch sessions at each commit and when the topic changes. Never resume a days-old session; use `/pickup`.
+- `/compact` only when stopping mid-task is impossible. Use the Explore agent for "where/how" questions; `test-runner`, `reviewer` and `challenger` agents (`.claude/agents/`) only when asked or when a test run / pre-commit review / non-trivial plan calls for it.
+
+## Versioning & Changelog
+
+- Before bumping VERSION or creating a new CHANGELOG section, ask whether this work is a new release or a continuation of the current version. Never bump the version on your own.
+- Keep VERSION, CHANGELOG, README/USER_GUIDE and the task log in sync for every release.
+
 ## Testing Safety
 
 Never run tests, scripts, or manual verification against real user data stores
@@ -31,6 +43,13 @@ A._BUNDLED_DEFAULT_PATH = TMP / "nonexistent.json"
 D._DESC_RENAMES_PATH = TMP / "desc_renames.json"
 P._PRESETS_PATH = TMP / "ctr_presets.json"
 ```
+
+## UI Testing Limits
+
+- Offscreen/sandboxed Qt tests do NOT prove the real UI works. After any UI change, list the specific things the user must check on the real Windows app: sorting types, popup visibility, multi-sheet files, and window sizing.
+- Test with real multi-sheet sample files, not only synthetic fixtures.
+- Keep the window minimum height small enough to fit the WSLg maximized area. Adding tabs or pickers must not raise it.
+- Sort numeric columns (e.g. Diff) numerically, not as text.
 
 ## Before Editing
 
@@ -74,3 +93,19 @@ Related distinctions that have caused misreads:
 - **Transport** becomes the AZN CTR's *Third Party Activities* section, never
   manpower and never USD equipment.
 - 'Contract' / 'expand' refer to Excel **row hiding**, not outline grouping.
+
+## Workflow
+
+### Handoff & Task Log
+
+- /handoff updates the Excel task log. Always edit a test copy first, make a backup, and save atomically.
+- If the xlsx is locked (open in Excel), stop and ask the user to close it. Do not retry silently.
+- In handoff open questions, skip rows that are 100% complete. Put phase markers (A/B) in the Phase column, not in task names.
+- Before listing a feature as 'missing' in a handoff, grep the code to confirm it really doesn't exist.
+- Before saying the handoff is committed, check `git status`.
+
+## Debugging
+
+### Debugging Principle
+
+- When the user suggests that a data bug comes from an external source (e.g. the file's author), check the writer/reader code before accepting that and dropping the issue.

@@ -1,34 +1,17 @@
-Generate a handoff summary of this session and save it to .claude/handoff.md.
+Write the session handoff to `.claude/handoff.md` (overwrite; keep it under ~40 lines).
+A fresh session must be able to continue from this file alone. Skip anything recoverable from
+`git log` or commit messages. Before calling something "missing", grep the code. Skip rows that are 100 % done.
 
-Include only:
-## Working on
-## Key decisions (with reasoning)
-## Current state
-## Open questions
-## Files changed
-## Next step
+Sections, in this order:
+## Goal — the app part + version this session worked on, in one line
+## Done — what is finished and verified, one line each, stated plainly (say how it was verified)
+## In progress / not fully done — what is left on each item and why; say what was NOT verified
+## Decisions (with reasoning) — only what git cannot show
+## Next — the first step for the next session
+## Open questions — only unresolved ones
+## Parked — off-topic items raised during the session (one line each) for a fresh chat
+## Windows checks — what the user must check on the real Windows app (empty if nothing)
 
-Skip anything recoverable from git log or commit messages — this file is for
-context that would otherwise be lost, not a changelog.
-
-## Also update the task log
-
-After writing handoff.md, update `Task_Log_MagsudAbbaszade.xlsx` (repo root) with
-`.claude/task_log/task_log_append.py` (read its docstring; never edit the xlsx by hand).
-Only run it against the real file; to test it, pass `--xlsx` with a copy.
-
-1. **Open items on rows already logged** (only rows below 100 %; a Remaining note on a 100 % row is not unfinished work). Run `python3 .claude/task_log/task_log_append.py open`.
-   If it lists anything, ALWAYS ask the user (AskUserQuestion, multiSelect, batch up to 4
-   rows per question) which of those are now done, started, or need testing (and where). Do not
-   guess from the code or git. For each one they confirm, run `update "<id>" --pct <n>
-   --remaining "<what is still left, or ->"`; mention the date or session in `--comment`
-   if useful. Leave unconfirmed ones untouched. Ask even if nothing seems to have changed.
-2. **New work.** Run `... missing`. For each changelog version listed (committed work only —
-   not uncommitted changes), build a JSON file in the scratchpad with one object per task
-   (keys: version, part, name, functionality, priority, pct, remaining, comment, phase) following the
-   conventions of the existing rows (parts: CTR Generator, MR vs CTR Comparator, CTR Tracker,
-   App-wide / Infrastructure; priority = High/Medium/Low importance), then run `... add FILE`.
-   Also add a one-line plain-language summary (for a non-technical reader) per new Version|App Part to
-   `.claude/task_log/short_summaries.json`, and for any `summary<TAB>key` line printed by `missing`; then run `... refresh`.
-   If open-item updates changed a group's meaning, update its line too.
-3. Finish with one line: rows added, rows updated.
+Then run `git status` and say whether handoff.md is committed. Do not commit unless asked.
+Finish with: "Task log NOT updated — run /tasklog when you want it." and, if this session is
+large or the topic is done, suggest /clear and a fresh session.
