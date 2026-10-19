@@ -39,5 +39,8 @@
   "1.0.20|App-wide / Infrastructure": "Saved offscreen tests, user data kept out of git, one task-log backup per release, and testing the app with the commercial assistant.",
   "1.0.20|Proposals / Documents": "Short and long Word proposals, plus contract terms and pricebooks for each company.",
   "1.0.20|CTR Generator": "Transport lines with a quantity of 0 or less are hidden in the CTR, Reset presets no longer brings back a developer preset, Settings can restore a backup of aliases, renames or presets, and the CTR Request look is done; notes per section and the talk about a new request form are still open.",
-  "1.0.20|MR vs CTR Comparator": "A Disparities button (red exclamation mark) lists Stock Codes whose rechargeability in the documents contradicts SAGE; those items are left out of the statistics."
+  "1.0.20|MR vs CTR Comparator": "A Disparities button (red exclamation mark) lists Stock Codes whose rechargeability in the documents contradicts SAGE; those items are left out of the statistics.",
+  "1.0.21|CTR Generator": "The statistics can now show what the CTR bills (price) as well as what it costs, with price totals per category in AZN and USD.",
+  "1.0.21|MR vs CTR Comparator": "The Statistics tab gets a Document price view with its own Excel sheets (equipment or consumable from an editable Stock Code list, days from the matching CTR), and the results tables show each item's local cost.",
+  "1.0.21|App-wide / Infrastructure": "Repository tidied into packages, the window now fits smaller screens, rechargeability choices can be edited in Settings, statistics defaults were added, and 29 new tests were written."
 }

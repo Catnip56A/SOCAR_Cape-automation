@@ -226,17 +226,66 @@ def _edit_text(owner: object, attr: str) -> str:
         return ""
 
 
+def widget_frame(tbl) -> pd.DataFrame:
+    """A QTableWidget's content as a DataFrame (headers + cell text; a drop-down in a cell counts as its
+    current choice) — so on-screen tables get the same preview and memory figure as loaded files."""
+    from PySide6.QtWidgets import QComboBox
+    heads = []
+    for c in range(tbl.columnCount()):
+        h = tbl.horizontalHeaderItem(c)
+        heads.append((h.text().replace("\n", " ").strip() if h else "") or f"col {c + 1}")
+    data = []
+    for r in range(tbl.rowCount()):
+        row = []
+        for c in range(tbl.columnCount()):
+            w = tbl.cellWidget(r, c)
+            if isinstance(w, QComboBox):
+                row.append(w.currentText())
+            else:
+                it = tbl.item(r, c)
+                row.append(it.text() if it is not None else "")
+        data.append(row)
+    return pd.DataFrame(data, columns=heads)
+
+
+def _tables_overview(tables: list[dict]) -> pd.DataFrame:
+    """One line per parsed table: which file, which sheet, how big — the preview of "MR tables (n)"."""
+    rows = []
+    for t in tables:
+        d = t["data"]
+        rows.append({"File": Path(t.get("source_file", "")).name, "Sheet": t.get("source_sheet", ""),
+                     "Table": t.get("table_name", ""), "Rows": len(d), "Columns": len(d.columns),
+                     "Memory": fmt_bytes(df_bytes(d))})
+    return pd.DataFrame(rows, columns=["File", "Sheet", "Table", "Rows", "Columns", "Memory"])
+
+
+def _batch_frame(batch: list) -> pd.DataFrame:
+    """The CTR Tracker's queued entries as a table (CTR number, client, revision, value, ...)."""
+    import dataclasses
+    rows = []
+    for e in batch:
+        rows.append(dataclasses.asdict(e) if dataclasses.is_dataclass(e) else dict(getattr(e, "__dict__", {})))
+    return pd.DataFrame(rows)
+
+
+def _running(workers) -> bool:
+    return any(not w.isFinished() for w in (workers or []))
+
+
 def collect_data(win) -> list[dict]:
     """What the app holds in memory right now. A source that isn't loaded is
-    listed with the path it is connected to (or '(not selected)')."""
+    listed with the path it is connected to (or '(not selected)'). `state` is
+    "loaded", "loading" (being read right now — shown with a waiting mark) or
+    "not loaded"; every row that holds data carries a `df` to preview."""
     rows: list[dict] = []
 
-    def add(name, df, source, extra_rows=None):
+    def row(name, df, source, loading=False, count=None):
         loaded = df is not None and not getattr(df, "empty", True)
         rows.append({
             "name": name,
             "loaded": loaded,
-            "rows": (len(df) if loaded else None) if extra_rows is None else extra_rows,
+            "state": "loaded" if loaded else ("loading" if loading else "not loaded"),
+            "rows": (len(df) if loaded else None) if count is None else (count or None),
             "bytes": df_bytes(df) if loaded else None,
             "source": source or "(not selected)",
             "df": df if loaded else None,
@@ -244,45 +293,50 @@ def collect_data(win) -> list[dict]:
 
     gen = getattr(win, "_ctr_gen", None)
     if gen is not None:
-        add("AZN Pricebook", getattr(gen, "_azn_df", None), _edit_text(gen, "_azn_pb_edit"))
-        add("SAGE Export", getattr(gen, "_sage_df", None), _edit_text(gen, "_sage_edit"))
-        add("USD Pricebook", getattr(gen, "_usd_pb_df", None), _edit_text(gen, "_usd_pb_edit"))
-        add("Equipment Names DB", getattr(gen, "_names_db_df", None),
-            _edit_text(gen, "_combined_db_edit"))
+        loading = (getattr(gen, "_pending_loads", 0) or 0) > 0
+        row("AZN Pricebook", getattr(gen, "_azn_df", None), _edit_text(gen, "_azn_pb_edit"),
+            loading and bool(_edit_text(gen, "_azn_pb_edit")))
+        row("SAGE Export", getattr(gen, "_sage_df", None), _edit_text(gen, "_sage_edit"),
+            loading and bool(_edit_text(gen, "_sage_edit")))
+        row("USD Pricebook", getattr(gen, "_usd_pb_df", None), _edit_text(gen, "_usd_pb_edit"),
+            loading and bool(_edit_text(gen, "_usd_pb_edit")))
+        row("Equipment Names DB", getattr(gen, "_names_db_df", None), _edit_text(gen, "_combined_db_edit"),
+            loading and bool(_edit_text(gen, "_combined_db_edit")))
+        request_loading = _running(getattr(gen, "_workers", None))
         for label, attr in (("CTR Request — manpower lines", "_req_manpower_tbl"),
                             ("CTR Request — equipment lines", "_req_equip_tbl"),
                             ("CTR Request — consumable lines", "_req_cons_tbl"),
                             ("CTR Request — transport lines", "_transport_tbl")):
             tbl = getattr(gen, attr, None)
-            n = tbl.rowCount() if tbl is not None else 0
-            rows.append({"name": label, "loaded": n > 0, "rows": n or None, "bytes": None,
-                         "source": _edit_text(gen, "_combined_db_edit") or "(not selected)",
-                         "df": None})
+            row(label, widget_frame(tbl) if tbl is not None and tbl.rowCount() else None,
+                _edit_text(gen, "_combined_db_edit"), request_loading)
 
+    parsing = _running(getattr(win, "_workers", None))
     for side, tables_attr, df_attr in (("MR", "_mr_tables", "_mr_df"),
                                        ("CTR", "_ctr_tables", "_ctr_df")):
         tables = getattr(win, tables_attr, None) or []
-        total_rows = sum(len(t["data"]) for t in tables)
-        total_bytes = sum(df_bytes(t["data"]) for t in tables)
         files = sorted({Path(t["source_file"]).name for t in tables})
-        rows.append({
-            "name": f"{side} tables ({len(tables)})", "loaded": bool(tables),
-            "rows": total_rows or None, "bytes": total_bytes or None,
-            "source": ", ".join(files) if files else "(no files added)", "df": None,
-        })
-        add(f"{side} — ticked tables combined", getattr(win, df_attr, None),
-            "built from the ticked tables above")
+        row(f"{side} tables ({len(tables)})", _tables_overview(tables) if tables else None,
+            ", ".join(files) if files else "(no files added)", parsing)
+        if tables:                                     # the figures here are the tables' own, not the overview's
+            rows[-1]["rows"] = sum(len(t["data"]) for t in tables) or None
+            rows[-1]["bytes"] = sum(df_bytes(t["data"]) for t in tables) or None
+        row(f"{side} — ticked tables combined", getattr(win, df_attr, None),
+            "built from the ticked tables above", parsing)
 
-    add("Compare result (displayed)", getattr(win, "_display_df", None),
-        "built by Compare")
+    row("Compare result (displayed)", getattr(win, "_display_df", None), "built by Compare")
+
+    panel = getattr(win, "_stats_panel", None)
+    if panel is not None:
+        base = panel.base_rows() if hasattr(panel, "base_rows") else None
+        row("Statistics (cost / price rows)", base, "calculated after Compare",
+            _running(getattr(win, "_stats_workers", None)))
 
     trk = getattr(win, "_ctr_tracker", None)
     if trk is not None:
         batch = getattr(trk, "_batch", None) or []
-        rows.append({"name": "CTR Tracker batch", "loaded": bool(batch),
-                     "rows": len(batch) or None, "bytes": None,
-                     "source": _edit_text(trk, "_tracker_edit") or "(not selected)",
-                     "df": None})
+        row("CTR Tracker batch", _batch_frame(batch) if batch else None,
+            _edit_text(trk, "_tracker_edit") or "(not selected)")
     return rows
 
 
@@ -679,8 +733,12 @@ class DataTab(QWidget):
         total = 0
         for r, row in enumerate(self._rows):
             self._tbl.setItem(r, 0, _item(row["name"]))
-            state = _item("● loaded" if row["loaded"] else "○ not loaded")
-            state.setForeground(Qt.GlobalColor.darkGreen if row["loaded"] else Qt.GlobalColor.gray)
+            st = row.get("state") or ("loaded" if row["loaded"] else "not loaded")
+            state = _item({"loaded": "● loaded", "loading": "⏳ loading…"}.get(st, "○ not loaded"))
+            state.setForeground({"loaded": Qt.GlobalColor.darkGreen,
+                                 "loading": Qt.GlobalColor.darkYellow}.get(st, Qt.GlobalColor.gray))
+            if st == "loading":
+                state.setToolTip("Being read right now — it will show as loaded when it is done.")
             self._tbl.setItem(r, 1, state)
             self._tbl.setItem(r, 2, _item("" if row["rows"] is None else f"{row['rows']:,}", True))
             self._tbl.setItem(r, 3, _item(fmt_bytes(row["bytes"]) if row["bytes"] else "", True))
@@ -689,7 +747,10 @@ class DataTab(QWidget):
         self._tbl.resizeColumnsToContents()
         self._tbl.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
         loaded = sum(1 for r in self._rows if r["loaded"])
-        self._summary.setText(f"{loaded} of {len(self._rows)} sources loaded — about {fmt_bytes(total)} of tables")
+        busy = sum(1 for r in self._rows if r.get("state") == "loading")
+        self._summary.setText(f"{loaded} of {len(self._rows)} sources loaded"
+                              + (f" · ⏳ {busy} loading" if busy else "")
+                              + f" — about {fmt_bytes(total)} of tables")
         if 0 <= keep < len(self._rows):
             self._tbl.selectRow(keep)
 
@@ -1534,9 +1595,11 @@ class InspectorDock(QDockWidget):
         copy_btn = box.addButton("Copy path", QMessageBox.ButtonRole.ActionRole)
         box.addButton(QMessageBox.StandardButton.Ok)
         box.exec()
-        if box.clickedButton() is open_btn:
+        clicked = box.clickedButton()
+        box.deleteLater()
+        if clicked is open_btn:
             _open_folder(path)
-        elif box.clickedButton() is copy_btn:
+        elif clicked is copy_btn:
             QGuiApplication.clipboard().setText(str(path))
 
     def show_errors(self):

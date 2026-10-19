@@ -255,7 +255,7 @@ def format_term(side: str, doc: str, sheet: str | None = None) -> str:
 SHEET_LABEL_PREFIX = "      ↳  "     # marks a sheet entry in suggest()'s labels
 
 
-def suggest(fragment: str, pairs, limit: int = 40) -> list[tuple[str, str]]:
+def suggest(fragment: str, pairs, limit: int = 200) -> list[tuple[str, str]]:
     """Suggestions for the name being typed. `pairs` is an iterable of
     (side, document, sheet). Returns [(label, text to insert)], documents
     before their sheets. Matching is by part of the name, case-insensitive."""

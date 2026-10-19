@@ -14,8 +14,9 @@ TAGS = {"A": cs.RECHARGEABLE, "B": cs.NON_RECHARGEABLE, "C": cs.RECHARGEABLE, "D
 
 
 def _items(*rows):
+    # days = 1: these tests are about rechargeability, and equipment is costed x days
     return pd.DataFrame([{"key": k, "doc": "doc1", "sheet": "", "side": "CTR", "qty": q, "status": s,
-                          "section": "Plant & Equipment"} for k, q, s in rows])
+                          "section": "Plant & Equipment", "days": 1.0} for k, q, s in rows])
 
 
 def test_a_contradiction_is_not_costed_and_is_named():
@@ -174,9 +175,10 @@ def test_the_dialog_lists_resolved_codes_on_request():
     assert dlg.table.rowCount() == 1
     dlg._show_resolved.setChecked(True)
     assert dlg.table.rowCount() == 2
-    chosen = {dlg.table.item(r, 2).text(): dlg.table.item(r, 6).text() for r in range(2)}
+    chosen = {dlg.table.item(r, 3).text(): dlg.table.item(r, 7).text() for r in range(2)}
     assert chosen == {"B": "SAGE", "C": ""}
-    assert all(dlg.table.cellWidget(r, len(cs.DISPARITY_COLUMNS)) is not None for r in range(2))        # a Choose source button each
+    assert all(dlg.table.cellWidget(r, 0) is not None for r in range(2))        # a Choose source button each, in the FIRST column
+    assert dlg.table.horizontalHeaderItem(0).text() == ""                       # (so it never scrolls out of view)
 
 
 def test_remembered_choices_roundtrip_and_ignore_junk():
@@ -238,6 +240,55 @@ def test_choosing_sage_makes_the_line_say_what_sage_says():
     assert any(c["tbl"] is tbl and c["row"] == r and c["field"] in ("Rate", "Price") for c in w._incomplete_cells())
 
 
+def test_clearing_a_sage_choice_gives_the_cell_back_what_it_said():
+    w = H.generator()
+    # the cell said NONRECHARG, SAGE says rechargeable: choosing SAGE empties it; clearing the choice restores it
+    tbl, r, key, c_rate = _disparity_line(w, cs.NON_RECHARGEABLE)
+    original = tbl.item(r, c_rate).text()
+    assert original.upper() == "NONRECHARG"
+    w._stats_panel.set_choice(key, "SAGE")
+    H.pump()
+    assert tbl.item(r, c_rate).text() == ""
+    w._stats_panel.set_choice(key, None)                              # "Clear my choice"
+    H.pump(15)
+    assert tbl.item(r, c_rate).text() == original                     # given back
+    assert key in set(w._stats_panel.disparity_table()["Stock Code"])  # and the disparity is open again
+    # the other direction: a priced cell turned into NONRECHARG comes back as the price
+    tbl, r, key, c_rate = _disparity_line(w, cs.RECHARGEABLE)
+    price = tbl.item(r, c_rate).text()
+    w._stats_panel.set_choice(key, "SAGE")
+    H.pump()
+    assert tbl.item(r, c_rate).text() == "NONRECHARG"
+    w._stats_panel.set_choice(key, None)
+    H.pump(15)
+    assert tbl.item(r, c_rate).text() == price
+
+
+def test_switching_to_the_document_also_gives_the_cell_back():
+    w = H.generator()
+    tbl, r, key, c_rate = _disparity_line(w, cs.NON_RECHARGEABLE)
+    original = tbl.item(r, c_rate).text()
+    w._stats_panel.set_choice(key, "SAGE")
+    H.pump()
+    assert tbl.item(r, c_rate).text() == ""
+    w._stats_panel.set_choice(key, "DOC")                             # changed their mind: the document is right
+    H.pump(15)
+    assert tbl.item(r, c_rate).text() == original
+
+
+def test_a_cell_the_user_edited_after_the_change_is_never_overwritten_by_the_restore():
+    w = H.generator()
+    tbl, r, key, c_rate = _disparity_line(w, cs.NON_RECHARGEABLE)
+    w._stats_panel.set_choice(key, "SAGE")
+    H.pump()
+    assert tbl.item(r, c_rate).text() == ""
+    tbl.item(r, c_rate).setText("12.50")                              # the user types a price into the emptied cell
+    H.pump(15)
+    w._stats_panel.set_choice(key, None)
+    H.pump(15)
+    assert tbl.item(r, c_rate).text() == "12.50"                      # their edit stays
+
+
 def test_choosing_the_document_changes_no_cell():
     w = H.generator()
     tbl, r, key, c_rate = _disparity_line(w, cs.NON_RECHARGEABLE)
@@ -273,7 +324,7 @@ def test_the_items_name_is_shown_next_to_its_code():
     panel = StatsPanel()
     panel.set_rows(rows)
     dlg = DisparitiesDialog(None, panel)
-    col = cs.DISPARITY_COLUMNS.index("Item")
+    col = cs.DISPARITY_COLUMNS.index("Item") + 1                            # the button is column 0
     assert {dlg.table.item(r, col).text() for r in range(dlg.table.rowCount())} == {"WIDGET, BLUE", "WIDGET, RED"}
     _s, items = cs.report_frames(rows)
     assert "Item (SAGE name)" in items.columns

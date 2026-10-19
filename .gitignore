@@ -1,4 +1,4 @@
-#Test_files
+# Test files (real documents)
 *TEST_Files/
 
 # Python
@@ -19,9 +19,6 @@ dist/
 build/
 *.egg-info/
 *.egg
-
-# Streamlit
-.streamlit/secrets.toml
 
 # Jupyter
 .ipynb_checkpoints/
@@ -47,15 +44,21 @@ desktop.ini
 # Logs
 *.log
 
-# CTR Generator — locally learned request/pricebook renames (per-user state)
-ctr_generator/match_aliases.json
-
-
-# builds
+# Build output (PyInstaller dist/build above; Inno Setup writes the installers to Output/)
 *Output/
+
+# Other tools' folders
+.kilo/
+
 # User data - never commit (CTR presets, Inspector snapshots, backups, saved comparisons)
 # Config files that ship with the app (template_config.json, match_aliases.json) stay tracked.
 **/ctr_presets*.json
 logs/snapshots/
 *.bak-*
 **/Comparisons/
+
+# Stock Code types list (Equipment / Consumable per Stock Code).
+# HIDDEN FROM THE PUBLIC REPOSITORY FOR PRIVACY PURPOSES: it is the company's Stock Code catalogue.
+# It stays in the working folder, and app.spec bundles it into the .exe when it is present.
+# A fresh clone has no such file: the app then starts with an empty list (Settings says so).
+ctr_tools/stockcode_types.json

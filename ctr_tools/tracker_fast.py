@@ -910,6 +910,34 @@ def _plan_insertions(
     return to_insert, final_row_for_idx, pre_skip, spare_skipped
 
 
+# Children of <workbook> that come BEFORE <calcPr> in the file format (ECMA-376 order); a new
+# <calcPr> must go after the last of these that is present.
+_BEFORE_CALC_PR = ("fileVersion", "fileSharing", "workbookPr", "AlternateContent", "revisionPtr",
+                   "workbookProtection", "bookViews", "sheets", "functionGroups",
+                   "externalReferences", "definedNames")
+
+
+def _force_full_calc_on_load(workbook_xml: bytes) -> bytes:
+    """Set fullCalcOnLoad="1" on the workbook's <calcPr> (creating it if missing), so Excel
+    recalculates every formula when the file is opened. This module writes cell values and the
+    formulas' *text* straight into the XML and cannot compute results, so without the flag the
+    formula cells show stale values until the user presses Ctrl+Alt+Shift+F9."""
+    root = etree.fromstring(workbook_xml)
+    calc = root.find(f"{_M}calcPr")
+    if calc is None:
+        calc = etree.Element(f"{_M}calcPr")
+        last = None
+        for child in root:
+            if etree.QName(child).localname in _BEFORE_CALC_PR:
+                last = child
+        if last is None:
+            root.insert(0, calc)
+        else:
+            last.addnext(calc)
+    calc.set("fullCalcOnLoad", "1")
+    return etree.tostring(root, xml_declaration=True, encoding="UTF-8", standalone=True)
+
+
 def write_entries_fast(
     tracker_path: str | Path,
     entries: list[CTREntry],
@@ -1179,6 +1207,8 @@ def write_entries_fast(
         new_sheet_xml = etree.tostring(
             sheet_root, xml_declaration=True, encoding="UTF-8", standalone=True
         )
+        if "xl/workbook.xml" in all_data:
+            all_data["xl/workbook.xml"] = _force_full_calc_on_load(all_data["xl/workbook.xml"])
         tmp_path = tracker_path.with_name(tracker_path.name + ".tmp")
         try:
             with zipfile.ZipFile(tmp_path, "w", zipfile.ZIP_DEFLATED) as zout:

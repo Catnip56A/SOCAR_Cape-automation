@@ -23,14 +23,17 @@ from pathlib import Path
 from PySide6.QtCore import QPointF, Qt
 from PySide6.QtGui import QColor, QIcon, QPainter, QPainterPath, QPixmap
 from PySide6.QtWidgets import (
-    QDialog, QFileDialog, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem,
-    QMessageBox, QPushButton, QScrollArea, QVBoxLayout, QWidget,
+    QAbstractItemView, QCheckBox, QComboBox, QDialog, QFileDialog, QGroupBox, QHBoxLayout, QLabel,
+    QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QPushButton, QScrollArea, QTableWidget,
+    QTableWidgetItem, QVBoxLayout, QWidget, QInputDialog,
 )
 
 import ctr_tools.aliases as _aliases
 import ctr_tools.desc_renames as _renames
 import ctr_tools.presets as _presets
 import ctr_tools.source_choices as _choices
+import ctr_tools.stockcode_types as _types
+from stats import stats_view as _sv
 from ctr_tools.paths import user_data_dir
 
 log = logging.getLogger(__name__)
@@ -119,6 +122,8 @@ def count_entries(data) -> int:
     {name: {...}}."""
     if not isinstance(data, dict):
         return 0
+    if "equipment" in data and "consumables_stockcodes" in data:        # the Stock Code types list
+        return len(data["equipment"]) + len(data["consumables_stockcodes"])
     if data and set(data) <= {"manpower", "equipment", "consumable"}:
         return sum(len(v) for v in data.values() if isinstance(v, dict))
     return len(data)
@@ -180,6 +185,200 @@ class _RestoreDialog(QDialog):
     def chosen(self) -> Path | None:
         r = self._list.currentRow()
         return self._paths[r] if 0 <= r < len(self._paths) else None
+
+
+class _ChoicesDialog(QDialog):
+    """Edit the rechargeability choices: for a Stock Code whose rechargeability differs between a
+    document and SAGE, which source is right — the document or SAGE. The same list the Disparities
+    window fills in with *Choose source…*; add a code here to decide it before it ever shows up."""
+
+    _LABELS = (("Document is right", "DOC"), ("SAGE is right", "SAGE"))
+
+    def __init__(self, parent, entries: dict[str, str]):
+        super().__init__(parent)
+        self.setWindowTitle("Rechargeability choices")
+        self.resize(560, 480)
+        lay = QVBoxLayout(self)
+        note = QLabel(
+            "For a Stock Code whose rechargeability differs between a document and SAGE, which source is "
+            "right. These are the same choices you make with “Choose source…” in the Disparities window, "
+            "shared by the MR vs CTR statistics and the CTR Generator. A code listed here is settled "
+            "without asking; you can change or remove it at any time.")
+        note.setWordWrap(True)
+        note.setStyleSheet(_MUTED)
+        lay.addWidget(note)
+        self._table = QTableWidget(0, 2)
+        self._table.setHorizontalHeaderLabels(["Stock Code", "Which source is right"])
+        self._table.horizontalHeader().setStretchLastSection(True)
+        self._table.setColumnWidth(0, 200)
+        self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self._table.verticalHeader().setVisible(False)
+        lay.addWidget(self._table, 1)
+        for code, source in sorted(entries.items()):
+            self._add(code, source)
+        row = QHBoxLayout()
+        add = QPushButton("Add")
+        add.clicked.connect(lambda: self._add("", "DOC", edit=True))
+        rem = QPushButton("Remove selected")
+        rem.clicked.connect(self._remove)
+        ok = QPushButton("Save")
+        ok.clicked.connect(self.accept)
+        cancel = QPushButton("Cancel")
+        cancel.clicked.connect(self.reject)
+        row.addWidget(add)
+        row.addWidget(rem)
+        row.addStretch(1)
+        row.addWidget(ok)
+        row.addWidget(cancel)
+        lay.addLayout(row)
+
+    def _add(self, code: str, source: str, edit: bool = False) -> None:
+        r = self._table.rowCount()
+        self._table.insertRow(r)
+        self._table.setItem(r, 0, QTableWidgetItem(code))
+        combo = QComboBox()
+        for label, value in self._LABELS:
+            combo.addItem(label, value)
+        combo.setCurrentIndex(max(0, combo.findData(source)))
+        self._table.setCellWidget(r, 1, combo)
+        if edit:
+            self._table.setCurrentCell(r, 0)
+            self._table.editItem(self._table.item(r, 0))
+
+    def _remove(self) -> None:
+        for r in sorted({i.row() for i in self._table.selectedIndexes()}, reverse=True):
+            self._table.removeRow(r)
+
+    def entries(self) -> dict[str, str]:
+        out = {}
+        for r in range(self._table.rowCount()):
+            code = (self._table.item(r, 0).text() if self._table.item(r, 0) else "").strip().upper()
+            combo = self._table.cellWidget(r, 1)
+            if code and combo is not None:
+                out[code] = combo.currentData()
+        return out
+
+
+class _TypesDialog(QDialog):
+    """Edit the Stock Code types list: for every Stock Code, whether it is Equipment (priced from the
+    USD Pricebook, per day) or a Consumable (priced from SAGE). Searchable, with each item's
+    description (from the SAGE Export when it is loaded) so it is easy to decide."""
+
+    def __init__(self, parent, types: dict, names: dict[str, str]):
+        super().__init__(parent)
+        self.setWindowTitle("Stock Code types — Equipment or Consumable")
+        self.resize(900, 620)
+        self._orig_kind: dict[str, str] = {}
+        self._confirmed: dict[str, str] = dict(types.get("confirmed", {}))
+        lay = QVBoxLayout(self)
+        note = QLabel(
+            "Which Stock Codes are Equipment and which are Consumables. The MR vs CTR Document price uses it "
+            "to choose the rate source. A code that was in both lists shows as Equipment (marked). "
+            "Select lines and press a button to change their type; your changes are marked as your decision.")
+        note.setWordWrap(True)
+        note.setStyleSheet(_MUTED)
+        lay.addWidget(note)
+        self._search = QLineEdit()
+        self._search.setPlaceholderText("Search by Stock Code or description…")
+        self._search.setClearButtonEnabled(True)
+        self._search.textChanged.connect(self._apply_filter)
+        lay.addWidget(self._search)
+        self._table = QTableWidget(0, 4)
+        self._table.setHorizontalHeaderLabels(["Stock Code", "Type", "Description", "Note"])
+        self._table.horizontalHeader().setStretchLastSection(True)
+        self._table.setColumnWidth(0, 150)
+        self._table.setColumnWidth(1, 110)
+        self._table.setColumnWidth(2, 380)
+        self._table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self._table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self._table.verticalHeader().setVisible(False)
+        lay.addWidget(self._table, 1)
+        both = types["equipment"] & types["consumable"]
+        codes = sorted(types["equipment"] | types["consumable"])
+        self._table.setRowCount(len(codes))
+        for r, code in enumerate(codes):
+            kind = _types.EQUIPMENT if code in types["equipment"] else _types.CONSUMABLE
+            self._orig_kind[code] = kind
+            note_txt = ("in both lists — Equipment" if code in both
+                        else "confirmed" if code in self._confirmed else "")
+            for c, v in enumerate((code, kind, names.get(code, ""), note_txt)):
+                self._table.setItem(r, c, QTableWidgetItem(v))
+        self._count = QLabel("")
+        self._count.setStyleSheet(_MUTED)
+        row = QHBoxLayout()
+        add = QPushButton("Add…")
+        add.clicked.connect(self._add)
+        to_eq = QPushButton("Set selected → Equipment")
+        to_eq.clicked.connect(lambda: self._set_selected(_types.EQUIPMENT))
+        to_cons = QPushButton("Set selected → Consumable")
+        to_cons.clicked.connect(lambda: self._set_selected(_types.CONSUMABLE))
+        rem = QPushButton("Remove selected")
+        rem.clicked.connect(self._remove)
+        ok = QPushButton("Save")
+        ok.clicked.connect(self.accept)
+        cancel = QPushButton("Cancel")
+        cancel.clicked.connect(self.reject)
+        for w in (add, to_eq, to_cons, rem):
+            row.addWidget(w)
+        row.addStretch(1)
+        row.addWidget(ok)
+        row.addWidget(cancel)
+        lay.addWidget(self._count)
+        lay.addLayout(row)
+        self._update_count()
+
+    def _selected_rows(self) -> list[int]:
+        return sorted({i.row() for i in self._table.selectedIndexes()})
+
+    def _apply_filter(self, text: str) -> None:
+        q = text.strip().lower()
+        for r in range(self._table.rowCount()):
+            hit = not q or any(q in (self._table.item(r, c).text().lower() if self._table.item(r, c) else "")
+                               for c in (0, 2))
+            self._table.setRowHidden(r, not hit)
+
+    def _update_count(self) -> None:
+        eq = sum(1 for r in range(self._table.rowCount()) if self._table.item(r, 1).text() == _types.EQUIPMENT)
+        self._count.setText(f"{eq} Equipment · {self._table.rowCount() - eq} Consumable")
+
+    def _set_selected(self, kind: str) -> None:
+        for r in self._selected_rows():
+            self._table.item(r, 1).setText(kind)
+            self._table.item(r, 3).setText("your decision")
+        self._update_count()
+
+    def _add(self) -> None:
+        text, ok = QInputDialog.getText(self, "Add Stock Codes", "Stock Code(s), separated by spaces or commas:")
+        if not ok or not text.strip():
+            return
+        existing = {self._table.item(r, 0).text(): r for r in range(self._table.rowCount())}
+        for code in [c.strip().upper() for c in text.replace(",", " ").split() if c.strip()]:
+            if code in existing:
+                continue
+            r = self._table.rowCount()
+            self._table.insertRow(r)
+            for c, v in enumerate((code, _types.CONSUMABLE, "", "new — set its type")):
+                self._table.setItem(r, c, QTableWidgetItem(v))
+            existing[code] = r
+        self._update_count()
+
+    def _remove(self) -> None:
+        for r in reversed(self._selected_rows()):
+            self._table.removeRow(r)
+        self._update_count()
+
+    def result_types(self) -> dict:
+        eq, cons, conf = set(), set(), dict(self._confirmed)
+        for r in range(self._table.rowCount()):
+            code, kind = self._table.item(r, 0).text(), self._table.item(r, 1).text()
+            (eq if kind == _types.EQUIPMENT else cons).add(code)
+            if self._table.item(r, 3).text() in ("your decision", "new — set its type") or (
+                    self._orig_kind.get(code) not in (None, kind)):
+                conf[code] = kind                       # the user changed it: a decision, not asked again
+        kept = eq | cons
+        return {"equipment": eq, "consumable": cons,
+                "confirmed": {k: v for k, v in conf.items() if k in kept}}
 
 
 class SettingsDialog(QDialog):
@@ -253,11 +452,46 @@ class SettingsTab(QWidget):
                         None, self._reset_presets,
                         lambda: self._restore("CTR presets", _presets._PRESETS_PATH))
         self._saved_row(g2, "choices", "Rechargeability choices",
-                        "Which source (document or SAGE) you chose for a Stock Code whose rechargeability "
-                        "differs — made in the Disparities list of the statistics.",
-                        None, self._reset_choices,
-                        lambda: self._restore("Rechargeability choices", _choices._CHOICES_PATH))
+                        "Which source (document or SAGE) is right for a Stock Code whose rechargeability "
+                        "differs. Made in the Disparities list of the statistics, or edited here.",
+                        self._edit_choices, self._reset_choices,
+                        lambda: self._restore("Rechargeability choices", _choices._CHOICES_PATH),
+                        open_text="Edit…")
+        self._saved_row(g2, "types", "Stock Code types",
+                        "Which Stock Codes are Equipment and which are Consumables (used by Document price in the "
+                        "MR vs CTR tab). Ships with the app; Merge adds the shipped codes you do not have yet, "
+                        "Reset replaces your list with the shipped one.",
+                        self._edit_types, self._reset_types,
+                        lambda: self._restore("Stock Code types", _types._TYPES_PATH),
+                        open_text="Edit…",
+                        extra=("Merge shipped…", self._merge_types,
+                               "Add the codes of the list that shipped with this version that your list lacks. "
+                               "Your own entries and decisions are kept."))
         lay.addWidget(grp2)
+
+        # ── Statistics defaults ──────────────────────────────────────────────
+        grp3 = QGroupBox("Statistics defaults")
+        g3 = QVBoxLayout(grp3)
+        mode_row = QHBoxLayout()
+        mode_row.addWidget(QLabel("Show first"))
+        self._mode_combo = QComboBox()
+        self._mode_combo.addItem("Document costs (SAGE expected cost)", _sv.MODE_COST)
+        self._mode_combo.addItem("Document price (what the documents bill)", _sv.MODE_PRICE)
+        self._mode_combo.currentIndexChanged.connect(lambda _=0: self._save_defaults())
+        mode_row.addWidget(self._mode_combo, 1)
+        g3.addLayout(mode_row)
+        self._scaffold_chk = QCheckBox("Include scaffold in Document price")
+        self._scaffold_chk.toggled.connect(lambda _=False: self._save_defaults())
+        g3.addWidget(self._scaffold_chk)
+        self._markup_chk = QCheckBox("Include the markup on consumables in Document price (CTR Generator)")
+        self._markup_chk.toggled.connect(lambda _=False: self._save_defaults())
+        g3.addWidget(self._markup_chk)
+        hint = QLabel("These are the starting positions of the toggles in the statistics (the MR vs CTR "
+                      "tab and the CTR Generator); you can still change them there at any time.")
+        hint.setStyleSheet(_MUTED)
+        hint.setWordWrap(True)
+        g3.addWidget(hint)
+        lay.addWidget(grp3)
 
         self._where = QLabel()
         self._where.setStyleSheet(_MUTED)
@@ -292,7 +526,8 @@ class SettingsTab(QWidget):
         parent_layout.addWidget(note)
         return edit
 
-    def _saved_row(self, parent_layout, key, title, hint, open_fn, reset_fn, restore_fn):
+    def _saved_row(self, parent_layout, key, title, hint, open_fn, reset_fn, restore_fn,
+                   open_text="Open manager", extra=None):
         row = QHBoxLayout()
         label = QLabel(title)
         label.setMinimumWidth(170)
@@ -301,9 +536,14 @@ class SettingsTab(QWidget):
         row.addWidget(label)
         row.addWidget(count, 1)
         if open_fn is not None:
-            b = QPushButton("Open manager")
+            b = QPushButton(open_text)
             b.clicked.connect(open_fn)
             row.addWidget(b)
+        if extra is not None:
+            x = QPushButton(extra[0])
+            x.setToolTip(extra[2])
+            x.clicked.connect(extra[1])
+            row.addWidget(x)
         r = QPushButton("Reset…")
         r.clicked.connect(reset_fn)
         row.addWidget(r)
@@ -328,8 +568,21 @@ class SettingsTab(QWidget):
         self._counts["renames"].setText(f"{c['renames']} saved")
         self._counts["presets"].setText(f"{c['presets']} saved")
         self._counts["choices"].setText(f"{c.get('choices', 0)} saved")
+        t = _types.current_types()
+        self._counts["types"].setText(
+            f"{len(t['equipment'])} equipment · {len(t['consumable'])} consumable"
+            + ("" if _types.shipped_available() else " · (no shipped list found)"))
+        d = _sv.stats_defaults()
+        for w, setter in ((self._mode_combo, lambda: self._mode_combo.setCurrentIndex(
+                               max(0, self._mode_combo.findData(d["mode"])))),
+                          (self._scaffold_chk, lambda: self._scaffold_chk.setChecked(d["scaffold"])),
+                          (self._markup_chk, lambda: self._markup_chk.setChecked(d["markup"]))):
+            w.blockSignals(True)
+            setter()
+            w.blockSignals(False)
         for key, path in (("aliases", _aliases._ALIASES_PATH), ("renames", _renames._DESC_RENAMES_PATH),
-                          ("presets", _presets._PRESETS_PATH), ("choices", _choices._CHOICES_PATH)):
+                          ("presets", _presets._PRESETS_PATH), ("choices", _choices._CHOICES_PATH),
+                          ("types", _types._TYPES_PATH)):
             n = len(backups_for(path))
             btn = self._restore_btns[key]
             btn.setEnabled(n > 0)
@@ -405,9 +658,11 @@ class SettingsTab(QWidget):
             QMessageBox.information(self, "Restore", f"There is no backup of the {what} yet.")
             return
         dlg = _RestoreDialog(self, what, backups)
-        if dlg.exec() != QDialog.DialogCode.Accepted or dlg.chosen() is None:
-            return
+        accepted = dlg.exec() == QDialog.DialogCode.Accepted
         chosen = dlg.chosen()
+        dlg.deleteLater()                    # one window per use, not one left behind each time
+        if not accepted or chosen is None:
+            return
         n = read_entries(chosen)
         if n is None:
             QMessageBox.critical(self, "Restore", f"{chosen.name} cannot be read — nothing was changed.")
@@ -441,6 +696,92 @@ class SettingsTab(QWidget):
     def _reset_renames(self):
         self._reset("Description renames", _renames._DESC_RENAMES_PATH,
                     "The list becomes empty.")
+
+    def _save_defaults(self) -> None:
+        _sv.save_stats_defaults(self._mode_combo.currentData(), self._scaffold_chk.isChecked(),
+                                self._markup_chk.isChecked())
+        self._gen.stats_defaults_changed.emit()
+
+    def _edit_choices(self) -> None:
+        dlg = _ChoicesDialog(self, _choices.load_choices())
+        accepted = dlg.exec() == QDialog.DialogCode.Accepted
+        entries = dlg.entries() if accepted else None
+        dlg.deleteLater()
+        if not accepted:
+            return
+        try:
+            check_writable(_choices._CHOICES_PATH.parent)
+            copy_backup(_choices._CHOICES_PATH)
+            _choices.save_choices(entries)
+            self._gen.reload_saved_data()          # both statistics lists take the new choices
+        except OSError as exc:
+            log.exception("Saving the rechargeability choices failed")
+            QMessageBox.critical(self, "Save failed", str(exc))
+            return
+        self.refresh()
+
+    def _edit_types(self) -> None:
+        names = self._gen.sage_names() if hasattr(self._gen, "sage_names") else {}
+        dlg = _TypesDialog(self, _types.current_types(), names)
+        accepted = dlg.exec() == QDialog.DialogCode.Accepted
+        result = dlg.result_types() if accepted else None
+        dlg.deleteLater()
+        if not accepted:
+            return
+        try:
+            check_writable(_types._TYPES_PATH.parent)
+            copy_backup(_types._TYPES_PATH)
+            _types.save_types(result)
+            self._gen.reload_saved_data()
+        except OSError as exc:
+            log.exception("Saving the Stock Code types failed")
+            QMessageBox.critical(self, "Save failed", str(exc))
+            return
+        self.refresh()
+
+    def _merge_types(self) -> None:
+        if not _types.shipped_available():
+            QMessageBox.information(self, "Merge shipped list",
+                                    "No shipped Stock Code types list was found in this installation.")
+            return
+        try:
+            check_writable(_types._TYPES_PATH.parent)
+            copy_backup(_types._TYPES_PATH)
+            added = _types.merge_shipped()
+            self._gen.reload_saved_data()
+        except OSError as exc:
+            log.exception("Merging the shipped Stock Code types failed")
+            QMessageBox.critical(self, "Merge failed", str(exc))
+            return
+        QMessageBox.information(self, "Merge shipped list",
+                                f"{added} Stock Code(s) added from the shipped list. Your own entries and "
+                                "decisions were kept (a backup of the list was made first).")
+        self.refresh()
+
+    def _reset_types(self) -> None:
+        if not _types.shipped_available():
+            QMessageBox.information(self, "Reset Stock Code types",
+                                    "No shipped Stock Code types list was found in this installation, so "
+                                    "there is nothing to reset to.")
+            return
+        if QMessageBox.question(
+                self, "Reset Stock Code types",
+                "Replace your Stock Code types list with the one that shipped with the app?\n\nYour edits and "
+                "decisions are lost from the list (the current file is first copied next to the original as "
+                "“…bak-<date>-<time>…”).",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel) != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            check_writable(_types._TYPES_PATH.parent)
+            copy_backup(_types._TYPES_PATH)
+            _types.reset_to_shipped()
+            self._gen.reload_saved_data()
+        except OSError as exc:
+            log.exception("Reset of the Stock Code types failed")
+            QMessageBox.critical(self, "Reset failed", str(exc))
+            return
+        self.refresh()
 
     def _reset_choices(self):
         self._reset("rechargeability choices", _choices._CHOICES_PATH,

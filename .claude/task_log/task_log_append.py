@@ -9,6 +9,7 @@
     python3 .claude/task_log/task_log_append.py update-many FILE.json [--xlsx PATH]
     python3 .claude/task_log/task_log_append.py drop-column "Total Units" [--xlsx PATH]
     python3 .claude/task_log/task_log_append.py replace-text "OLD" "NEW" [--xlsx PATH]
+    python3 .claude/task_log/task_log_append.py delete-row "X - MA176" [--xlsx PATH]
     python3 .claude/task_log/task_log_append.py refresh  [--xlsx PATH]
 
 missing  changelog versions that have no row in the log yet (version + date), then
@@ -32,6 +33,9 @@ update-many  the same for several rows in ONE write (one backup): FILE.json is a
 drop-column  remove a column that is not required (e.g. "Total Units"); backs up first
 replace-text replace OLD with NEW in the Task Name, Remaining and Comments of every row (e.g. to
          keep a person's name out of the log); sheets 2 and 3 are rebuilt
+delete-row   remove one row for good (only when the user asks) and move every higher id of the same
+         prefix down by one, so the numbering stays gapless; sheets 2 and 3 are rebuilt. Make a copy of the
+         file first: the per-release backup is not taken again when one already exists
 refresh  rebuild sheets 2 and 3 only (use after editing short_summaries.json)
 Sheet 3 ("Shortened Form") has one row per Version x App Part: a one-line plain-language summary
 (from short_summaries.json, key "Version|App Part") plus figures computed from sheet 1.
@@ -297,7 +301,7 @@ def backup(path):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("cmd", choices=["missing", "open", "add", "update", "update-many", "drop-column",
-                                      "replace-text", "refresh"])
+                                      "replace-text", "delete-row", "refresh"])
     ap.add_argument("arg", nargs="?")
     ap.add_argument("arg2", nargs="?")
     ap.add_argument("--xlsx", default=str(DEFAULT_XLSX))
@@ -312,7 +316,7 @@ def main():
 
     path = Path(a.xlsx)
     print(f"Task log: {path}", file=sys.stderr)
-    writes = ("add", "update", "update-many", "drop-column", "replace-text", "refresh")
+    writes = ("add", "update", "update-many", "drop-column", "replace-text", "delete-row", "refresh")
     if a.cmd in writes and (path.parent / f"~${path.name}").exists():
         sys.exit("The task log looks open in Excel (lock file found). Close it first.")
     wb = load_workbook(path)
@@ -430,6 +434,25 @@ def main():
                     cell.value = cell.value.replace(a.arg, a.arg2)
                     n += 1
         print(f"replaced in {n} cell(s)")
+
+    if a.cmd == "delete-row":
+        m = re.match(r"^(.*?)(\d+)$", a.arg or "")
+        if not m:
+            sys.exit('usage: delete-row "X - MA176"')
+        prefix, number = m.group(1), int(m.group(2))
+        r = row_of(a.arg)
+        name = ws.cell(r, col["Task Name"]).value
+        ws.delete_rows(r)
+        moved = 0
+        for rr in data_rows(ws):
+            mm = re.match(r"^(.*?)(\d+)$", str(ws.cell(rr, 1).value))
+            if mm and mm.group(1) == prefix and int(mm.group(2)) > number:
+                ws.cell(rr, 1).value = f"{prefix}{int(mm.group(2)) - 1:0{len(mm.group(2))}d}"
+                moved += 1
+        for rr in data_rows(ws):
+            style_row(ws, rr, L)
+        refresh_table_ref(ws, L)
+        print(f"deleted {a.arg}: {name}; {moved} higher id(s) moved down by one")
 
     if a.cmd == "drop-column":
         drop_column(ws, a.arg)

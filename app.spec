@@ -14,7 +14,9 @@ _DATA_FILES = [
     ("ctr_tools/template_config.json", "ctr_tools"),
     ("VERSION", "."),
 ]
-for _fname in ("match_aliases.json",):
+# stockcode_types.json (the Equipment / Consumable list) is hidden from git for privacy
+# purposes (see .gitignore); it is bundled only when it is present in the working folder.
+for _fname in ("match_aliases.json", "stockcode_types.json"):
     _src = os.path.join("ctr_tools", _fname)
     if os.path.exists(_src):
         _DATA_FILES.append((_src, "ctr_tools"))

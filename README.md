@@ -114,7 +114,7 @@ The resulting installer is written wherever `setup.iss` configures its output (s
 
 ## Logs (installed .exe)
 
-The app writes two log files to a `logs` folder next to the installed `.exe` (`app_logging.py`):
+The app writes two log files to a `logs` folder next to the installed `.exe` (`common/app_logging.py`):
 
 - **`app.log`** — rotating log (max 5 MB, 5 backups) with startup info, warnings, errors, and Qt-level messages.
 - **`crash.log`** — native crash traces (`faulthandler`) plus any uncaught Python exception that would otherwise make the app silently close.
@@ -141,13 +141,19 @@ This is separate from the app's **data** folder (saved presets/renames), which a
 
 ```
 SOCAR_Cape-automation/
-├── app.py                  # Main window: MR vs CTR Comparator tab + wiring for the other two
-├── sheet_parser.py         # Comparator's Excel parsing logic (named-range table detection)
-├── comparison_history.py   # Save/reload full comparisons
-├── doc_filter.py           # "Filter documents" expression parser/evaluator
-├── cost_stats.py           # Cost statistics logic (SAGE expected cost, rechargeable split) — no Qt
-├── stats_view.py           # Statistics tab widget + background worker (also embedded in the CTR Generator)
-├── app_logging.py          # Rotating app.log / crash.log setup
+├── app.py                  # Entry point: main window, MR vs CTR Comparator tab + wiring for the other two
+├── comparator/             # MR vs CTR Comparator logic
+│   ├── sheet_parser.py     #   Excel parsing (named-range table detection)
+│   ├── comparison_history.py #  Save/reload full comparisons
+│   └── doc_filter.py       #   "Filter documents" expression parser/evaluator
+├── stats/                  # Cost and price statistics
+│   ├── cost_stats.py       #   The logic (cost view, price view, disparities) — no Qt
+│   └── stats_view.py       #   The panel + background worker (also embedded in the CTR Generator)
+├── common/                 # Shared pieces
+│   ├── app_logging.py      #   Rotating app.log / crash.log setup
+│   ├── find_bar.py         #   Ctrl+F on tables and trees
+│   ├── hover_text.py       #   Full text of a cut-off cell on hover
+│   └── settings_view.py    #   The Settings window
 ├── ctr_tools/               # CTR Generator + CTR Tracker
 │   ├── window.py            # CTR Generator tab
 │   ├── builder_azn.py       # AZN CTR spreadsheet writer
@@ -161,11 +167,14 @@ SOCAR_Cape-automation/
 │   ├── tracker_xlwings.py   # Excel-COM write path (row-insert fallback, Windows + Excel only)
 │   ├── inspector.py         # F12 Inspector dock (read-only: logs, data, storage, threads, variables, tasks, charts)
 │   ├── tasks.py             # Ordered background tasks + "stop after current task" (used by the Inspector)
+│   ├── stockcode_types.py   # Equipment / Consumable list (file handling); the shipped stockcode_types.json is
+│   │                        #   hidden from git for privacy purposes and bundled into the .exe when present
 │   └── aliases.py / desc_renames.py / presets.py   # Persisted user corrections/presets
+├── tests/                  # Offscreen tests (python tests/run_all.py)
 ├── pyproject.toml          # Dependencies and project metadata
-├── justfile                # Task runner (run / build / setup / clean)
-├── app.spec                # PyInstaller build spec
-└── .gitignore              # Excludes .xlsx/.xlsm and env/
+├── justfile                # Task runner (run / build / setup / clean — clean keeps Output/)
+├── app.spec / setup.iss    # PyInstaller build spec / Inno Setup installer script
+└── .gitignore              # Excludes Excel files, virtual environments, build output, user data
 ```
 
 ---

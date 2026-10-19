@@ -37,6 +37,11 @@ _D._DESC_RENAMES_PATH = SANDBOX / "desc_renames.json"
 _P._PRESETS_PATH = SANDBOX / "ctr_presets.json"
 _P._BUNDLED_DEFAULT_PATH = SANDBOX / "no_such_default.json"
 
+import ctr_tools.stockcode_types as _ST   # noqa: E402
+
+_ST._TYPES_PATH = SANDBOX / "stockcode_types.json"                  # the user's list: a fixture per test
+_ST._BUNDLED_DEFAULT_PATH = SANDBOX / "no_such_shipped_types.json"  # never the real shipped (private) list
+
 from PySide6.QtWidgets import QApplication, QMessageBox   # noqa: E402
 
 app = QApplication.instance() or QApplication([])

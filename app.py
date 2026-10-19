@@ -5,6 +5,7 @@ Run:   python app.py
 Build: pyinstaller app.spec   (Windows only, see justfile)
 """
 
+import json
 import logging
 import re
 import sys
@@ -31,8 +32,10 @@ sys.path.insert(0, str(Path(__file__).parent))
 from comparator.sheet_parser import is_cover_sheet, parse_workbook
 from comparator import doc_filter
 from stats import cost_stats
+from ctr_tools.stockcode_types import current_types
 from stats.stats_view import STOPPED as _STATS_STOPPED, StatsPanel, StatsWorker
 from common.settings_view import SettingsDialog, gear_icon
+from common.attention import ATTENTION_ROLE, AttentionDelegate
 from common.find_bar import install_find
 from common.hover_text import install_elided_tooltips
 from comparator.comparison_history import (
@@ -40,7 +43,7 @@ from comparator.comparison_history import (
     save_comparison, suggest_save_path,
 )
 from ctr_tools import __version__ as _CTR_VERSION
-from ctr_tools.window import CTRGeneratorWidget, _file_picker_row, stoppable_progress_dialog
+from ctr_tools.window import CTRGeneratorWidget, _file_picker_row, file_stamp, stoppable_progress_dialog
 from ctr_tools.tasks import TASKS, Job
 from ctr_tools.inspector import InspectorDock
 from ctr_tools.tracker_window import CTRTrackerWidget
@@ -341,9 +344,14 @@ _HIGHLIGHT_COLORS = {
     "mismatch": (_MISMATCH_BG, _MISMATCH_FG),
     "combined": (_COMBINED_BG, _COMBINED_FG),
 }
+# A Days cell that is missing (equipment is costed × days): painted like a highlight, orange.
+_DAYS_NEEDED_COLORS = (QColor("#FFE0B2"), QColor("#E65100"))
 
 
 class PandasModel(QAbstractTableModel):
+    # The user typed days into an editable Days cell: (source row, column name, text).
+    days_edited = Signal(int, str, str)
+
     def __init__(self, df: pd.DataFrame, parent=None):
         super().__init__(parent)
         self._df = df.reset_index(drop=True)
@@ -354,9 +362,94 @@ class PandasModel(QAbstractTableModel):
         self._col_names = [str(c) for c in self._df.columns]
         self._highlights: dict[tuple[int, str], str] = {}  # (src_row, col_name) -> kind
         self._tips: dict[tuple[int, str], str] = {}        # (src_row, col_name) -> tooltip
+        self._days_needed: set[tuple[int, str]] = set()    # (src_row, col_name) of Days cells waiting for the user
+        self._days_editable: set[tuple[int, str]] = set()  # (src_row, col_name) of Days cells the user may edit
+        self._waiting: tuple[str, str] | None = None       # (cell text, hover text) while the statistics are not ready
 
     def set_tooltips(self, tips: dict[tuple[int, str], str]):
         self._tips = tips
+
+    def attention(self, row: int, col_name: str):
+        """(background, foreground) of a cell the user must not miss — a highlight kind from
+        _HIGHLIGHT_COLORS (red mismatch, orange Combined, and any kind added later) or a missing Days
+        cell — else None. Every colour that should stay visible when selected goes through here."""
+        kind = self._highlights.get((row, col_name))
+        if kind:
+            return _HIGHLIGHT_COLORS[kind]
+        if (row, col_name) in self._days_needed:
+            return _DAYS_NEEDED_COLORS
+        return None
+
+    _WAITING_COLUMNS = ("Days (", "Local cost")
+
+    def set_waiting(self, text: str | None, reason: str = ""):
+        """While the statistics are not ready the Days / Local cost cells would just be blank: show a waiting
+        mark (and say what is awaited on hover) instead — for lines that exist on that side. The mark is
+        display only: exports and saved comparisons never contain it."""
+        self._waiting = (text, reason) if text else None
+        if self.rowCount() > 0 and self.columnCount() > 0:
+            self.dataChanged.emit(self.index(0, 0), self.index(self.rowCount() - 1, self.columnCount() - 1))
+
+    def _is_waiting_cell(self, row: int, col: int) -> bool:
+        name = self._col_names[col]
+        if self._waiting is None or not name.startswith(self._WAITING_COLUMNS):
+            return False
+        v = self._values[row][col]
+        if not (v is None or (isinstance(v, float) and pd.isna(v)) or str(v).strip() == ""):
+            return False
+        for side in ("MR", "CTR"):                                  # a side's cell only waits if that side has a line
+            if name.endswith(f"({side})") and f"{side} Document" in self._col_names:
+                doc = self._values[row][self._col_names.index(f"{side} Document")]
+                return bool(str(doc or "").strip()) and not (isinstance(doc, float) and pd.isna(doc))
+        return True
+
+    def set_days_editable(self, cells: set[tuple[int, str]]):
+        """The Days cells (equipment lines) the user may edit: double-click, type, Enter."""
+        self._days_editable = cells
+
+    def flags(self, index):
+        base = super().flags(index)
+        if index.isValid() and (index.row(), self._col_names[index.column()]) in self._days_editable:
+            return base | Qt.ItemFlag.ItemIsEditable
+        return base
+
+    def setData(self, index, value, role=Qt.ItemDataRole.EditRole):
+        """An edit of a Days cell is only announced (days_edited); the window decides what it means (and asks
+        whether to sync the other side), then rebuilds the columns, which is what updates the cell."""
+        if role != Qt.ItemDataRole.EditRole or not index.isValid():
+            return False
+        col_name = self._col_names[index.column()]
+        if (index.row(), col_name) not in self._days_editable:
+            return False
+        self.days_edited.emit(index.row(), col_name, str(value))
+        return True
+
+    def set_days_needed(self, cells: set[tuple[int, str]]):
+        """Days cells that are missing (equipment is costed × days) — painted orange, like the Statistics tab."""
+        self._days_needed = cells
+        if self.rowCount() > 0 and self.columnCount() > 0:
+            self.dataChanged.emit(self.index(0, 0), self.index(self.rowCount() - 1, self.columnCount() - 1))
+
+    def set_tail_columns(self, base_cols: int, tail: pd.DataFrame):
+        """Replace every column after the first `base_cols` with the columns of `tail` (same
+        row order). The columns are removed / inserted properly, so a view keeps its sort,
+        selection and the columns the user hid."""
+        cur = self.columnCount()
+        if cur > base_cols:
+            self.beginRemoveColumns(QModelIndex(), base_cols, cur - 1)
+            self._df = self._df.iloc[:, :base_cols]
+            self._values = [row[:base_cols] for row in self._values]
+            self._col_names = self._col_names[:base_cols]
+            self.endRemoveColumns()
+        if len(tail.columns):
+            n = len(tail.columns)
+            self.beginInsertColumns(QModelIndex(), base_cols, base_cols + n - 1)
+            tail = tail.reset_index(drop=True)
+            self._df = pd.concat([self._df, tail], axis=1)
+            extra = tail.to_numpy(dtype=object).tolist()
+            self._values = [row + extra[i] for i, row in enumerate(self._values)]
+            self._col_names = self._col_names + [str(c) for c in tail.columns]
+            self.endInsertColumns()
 
     def set_highlights(self, cells: dict[tuple[int, str], str]):
         self._highlights = cells
@@ -376,24 +469,32 @@ class PandasModel(QAbstractTableModel):
         val      = self._values[index.row()][index.column()]
 
         if role == Qt.ItemDataRole.DisplayRole:
+            if self._waiting is not None and self._is_waiting_cell(index.row(), index.column()):
+                return self._waiting[0]
             if isinstance(val, float) and pd.isna(val):
                 return ""
             return str(val) if val is not None else ""
 
+        if role == Qt.ItemDataRole.EditRole:
+            return "" if val is None or (isinstance(val, float) and pd.isna(val)) else str(val)
+
         if role == Qt.ItemDataRole.ToolTipRole:
+            if self._waiting is not None and self._is_waiting_cell(index.row(), index.column()):
+                return self._waiting[1]
             return self._tips.get((index.row(), col_name))
 
-        # A highlight (mismatch, or a Combined-view multi-document colour) overrides
-        # all other cell colours.
+        # A highlight (mismatch, Combined, missing Days, ...) overrides all other cell colours.
         kind = self._highlights.get((index.row(), col_name))
         if role == Qt.ItemDataRole.UserRole:
             return kind
-        if kind:
-            bg, fg = _HIGHLIGHT_COLORS[kind]
+        att = self.attention(index.row(), col_name)
+        if role == ATTENTION_ROLE:
+            return True if att else None
+        if att:
             if role == Qt.ItemDataRole.BackgroundRole:
-                return QBrush(bg)
+                return QBrush(att[0])
             if role == Qt.ItemDataRole.ForegroundRole:
-                return QBrush(fg)
+                return QBrush(att[1])
 
         if role == Qt.ItemDataRole.BackgroundRole:
             side = _col_side(col_name)
@@ -464,46 +565,25 @@ class NumericSortProxy(QSortFilterProxyModel):
         return str(a).casefold() < str(b).casefold()
 
 
-class ResultTableDelegate(QStyledItemDelegate):
-    """Keeps a highlighted cell's colour visible even when the row is
-    selected.
-
-    Qt's selection layer is normally opaque and paints over BackgroundRole.
-    For highlighted cells we take over paint(), draw the highlight colour
-    first, then lay a semi-transparent blue tint so the selection is still
-    perceptible, and finally draw the text in the highlight's foreground.
-    """
-    _SEL_TINT = QColor(25, 118, 210, 45)   # PRIMARY at ~18 % opacity
-
-    def paint(self, painter, option, index):
-        kind = index.data(Qt.ItemDataRole.UserRole)
-        is_selected = bool(option.state & QStyle.StateFlag.State_Selected)
-
-        if kind and is_selected:
-            bg, fg = _HIGHLIGHT_COLORS[kind]
-            painter.save()
-            painter.fillRect(option.rect, bg)
-            painter.fillRect(option.rect, self._SEL_TINT)
-            text = str(index.data(Qt.ItemDataRole.DisplayRole) or "")
-            painter.setPen(fg)
-            painter.drawText(
-                option.rect.adjusted(6, 0, -4, 0),
-                Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
-                text)
-            painter.restore()
-        else:
-            super().paint(painter, option, index)
+class ResultTableDelegate(AttentionDelegate):
+    """The results tables' delegate: highlighted cells (red / orange — see PandasModel.attention) keep their
+    colours when the row is selected; see common/attention.py."""
 
 
 def _make_view(compact: bool = False) -> QTableView:
     v = QTableView()
     v.setAlternatingRowColors(True)
     v.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-    v.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+    # Only the Days cells of equipment lines are editable (PandasModel.flags); every other cell ignores this.
+    v.setEditTriggers(QAbstractItemView.EditTrigger.DoubleClicked | QAbstractItemView.EditTrigger.EditKeyPressed)
     v.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
     v.horizontalHeader().setStretchLastSection(True)
     v.verticalHeader().setVisible(False)
     v.setSortingEnabled(not compact)
+    if not compact:
+        # A third click on the same header goes back to the original row order
+        # (ascending -> descending -> unsorted).
+        v.horizontalHeader().setSortIndicatorClearable(True)
     if compact:
         v.horizontalHeader().setSectionResizeMode(
             QHeaderView.ResizeMode.ResizeToContents)
@@ -586,7 +666,9 @@ def _unhide_dialog(view: QTableView):
     bb.accepted.connect(dlg.accept)
     bb.rejected.connect(dlg.reject)
     lay.addWidget(bb)
-    if dlg.exec() != QDialog.DialogCode.Accepted:
+    accepted = dlg.exec() == QDialog.DialogCode.Accepted
+    dlg.deleteLater()
+    if not accepted:
         return
     for idx, cb in boxes.items():
         if cb.isChecked():
@@ -854,6 +936,7 @@ class MainWindow(QMainWindow):
         self._workers:   list = []
         self._mismatch_rows: list[int] = []   # source-model rows with any mismatch
         self._mismatch_pos:  int       = -1   # current navigation position
+        self._mismatch_kinds: dict[int, set[str]] = {}   # source row -> {"red", "orange"} (what highlights it)
         self._rate_rech_mismatch_cells: set[tuple[int, str]] = set()
 
         # Combined view: per-Stock-Code MR/CTR qty totals for matched keys.
@@ -867,6 +950,9 @@ class MainWindow(QMainWindow):
         # Cost statistics (MA131): rows of the last Compare, the running
         # worker's token (an older worker's result is ignored) and the threads.
         self._stats_items: pd.DataFrame | None = None
+        self._restored_days: dict[str, float] = {}      # days saved with a reopened comparison
+        # (side, file name) -> (full path, fingerprint when it was read): to notice a file edited after it was added
+        self._file_origin: dict[tuple[str, str], tuple[str, tuple | None]] = {}
         self._pending_stats: pd.DataFrame | None = None   # handed from _run_compare to the present step
         self._pending_saved_stats: dict | None = None     # same, from a loaded comparison
         # (side, key, doc, sheet) of every row, for the document filter — the
@@ -1065,6 +1151,7 @@ class MainWindow(QMainWindow):
         pinned_l.addLayout(action_row)
         pinned_l.addSpacing(8)                          # a little air before the SAGE line
         pinned_l.addLayout(self._build_sage_row())
+        pinned_l.addLayout(self._build_pricebook_row())
 
         pinned_sep = QFrame()
         pinned_sep.setFrameShape(QFrame.Shape.HLine)
@@ -1097,6 +1184,15 @@ class MainWindow(QMainWindow):
         self._splitter.addWidget(scroll)
         self._controls_scroll = scroll
 
+        # Shown only while an added MR / CTR file has changed on disk (or is gone): re-reads those files.
+        self._reload_btn = QPushButton()
+        self._reload_btn.setVisible(False)
+        self._reload_btn.setStyleSheet("QPushButton { color: #E65100; font-weight: bold; }")
+        self._reload_btn.clicked.connect(lambda: self._reload_changed_files())
+        cl.addWidget(self._reload_btn)
+        self._reload_pending = 0
+        self._reload_notes: list[str] = []
+
         # 2-column area: MR (left) | CTR (right)
         two_col = QHBoxLayout()
         two_col.setSpacing(14)
@@ -1116,10 +1212,21 @@ class MainWindow(QMainWindow):
         )
 
         # ── Bottom: results (hidden until first compare) ───────────────────
-        self._results_w = QWidget()
-        res_l = QVBoxLayout(self._results_w)
+        # A scroll area, so the results pane's own minimum height (its metrics, filter row,
+        # tabs and export buttons: ~320 px) no longer sets the whole window's minimum height —
+        # with it, the window could not shrink below ~690 px after Compare and did not fit a
+        # 1080p screen at 150 % scaling (MA164). Small windows scroll the results instead.
+        # Everything that shows/hides the results (`_results_w.setVisible`, the splitter
+        # sizes) still talks to this widget unchanged.
+        self._results_w = QScrollArea()
+        self._results_w.setWidgetResizable(True)
+        self._results_w.setFrameShape(QFrame.Shape.NoFrame)
+        _results_inner = QWidget()
+        _results_inner.setAutoFillBackground(False)       # no per-widget QSS (see the note above)
+        res_l = QVBoxLayout(_results_inner)
         res_l.setContentsMargins(0, 4, 0, 0)
         res_l.setSpacing(6)
+        self._results_w.setWidget(_results_inner)
         self._splitter.addWidget(self._results_w)
         self._results_w.setVisible(False)
 
@@ -1222,7 +1329,7 @@ class MainWindow(QMainWindow):
         self._tabs.addTab(self._stack_only_ctr, "Only in CTR")
         self._tabs.addTab(self._stack_review,   "Needs Review")
         self._tabs.addTab(self._stack_error,    "Error Data")
-        self._stats_panel = StatsPanel()
+        self._stats_panel = StatsPanel(use_stock_types=True, show_scaffold=False)
         self._stats_panel.reload_requested.connect(self._on_stats_reload_clicked)
         # In a scroll area so this tab page can be squeezed like the table tabs:
         # a tab page's minimum height counts toward the window's, and the bare
@@ -1262,6 +1369,20 @@ class MainWindow(QMainWindow):
         self._next_mm_btn.setStyleSheet(nav_css)
         self._next_mm_btn.setEnabled(False)
         self._next_mm_btn.clicked.connect(lambda: self._nav_mismatch(+1))
+
+        # Which highlighted rows the arrows step through. Shown only in Combined View
+        # when both kinds exist (red: values differ, orange: several documents).
+        self._mm_kind_combo = QComboBox()
+        self._mm_kind_combo.addItem("All", "all")
+        self._mm_kind_combo.addItem("Red", "red")
+        self._mm_kind_combo.addItem("Orange", "orange")
+        self._mm_kind_combo.setToolTip(
+            "Which highlighted rows the ↑ ↓ arrows step through:\n"
+            "All, Red only (Qty / Unit differ between MR and CTR),\n"
+            "or Orange only (Stock Code built from several documents).")
+        self._mm_kind_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
+        self._mm_kind_combo.setVisible(False)
+        self._mm_kind_combo.currentIndexChanged.connect(lambda _=0: self._nav_mismatch(0, absolute=True))
 
         self._compare_vals_btn = QPushButton()
         self._compare_vals_btn.setCheckable(True)
@@ -1318,6 +1439,19 @@ class MainWindow(QMainWindow):
             QPushButton:disabled {{ color: {BORDER}; border-color: {BORDER}; }}
         """)
         self._combined_btn.toggled.connect(self._apply_combined_view)
+
+        # Local cost (SAGE's local_expect_cost) at the end of Matched / Only in MR / Only in CTR:
+        # the unit cost, or — with this box ticked — multiplied by each side's quantity.
+        self._local_mult_chk = QCheckBox("Local cost total")
+        self._local_mult_chk.setToolTip(
+            "The “Local cost” column at the end of Matched, Only in MR and Only in CTR is SAGE's\n"
+            "expected unit cost (local_expect_cost) of the Stock Code.\n"
+            "Tick this to show the TOTAL instead, with the same formula as the statistics:\n"
+            "equipment = days × cost × quantity, consumables = cost × quantity.\n"
+            "Matched then shows one total for the MR quantity and one for the CTR quantity.\n"
+            "Only on these three tabs.")
+        self._local_mult_chk.setVisible(False)
+        self._local_mult_chk.toggled.connect(lambda _=False: self._apply_local_costs())
 
         self._show_docs_btn = QPushButton("Show Document Names")
         self._show_docs_btn.setCheckable(True)
@@ -1441,7 +1575,24 @@ class MainWindow(QMainWindow):
         self._ctr_gen.sage_path_changed.connect(self._set_comparator_sage_path)
         self._sage_edit.textChanged.connect(self._ctr_gen.set_sage_path)
         self._sage_edit.textChanged.connect(self._on_sage_path_edited)
+        # The same for the two files the price view needs.
+        self._ctr_gen.usd_pricebook_path_changed.connect(self._set_comparator_usd_path)
+        self._ctr_gen.combined_db_path_changed.connect(self._set_comparator_db_path)
+        self._usd_pb_edit.textChanged.connect(self._ctr_gen.set_usd_pricebook_path)
+        self._combined_db_edit.textChanged.connect(self._ctr_gen.set_combined_db_path)
+        self._usd_pb_edit.textChanged.connect(self._on_price_source_edited)
+        self._combined_db_edit.textChanged.connect(self._on_price_source_edited)
+        self._ctr_gen.stats_defaults_changed.connect(self._stats_panel.apply_defaults)
+        # Load Files re-read the SAGE / pricebooks: the statistics of the current compare must not keep old figures.
+        self._ctr_gen.files_loaded.connect(lambda: self._on_generator_files_loaded())
+        # Stock Code types decided in the statistics, or edited / reset / restored in Settings:
+        # the Type column, filter and tooltips of the results tables follow.
+        self._stats_panel.types_changed.connect(self._on_types_changed)
+        self._stats_panel.days_changed.connect(lambda _d=None: self._apply_local_costs())     # days typed or picked
+        self._tabs.currentChanged.connect(self._sync_local_toggle)
+        self._ctr_gen.choices_reloaded.connect(lambda _c=None: self._on_types_changed())
         self._ctr_gen.restore_settings()
+        self._update_price_note()
 
         # ── Tab 2: CTR Tracker ───────────────────────────────────────────────
         self._ctr_tracker = CTRTrackerWidget(parent=self)
@@ -1542,7 +1693,9 @@ class MainWindow(QMainWindow):
         payloads: list[tuple[str, bytes]] = []
         for p in paths:
             try:
+                stamp = file_stamp(p)                    # before reading: an edit during the read counts as a change
                 payloads.append((Path(p).name, Path(p).read_bytes()))
+                self._file_origin[(side, Path(p).name)] = (str(p), stamp)
             except Exception as exc:
                 log.exception("Failed to read file: %s", p)
                 QMessageBox.warning(self, "File error",
@@ -1629,7 +1782,10 @@ class MainWindow(QMainWindow):
             self._workers.remove(w)
             w.deleteLater()
 
-    def _parse(self, side: str, payloads: list[tuple[str, bytes]]):
+    def _parse(self, side: str, payloads: list[tuple[str, bytes]], replace: dict | None = None, on_done=None):
+        """Parses the files and adds their tables. `replace` ({new file name: {"old", "path", "stamp"}}) makes this a
+        reload: the old tables of a file are swapped for the new ones only when the new version produced tables;
+        `on_done(reloaded names, failed names)` is called when finished."""
         n_files = len(payloads)     # the closures below must not capture `payloads` (the raw file bytes)
         worker = ParseWorker(payloads, parent=self, include_cover=(side == "mr"))
         self._prune_workers()
@@ -1639,6 +1795,20 @@ class MainWindow(QMainWindow):
 
         def _done(tables: list):
             dlg.close()
+            dlg.deleteLater()
+            ok, failed = [], []
+            if replace:
+                got = {t["source_file"] for t in tables}
+                for new, info in replace.items():
+                    if new in got:
+                        ok.append(new)
+                        gone = self._swap_file_tables(side, info["old"], new, info["path"], info["stamp"],
+                                                      [t for t in tables if t["source_file"] == new])
+                        self._reload_notes.extend(f"{side.upper()}: {new} — table {g!r} is no longer in the file" for g in gone)
+                    elif worker.stopped_after is not None:
+                        failed.append(f"{new} — not read, the parse was stopped")
+                    else:
+                        failed.append(f"{new} — no tables could be read")
             if side == "mr":
                 self._mr_tables.extend(tables)
                 self._fill_table_list(self._mr_table_list, self._mr_tables, "mr")
@@ -1651,9 +1821,15 @@ class MainWindow(QMainWindow):
                 self._set_status(
                     f"Stopped on request — parsed {worker.stopped_after} of "
                     f"{n_files} {side.upper()} file(s); the rest were not read.")
+            if on_done:
+                on_done(ok, failed)
 
         def _err(msg: str):
             dlg.close()
+            dlg.deleteLater()
+            if on_done:                                 # a reload reports it with the others; the old tables stay
+                on_done([], [f"{n} — {msg}" for n in (replace or {})])
+                return
             QMessageBox.critical(self, "Parse error", msg)
             self._set_status("Error parsing file — see dialog.")
 
@@ -1796,6 +1972,10 @@ class MainWindow(QMainWindow):
         )
 
     def _refresh_file_warnings(self, side: str):
+        self._paint_file_warnings(side)
+        self._mark_changed_files()
+
+    def _paint_file_warnings(self, side: str):
         """Marks a Step 1 file entry in red, with an explanatory tooltip,
         once every table it contributed has been individually removed from
         Step 2 — the file is still listed as "loaded", but none of its
@@ -1888,7 +2068,209 @@ class MainWindow(QMainWindow):
 
     # ── Compare ───────────────────────────────────────────────────────────────
 
+    def _changed_source_files(self) -> list[tuple[str, str, str]]:
+        """(side, file name, what happened) for every MR / CTR file whose tables are loaded but whose file on disk
+        changed (or is gone) since it was read. Files reopened from a saved comparison have no origin: skipped."""
+        out = []
+        for side, tables in (("MR", self._mr_tables), ("CTR", self._ctr_tables)):
+            for name in sorted({t["source_file"] for t in tables}):
+                origin = self._file_origin.get((side.lower(), name))
+                if origin is None:
+                    continue
+                path, before = origin
+                now = file_stamp(path)
+                if now is None:
+                    out.append((side, name, "the file is no longer there"))
+                elif now != before:
+                    out.append((side, name, "the file was changed after it was added"))
+        return out
+
+    def _mark_changed_files(self):
+        """Orange ⟳ on the Step 1 rows whose file changed on disk (or is gone), and the Reload button above the lists."""
+        for side in ("mr", "ctr"):
+            self._paint_file_warnings(side)
+        changed = self._changed_source_files()
+        why = {(side.lower(), name): w for side, name, w in changed}
+        for side, lw in (("mr", self._mr_file_list), ("ctr", self._ctr_file_list)):
+            for i in range(lw.count()):
+                item = lw.item(i)
+                name = item.data(Qt.ItemDataRole.UserRole)
+                label = lw.itemWidget(item)._label
+                label.setText(name)
+                if (side, name) not in self._file_origin and not label.toolTip():
+                    label.setToolTip(f"{name} came from a saved comparison (or its location is unknown): there is no "
+                                     "file on disk to check or reload. Browse for it to add it again.")
+                if (side, name) in why:
+                    label.setText("⟳ " + name)
+                    pal = label.palette()
+                    pal.setColor(label.foregroundRole(), QColor("#E65100"))
+                    label.setPalette(pal)
+                    label.setToolTip(f"{name}: {why[(side, name)]}.\nThe tables loaded from it are the OLD version — "
+                                     "use \"Reload changed files\" to read it again.")
+        self._reload_btn.setVisible(bool(changed))
+        self._reload_btn.setEnabled(self._reload_pending == 0)
+        self._reload_btn.setText(f"⟳  Reload changed files ({len(changed)})")
+        self._reload_btn.setToolTip("Reads these files again from where they were added and replaces their tables "
+                                    "(your unticked sheets stay unticked):\n"
+                                    + "\n".join(f"  • {s}: {n} — {w}" for s, n, w in changed))
+
+    def changeEvent(self, event):
+        super().changeEvent(event)
+        if event.type() == QEvent.Type.ActivationChange and self.isActiveWindow() and hasattr(self, "_reload_btn"):
+            self._mark_changed_files()                  # e.g. back from saving the file in Excel
+
+    def _ask_changed_files(self, changed: list[tuple[str, str, str]]) -> str:
+        """Warn that loaded files changed on disk: "reload", "anyway" or "cancel". `changed_files_chooser`
+        replaces the dialog (tests); it may also return True ("anyway") / False ("cancel")."""
+        if getattr(self, "changed_files_chooser", None) is not None:
+            r = self.changed_files_chooser(changed)
+            return r if isinstance(r, str) else ("anyway" if r else "cancel")
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle("Files changed since they were added")
+        box.setText("These files changed on disk after they were added, so the tables below are from the OLD "
+                    "version of each file:\n\n" + "\n".join(f"  • {side}: {name} — {why}" for side, name, why in changed)
+                    + "\n\n\"Reload them and compare\" reads each file again from where it was added.")
+        reload_btn = box.addButton("Reload them and compare", QMessageBox.ButtonRole.AcceptRole)
+        anyway = box.addButton("Compare anyway", QMessageBox.ButtonRole.DestructiveRole)
+        box.addButton(QMessageBox.StandardButton.Cancel)
+        box.setDefaultButton(reload_btn)
+        box.exec()
+        clicked = box.clickedButton()
+        box.deleteLater()
+        return "reload" if clicked is reload_btn else "anyway" if clicked is anyway else "cancel"
+
+    def _ask_missing_file(self, side: str, name: str, path: str):
+        """The file to reload is gone: "keep" the old tables, "remove" the file, or a new path to read instead.
+        `missing_file_chooser` replaces the dialog (tests)."""
+        if getattr(self, "missing_file_chooser", None) is not None:
+            return self.missing_file_chooser(side, name, path)
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle("File not found")
+        box.setText(f"{side}: {name} is no longer at\n{path}\n\nIt may have been deleted, moved or renamed.")
+        locate = box.addButton("Locate it…", QMessageBox.ButtonRole.AcceptRole)
+        remove = box.addButton("Remove it from the list", QMessageBox.ButtonRole.DestructiveRole)
+        keep = box.addButton("Keep the old tables", QMessageBox.ButtonRole.RejectRole)
+        box.exec()
+        clicked = box.clickedButton()
+        box.deleteLater()
+        if clicked is remove:
+            return "remove"
+        if clicked is locate:
+            found, _ = QFileDialog.getOpenFileName(self, f"Locate {name}", str(Path(path).parent),
+                                                   "Excel files (*.xlsx *.xls *.xlsm)")
+            return found or "keep"
+        return "keep"
+
+    def _swap_file_tables(self, side: str, old: str, new: str, path: str, stamp, new_tables=()) -> list[str]:
+        """The new version of a file was parsed: drop the old tables (kept only until now), point the Step 1 row and
+        the remembered origin at the new file. Returns the names of old tables the new version no longer has."""
+        tables = self._mr_tables if side == "mr" else self._ctr_tables
+        kept = {(t["source_sheet"], t["table_name"]) for t in new_tables}
+        gone = [t["table_name"] for t in tables if t["source_file"] == old and (t["source_sheet"], t["table_name"]) not in kept]
+        tables[:] = [t for t in tables if t["source_file"] != old]
+        self._file_origin.pop((side, old), None)
+        self._file_origin[(side, new)] = (path, stamp)
+        if new != old:
+            flw = self._mr_file_list if side == "mr" else self._ctr_file_list
+            for k in reversed(range(flw.count())):
+                if flw.item(k).data(Qt.ItemDataRole.UserRole) == old:
+                    flw.takeItem(k)
+            self._add_file_row(flw, side, new)
+        self._loaded_comparison_path = None
+        return gone
+
+    def _reload_changed_files(self, changed=None, compare_after: bool = False):
+        """Re-reads every changed MR / CTR file from where it was added, and swaps in its new tables. Nothing is lost
+        when a step fails: the old tables of that file stay and the problem is reported at the end."""
+        if self._reload_pending:
+            return
+        changed = changed if changed is not None else self._changed_source_files()
+        if not changed:
+            return
+        problems: list[str] = []
+        self._reload_notes = []
+        batches: dict[str, tuple[list, dict]] = {"mr": ([], {}), "ctr": ([], {})}
+        for side_u, name, _why in changed:
+            side = side_u.lower()
+            path, _before = self._file_origin[(side, name)]
+            if file_stamp(path) is None:
+                choice = self._ask_missing_file(side_u, name, path)
+                if choice == "remove":
+                    self._remove_file(side, name)
+                    self._file_origin.pop((side, name), None)
+                    continue
+                if choice == "keep" or not choice:
+                    problems.append(f"{side_u}: {name} — the file is gone; the old tables were kept")
+                    continue
+                path = str(choice)
+            new = Path(path).name
+            files = self._mr_file_list if side == "mr" else self._ctr_file_list
+            names = [files.item(k).data(Qt.ItemDataRole.UserRole) for k in range(files.count())]
+            if names.count(name) > 1:
+                problems.append(f"{side_u}: {name} — two files with this name are loaded, so the app cannot tell which "
+                                "tables belong to which; remove one with ✕, then reload")
+                continue
+            if new != name and new in names:
+                problems.append(f"{side_u}: {name} — {new} is already in the list; the old tables were kept")
+                continue
+            try:
+                stamp = file_stamp(path)               # before reading: an edit during the read counts as a change
+                data = Path(path).read_bytes()
+            except Exception as exc:
+                log.exception("Failed to re-read file: %s", path)
+                problems.append(f"{side_u}: {name} — cannot be read ({exc}); the old tables were kept")
+                continue
+            batches[side][0].append((new, data))
+            batches[side][1][new] = {"old": name, "path": str(path), "stamp": stamp}
+        jobs = [(s, b) for s, b in batches.items() if b[0]]
+        reloaded: list[str] = []
+        if not jobs:
+            self._finish_reload(reloaded, problems, compare_after)
+            return
+        self._reload_pending = len(jobs)
+        self._reload_btn.setEnabled(False)
+        self._set_status("Reading the changed files again…")
+
+        def _one_done(side, ok, failed):
+            reloaded.extend(f"{side.upper()}: {n}" for n in ok)
+            problems.extend(f"{side.upper()}: {n}; the old tables were kept" for n in failed)
+            self._reload_pending -= 1
+            if self._reload_pending == 0:
+                self._finish_reload(reloaded, problems, compare_after)
+
+        for side, (payloads, info) in jobs:
+            self._parse(side, payloads, replace=info, on_done=lambda ok, failed, s=side: _one_done(s, ok, failed))
+
+    def _finish_reload(self, reloaded: list[str], problems: list[str], compare_after: bool):
+        self._on_table_sel_changed()
+        self._mark_changed_files()
+        done = f"Reloaded {len(reloaded)} file(s) — press Compare to see them." if reloaded else "Nothing was reloaded."
+        notes = list(self._reload_notes)
+        self._set_status(done if not problems else done + f" {len(problems)} problem(s).")
+        if problems or (notes and not compare_after):
+            lines = problems + notes
+            if getattr(self, "reload_report", None) is not None:
+                self.reload_report(lines)
+            else:
+                QMessageBox.warning(self, "Some files were not reloaded" if problems else "Reloaded — some tables are gone",
+                                    "\n".join(f"  • {p}" for p in lines))
+        if not problems and compare_after:
+            if notes:
+                log.info("Reload before compare: %s", "; ".join(notes))
+            self._run_compare()
+
     def _run_compare(self):
+        changed = self._changed_source_files()
+        if changed:
+            choice = self._ask_changed_files(changed)
+            if choice == "reload":
+                self._reload_changed_files(changed, compare_after=True)
+                return
+            if choice != "anyway":
+                self._set_status("Compare cancelled — reload the changed file(s) first.")
+                return
         log.info("Compare started: MR=%d rows, CTR=%d rows",
                   len(self._mr_df), len(self._ctr_df))
         mr  = self._mr_df.copy()
@@ -1967,6 +2349,7 @@ class MainWindow(QMainWindow):
         self._display_df = _build_display(matched)
         self._omr_dl     = _build_display(only_mr_df)
         self._octr_dl    = _build_display(only_ctr_df)
+        self._set_local_cost_frames(None)           # blank Days / Local cost columns at the end; filled when the statistics are ready
 
         # Rate (CTR) vs Rechargeable (MR) consistency check — computed on
         # every Compare, but only highlighted once Compare Values is pressed.
@@ -2024,14 +2407,20 @@ class MainWindow(QMainWindow):
         # comparison being reopened); set their state before the Needs Review
         # list is built, since it lists the rows with no quantity.
         self._stats_token += 1
+        self._local_ready = False                    # the previous compare's figures must not leak into this one
+        self._local_state = "waiting" if self._pending_stats is not None else "none"
+        self._set_stats_tab_busy(False)
         self._stats_items, self._pending_stats = self._pending_stats, None
         saved, self._pending_saved_stats = self._pending_saved_stats, None
         restored = self._load_stats_state(saved)
         self._refresh_combined_tables()
         if restored is not None:
             rows, manual, use_qty = restored
-            self._stats_panel.restore(rows, manual, use_qty)
+            self._stats_panel.restore(rows, manual, use_qty, days=self._restored_days)
             self._stats_panel.set_doc_filter(self._stats_doc_pred())
+            self._local_ready = True
+            self._local_state = "ready"
+            self._apply_local_costs()
         else:
             self._stats_panel.clear(
                 "Statistics are calculated when you press Compare."
@@ -2048,8 +2437,10 @@ class MainWindow(QMainWindow):
         _show_result(self._stack_only_mr,  self._tab_only_mr,  self._omr_dl)
         _show_result(self._stack_only_ctr, self._tab_only_ctr, self._octr_dl)
         self._apply_doc_column_visibility(self._show_docs_btn.isChecked())
+        self._decorate_views()
 
         self._tabs.setCurrentWidget(self._stack_matched)
+        self._sync_local_toggle()
         self._download_btn.setEnabled(True)
         self._save_btn.setEnabled(True)
         self._step_bar.set_step(2)
@@ -2064,6 +2455,7 @@ class MainWindow(QMainWindow):
         self._compare_vals_btn.setEnabled(not self._display_df.empty)
         self._mismatch_rows = []
         self._mismatch_pos  = -1
+        self._set_mismatch_kinds({})
         self._prev_mm_btn.setEnabled(False)
         self._next_mm_btn.setEnabled(False)
         self._mismatch_lbl.setVisible(False)
@@ -2127,6 +2519,7 @@ class MainWindow(QMainWindow):
             rows = cost_stats.rows_from_records(saved["rows"], use_qty)
             self._stats_pairs = rows[["side", "key", "doc", "sheet"]]
             manual = {str(k): float(v) for k, v in (saved.get("manual") or {}).items()}
+            self._restored_days = {str(k): float(v) for k, v in (saved.get("days") or {}).items()}
             return rows, manual, use_qty
         except Exception:
             log.exception("Saved statistics could not be restored")
@@ -2141,6 +2534,7 @@ class MainWindow(QMainWindow):
         return {
             "rows": cost_stats.rows_to_records(rows) if rows is not None else [],
             "manual": self._stats_panel.manual_costs(),
+            "days": self._stats_panel.days(),
             "use_qty": self._stats_panel.use_qty(),
             "category_by_key": self._category_by_key or {},
             "missing_qty": self._missing_qty_df.to_dict(orient="records"),
@@ -2162,12 +2556,49 @@ class MainWindow(QMainWindow):
         of cost_stats.cost_rows. Rechargeability comes from the documents:
         MR's Rechargeable column, and for the CTR the Rate column (a number
         means rechargeable, NONRECHARG means not) — same rule as the
-        Rate/Rechargeable check. Up for discussion with the department."""
+        Rate/Rechargeable check. Up for discussion with the department.
+
+        Days (Document price, equipment): a CTR row carries its own Days; an MR row takes the days
+        of the matching CTR row (same Stock Code) when the CTR rows agree. When the code has no
+        CTR row, the CTR row has no days, or the CTR rows give different days, the MR row gets
+        none and says why: it is shown highlighted, waiting for the user to type the days."""
+        ctr_days: dict[str, dict[float, set[str]]] = {}      # key -> {days: documents that say so}
+        ctr_keys: set[str] = set()
+        if not ctr.empty:
+            days_c = _find_col(ctr, "Days")
+            ctr_keys = set(ctr["_KEY_"])
+            if days_c:
+                docs = (ctr["_SourceFile"].map(_norm_val) if "_SourceFile" in ctr.columns
+                        else pd.Series([""] * len(ctr), index=ctr.index))
+                for k, v, doc in zip(ctr["_KEY_"], pd.to_numeric(ctr[days_c], errors="coerce"), docs):
+                    if pd.notna(v):
+                        ctr_days.setdefault(k, {}).setdefault(float(v), set()).add(doc)
+
+        def mr_days(keys) -> tuple[list[float], list[str], list[str]]:
+            vals, notes, options = [], [], []
+            for k in keys:
+                got = ctr_days.get(k)
+                if got and len(got) == 1:
+                    vals.append(next(iter(got)))
+                    notes.append("from the matching CTR row")
+                    options.append("")
+                elif got:                                       # two or more CTRs disagree: the user decides
+                    vals.append(float("nan"))
+                    notes.append("the matching CTRs give different days ("
+                                 + " / ".join(f"{d:g}" for d in sorted(got)) + ")")
+                    options.append(json.dumps([{"days": d, "docs": sorted(got[d])} for d in sorted(got)]))
+                else:
+                    vals.append(float("nan"))
+                    notes.append("the matching CTR row has no days" if k in ctr_keys else "")
+                    options.append("")
+            return vals, notes, options
+
         parts = []
         for side, df in (("MR", mr), ("CTR", ctr)):
             if df.empty:
                 continue
             n = len(df)
+            desc_c = _find_col(df, "Description")
             if side == "MR":
                 qty_c = _find_col(df, "Qty")
                 st_c = _find_col(df, "Rechargeable")
@@ -2178,6 +2609,13 @@ class MainWindow(QMainWindow):
                 qty_c = _find_col(df, "Quantity", "Qty")
                 rate_c = _find_col(df, "Rate")
                 status = df[rate_c].map(_rate_implied_status).values if rate_c else [None] * n
+            if side == "MR":
+                days_vals, days_notes, days_opts = mr_days(df["_KEY_"].tolist())
+            else:
+                dc = _find_col(df, "Days")
+                days_vals = (pd.to_numeric(df[dc], errors="coerce").tolist() if dc else [float("nan")] * n)
+                days_notes = [""] * n
+                days_opts = [""] * n
             parts.append(pd.DataFrame({
                 "key":     df["_KEY_"].values,
                 "doc":     df["_SourceFile"].map(_norm_val).values if "_SourceFile" in df.columns else [""] * n,
@@ -2186,9 +2624,14 @@ class MainWindow(QMainWindow):
                 "qty":     df[qty_c].values if qty_c else [float("nan")] * n,
                 "status":  status,
                 "section": df["_Section"].values if (side == "CTR" and "_Section" in df.columns) else [None] * n,
+                "description": df[desc_c].map(_norm_val).values if desc_c else [""] * n,
+                "days":    days_vals,
+                "days_note": days_notes,
+                "days_options": days_opts,
             }))
         if not parts:
-            return pd.DataFrame(columns=["key", "doc", "sheet", "side", "qty", "status", "section"])
+            return pd.DataFrame(columns=["key", "doc", "sheet", "side", "qty", "status", "section",
+                                         "description", "days", "days_note", "days_options"])
         return pd.concat(parts, ignore_index=True)
 
     def _start_stats_job_later(self, delay_ms: int = 400):
@@ -2208,10 +2651,15 @@ class MainWindow(QMainWindow):
             lambda: self._start_stats_job() if token == self._stats_token else None)
 
     def _start_stats_job(self, force: bool = False):
+        self._start_stats_job_inner(force)
+        self._decorate_views()                  # the waiting reason in the tables follows (SAGE set / not set ...)
+
+    def _start_stats_job_inner(self, force: bool = False):
         """(Re)start the background cost statistics for the last Compare.
         force=True (Reload statistics) re-reads the SAGE file instead of
         reusing the table the Generator already parsed."""
         panel = self._stats_panel
+        self._set_stats_tab_busy(False)
         if self._stats_items is None:
             panel.clear("Statistics are calculated when you press Compare.")
             return
@@ -2231,16 +2679,28 @@ class MainWindow(QMainWindow):
         panel.clear("Statistics are loading and will appear here shortly — reading the SAGE "
                     "Export and costing every row. You can keep working meanwhile.", "info")
         reuse = None if force else self._ctr_gen.loaded_sage_df(path)
-        w = StatsWorker(self._stats_token, self._stats_items, path, reuse, self)
+        usd = self._usd_edit_path()
+        names = self._combined_db_edit.text().strip()
+        usd = usd if usd and Path(usd).is_file() else ""          # a missing file is reported by the price note
+        names = names if names and Path(names).is_file() else ""
+        self._update_price_note()
+        w = StatsWorker(self._stats_token, self._stats_items, path, reuse, self,
+                        usd_path=usd, usd_df=None if force else self._ctr_gen.loaded_usd_df(usd),
+                        names_path=names, names_df=None if force else self._ctr_gen.loaded_names_df(names))
         w.done.connect(self._on_stats_done)
         w.finished.connect(lambda w=w: self._stats_workers.remove(w) if w in self._stats_workers else None)
         w.finished.connect(w.deleteLater)
         self._stats_workers.append(w)
+        self._set_stats_tab_busy(True)            # "Statistics ⏳" until the worker reports
         w.start(QThread.Priority.LowPriority)     # the window comes first
 
     def _on_stats_done(self, token: int, rows, error: str):
         if token != self._stats_token:
             return                              # a newer Compare / Reload replaced this run
+        self._set_stats_tab_busy(False)
+        if error:
+            self._local_state = "failed"        # nothing more is awaited: the tables stop showing the waiting mark
+            self._decorate_views()
         if error == _STATS_STOPPED:
             self._stats_panel.clear("Statistics were stopped before they finished. "
                                     "Press “Reload statistics” to run them again.")
@@ -2250,7 +2710,14 @@ class MainWindow(QMainWindow):
         else:
             self._stats_panel.set_rows(rows)
             self._stats_panel.set_doc_filter(self._stats_doc_pred())
+            self._local_ready = True
+            self._local_state = "ready"
+            self._apply_local_costs()
             log.info("Statistics ready: %d rows", len(rows))
+
+    def _on_generator_files_loaded(self) -> None:
+        if self._stats_items is not None:
+            self._start_stats_job()
 
     def _on_sage_path_edited(self, _text: str):
         if self._stats_items is not None:
@@ -2297,6 +2764,54 @@ class MainWindow(QMainWindow):
     def _set_comparator_sage_path(self, path: str) -> None:
         if self._sage_edit.text() != path:
             self._sage_edit.setText(path)
+
+    def _build_pricebook_row(self) -> QHBoxLayout:
+        """USD Pricebook and Combined DB, side by side on one line (the price view of
+        the statistics needs them for the equipment rates). Both are shared with the
+        CTR Generator tab, like the SAGE Export."""
+        row = QHBoxLayout()
+        row.setSpacing(12)
+        usd_row, self._usd_pb_edit = _file_picker_row("USD Pricebook", "Excel (*.xlsx *.xls)")
+        db_row, self._combined_db_edit = _file_picker_row("Combined DB", "Excel (*.xlsx *.xls)")
+        self._usd_pb_edit.setToolTip(
+            "USD Pricebook — the equipment rates for “Document price” in the Statistics tab.\n"
+            "Shared with the CTR Generator tab — setting it here sets it there too.")
+        self._combined_db_edit.setToolTip(
+            "Combined DB — its equipment-names sheet turns a stock code into the pricebook description\n"
+            "(optional, like in the CTR Generator). Shared with the CTR Generator tab.")
+        row.addLayout(usd_row, 1)
+        row.addLayout(db_row, 1)
+        return row
+
+    def _set_comparator_usd_path(self, path: str) -> None:
+        if self._usd_pb_edit.text() != path:
+            self._usd_pb_edit.setText(path)
+
+    def _set_comparator_db_path(self, path: str) -> None:
+        if self._combined_db_edit.text() != path:
+            self._combined_db_edit.setText(path)
+
+    def _on_price_source_edited(self, _text: str = ""):
+        """The USD Pricebook or the Combined DB changed: the equipment rates need recalculating."""
+        if self._stats_items is not None:
+            self._start_stats_job()
+        else:
+            self._update_price_note()
+
+    def _update_price_note(self) -> None:
+        """Tell the price view when equipment cannot be priced because no USD Pricebook is set."""
+        usd = self._usd_edit_path()
+        if not usd:
+            note = ("The USD Pricebook is not set (field above the Statistics), so equipment has no "
+                    "rate in Document price. Consumables are priced from SAGE.")
+        elif not Path(usd).is_file():
+            note = f"The USD Pricebook file was not found:\n{usd}"
+        else:
+            note = ""
+        self._stats_panel.set_price_note(note)
+
+    def _usd_edit_path(self) -> str:
+        return self._usd_pb_edit.text().strip()
 
     # ── Document filter ───────────────────────────────────────────────────────
 
@@ -2517,7 +3032,7 @@ class MainWindow(QMainWindow):
         """New results: reset the Type box, and put the type on the Stock Code
         tooltips of the three detail tabs (the filter's own tooltips are
         applied by _apply_doc_filter)."""
-        known = self._category_by_key is not None
+        known = self._types_known()
         self._type_combo.blockSignals(True)
         self._type_combo.setCurrentIndex(0)
         self._type_combo.blockSignals(False)
@@ -2526,34 +3041,356 @@ class MainWindow(QMainWindow):
             self._type_combo.setToolTip(
                 "Not available for a reopened saved comparison — press Compare with the "
                 "original files to filter by Equipment / Consumable.")
-        for view, df in ((self._tab_matched, self._display_df),
-                         (self._tab_only_mr, self._omr_dl),
-                         (self._tab_only_ctr, self._octr_dl)):
-            m = view.model()
-            if m is not None:
-                m.sourceModel().set_tooltips(self._type_tips(df))
+        self._refresh_type_tooltips()
+
+    def _refresh_type_tooltips(self):
+        self._decorate_views()
+
+    # ── Local cost columns (Matched / Only in MR / Only in CTR) ─────────────────
+
+    _DAYS_KINDS = (cost_stats.EQUIPMENT, cost_stats.SCAFFOLD)
+
+    @staticmethod
+    def _with_local_costs(df: pd.DataFrame, ctx: dict | None, total: bool,
+                          editable: set | None = None) -> tuple[pd.DataFrame, dict]:
+        """`df` with its Days and Local cost columns (re)built at the very end, plus the hover texts for
+        the cells that stay blank (a reason each). `ctx` = {"unit": {STOCK CODE: SAGE local_expect_cost},
+        "info": {(side, document, sheet, STOCK CODE): (kind, days, type status)}} from the finished
+        statistics, or None before they exist (the columns are then blank).
+
+        Days (MR) / Days (CTR): the days of that side's line — for equipment (and scaffold) only.
+        Local cost: SAGE's unit cost. With `total`: the total, by the statistics' formula — equipment =
+        days × cost × quantity, consumables = cost × quantity — in one column per side
+        (Local cost total (MR) / (CTR))."""
+        drop = ("Local cost", "Days (")
+        base = df[[c for c in df.columns if not str(c).startswith(drop)]].copy()
+        tips: dict[tuple[int, str], str] = {}
+        if "Stock Code" not in base.columns:
+            return base, tips
+        ctx = ctx or {"unit": {}, "info": {}}
+        keys = base["Stock Code"].map(cost_stats.norm_key)
+        unit = keys.map(ctx["unit"]).astype(float)
+        nan = float("nan")
+        days_cols: dict[str, list] = {}
+        cost_cols: dict[str, list] = {}
+        for side in ("MR", "CTR"):
+            docs = base[f"{side} Document"] if f"{side} Document" in base.columns else pd.Series("", index=base.index)
+            sheets = base[f"{side} Sheet"] if f"{side} Sheet" in base.columns else pd.Series("", index=base.index)
+            qty = pd.to_numeric(base[f"Qty ({side})"], errors="coerce") if f"Qty ({side})" in base.columns \
+                else pd.Series(nan, index=base.index)
+            days, cost = [], []
+            for n, (k, d, sh, q, u) in enumerate(zip(keys, docs, sheets, qty, unit)):
+                kind, dy, status = ctx["info"].get((side, _norm_val(d), _norm_val(sh), k), ("", nan, ""))
+                has_line = bool(_norm_val(d))
+                equip = kind in MainWindow._DAYS_KINDS
+                days.append(dy if equip else nan)
+                if equip and has_line and editable is not None:
+                    editable.add((n, f"Days ({side})"))              # every equipment line's Days can be edited
+                # Why a Days cell is empty — a hover text for every case (the missing ones are also orange).
+                if not has_line:
+                    tips[(n, f"Days ({side})")] = f"No {side} line for this Stock Code."
+                elif equip and pd.isna(dy):
+                    tips[(n, f"Days ({side})")] = ("Equipment needs Days (costed and priced × days) and this line has none "
+                                                   "yet — type or pick them in the Statistics tab.")
+                elif kind == cost_stats.CONSUMABLE:
+                    tips[(n, f"Days ({side})")] = ("No days: a consumable is not billed per day — its cost is "
+                                                   "cost × quantity.")
+                elif not equip:
+                    tips[(n, f"Days ({side})")] = ("No days shown: whether days apply depends on the type (Equipment or "
+                                                   "Consumable), which is not decided yet — decide it in the Statistics tab.")
+                value, why = nan, ""
+                if has_line and total:
+                    if pd.isna(u):
+                        why = "No total: the Stock Code is not in the SAGE Export."
+                    elif status == "unknown" or not kind:
+                        why = "No total: the type (Equipment or Consumable) is unknown — decide it in the Statistics tab."
+                    elif status == "conflict":
+                        why = "No total: the type needs a decision — press Stock Code types in the Statistics tab."
+                    elif pd.isna(q):
+                        why = "No total: there is no quantity."
+                    elif equip and pd.isna(dy):
+                        why = "No total because the days are missing (equipment = days × cost × quantity) — type or pick them in the Statistics tab."
+                    else:
+                        value = round(float(u) * float(q) * (float(dy) if equip else 1.0), 2)
+                cost.append(value)
+                if why:
+                    tips[(n, f"Local cost total ({side})")] = why
+            days_cols[side], cost_cols[side] = days, cost
+        for side in ("MR", "CTR"):                      # Days (MR), Days (CTR), then the Local cost column(s)
+            base[f"Days ({side})"] = days_cols[side]
+        if total:
+            for side in ("MR", "CTR"):
+                base[f"Local cost total ({side})"] = cost_cols[side]
+        else:
+            base["Local cost"] = unit.round(2)
+        return base, tips
+
+    @staticmethod
+    def _with_local_costs_combined(df: pd.DataFrame, ctx: dict | None, total: bool,
+                                   editable: set | None = None) -> tuple[pd.DataFrame, dict]:
+        """The Combined View table with its Days and Local cost column(s) at the very end (same names as the
+        other tabs). One row is a Stock Code built from all its lines, so per side:
+          Days: the days of its equipment lines — one number when they agree, "7 / 182" when they differ
+                (hover lists which document says what); blank for consumables.
+          Local cost: SAGE's unit cost. With `total`: the sum LINE BY LINE of unit cost × quantity (× days for
+                equipment) — the only correct total when the lines carry different days.
+        A total that cannot be worked out stays blank, with a hover reason; missing equipment days are orange."""
+        drop = ("Local cost", "Days (")
+        base = df[[c for c in df.columns if not str(c).startswith(drop)]].copy()
+        tips: dict[tuple[int, str], str] = {}
+        if "Stock Code" not in base.columns:
+            return base, tips
+        ctx = ctx or {"unit": {}, "lines": {}}
+        keys = base["Stock Code"].map(cost_stats.norm_key)
+        unit = keys.map(ctx["unit"]).astype(float)
+        nan = float("nan")
+        days_cols: dict[str, list] = {"MR": [], "CTR": []}
+        cost_cols: dict[str, list] = {"MR": [], "CTR": []}
+        equip_kinds = MainWindow._DAYS_KINDS
+        for n, (k, u) in enumerate(zip(keys, unit)):
+            for side in ("MR", "CTR"):
+                lines = ctx["lines"].get(k, {}).get(side, [])
+                equip = [ln for ln in lines if ln[3] in equip_kinds]
+                dcol = f"Days ({side})"
+                if equip and editable is not None:
+                    editable.add((n, dcol))                          # typed days apply to all of this side's lines
+                # -- days
+                if not lines:
+                    days_cols[side].append(nan)
+                    tips[(n, dcol)] = f"No {side} line for this Stock Code."
+                elif equip:
+                    known = sorted({float(ln[2]) for ln in equip if pd.notna(ln[2])})
+                    missing = any(pd.isna(ln[2]) for ln in equip)
+                    if known and not missing and len(known) == 1:
+                        days_cols[side].append(known[0])
+                    elif known:
+                        days_cols[side].append(" / ".join(f"{d:g}" for d in known))
+                    else:
+                        days_cols[side].append(nan)
+                    if missing:
+                        tips[(n, dcol)] = ("Equipment needs Days (costed and priced × days) and a line has none yet — "
+                                           "type or pick them in the Statistics tab.")
+                    elif len(known) > 1:
+                        per: dict[str, list] = {}
+                        for ln in equip:
+                            per.setdefault(f"{float(ln[2]):g}", []).append(ln[0] or "?")
+                        tips[(n, dcol)] = "The lines give different days: " + "; ".join(
+                            f"{d} days — {', '.join(sorted(set(docs)))}" for d, docs in per.items())
+                else:
+                    days_cols[side].append(nan)
+                    if any(ln[3] == cost_stats.CONSUMABLE for ln in lines):
+                        tips[(n, dcol)] = "No days: a consumable is not billed per day — its cost is cost × quantity."
+                    else:
+                        tips[(n, dcol)] = ("No days shown: whether days apply depends on the type (Equipment or "
+                                           "Consumable), which is not decided yet — decide it in the Statistics tab.")
+                # -- total
+                value, why = nan, ""
+                if lines and total:
+                    if pd.isna(u):
+                        why = "No total: the Stock Code is not in the SAGE Export."
+                    elif any(ln[4] == "unknown" or not ln[3] for ln in lines):
+                        why = "No total: the type (Equipment or Consumable) is unknown — decide it in the Statistics tab."
+                    elif any(ln[4] == "conflict" for ln in lines):
+                        why = "No total: the type needs a decision — press Stock Code types in the Statistics tab."
+                    elif any(pd.isna(ln[1]) for ln in lines):
+                        why = "No total: a line has no quantity."
+                    elif any(ln[3] in equip_kinds and pd.isna(ln[2]) for ln in lines):
+                        why = ("No total because the days are missing (equipment = days × cost × quantity) — "
+                               "type or pick them in the Statistics tab.")
+                    else:
+                        value = round(sum(float(u) * float(ln[1]) * (float(ln[2]) if ln[3] in equip_kinds else 1.0)
+                                          for ln in lines), 2)
+                cost_cols[side].append(value)
+                if why:
+                    tips[(n, f"Local cost total ({side})")] = why
+        for side in ("MR", "CTR"):
+            base[f"Days ({side})"] = pd.Series(days_cols[side], index=base.index, dtype=object)
+        if total:
+            for side in ("MR", "CTR"):
+                base[f"Local cost total ({side})"] = cost_cols[side]
+        else:
+            base["Local cost"] = unit.round(2)
+        return base, tips
+
+    def _waiting_reason(self) -> str | None:
+        """Why the Days / Local cost cells are not filled in yet, while the statistics of THIS compare are
+        awaited — None when they are ready, failed, or never expected (a reopened comparison without them)."""
+        if getattr(self, "_local_ready", False) or getattr(self, "_local_state", "none") != "waiting":
+            return None
+        path = self._sage_edit.text().strip()
+        if not path:
+            return ("Waiting for the SAGE Export — choose it in the field above the tabs. The Days and Local cost "
+                    "figures are filled in when the statistics have been calculated.")
+        if not Path(path).is_file():
+            return f"Waiting for the SAGE Export — the file was not found: {path}"
+        return ("Waiting for the statistics to finish — they are calculated in the background after Compare; "
+                "the Days and Local cost figures appear when they are done.")
+
+    def _set_stats_tab_busy(self, busy: bool) -> None:
+        """A waiting mark on the Statistics tab's title while its figures are being calculated."""
+        idx = self._tabs.indexOf(self._stats_tab)
+        if idx >= 0:
+            self._tabs.setTabText(idx, "Statistics  ⏳" if busy else "Statistics")
+
+    def _local_cost_context(self) -> dict | None:
+        """{"unit": SAGE costs, "info": per-line kind / days / type status, "lines": per Stock Code and side
+        the lines it is built from} from the finished statistics — None until they are ready for THIS compare
+        (a new Compare must not show the previous one's figures)."""
+        if not getattr(self, "_local_ready", False):
+            return None
+        rows = self._stats_panel.effective_rows()
+        if rows is None or rows.empty:
+            return None
+        sage = rows[rows["source"] == cost_stats.SOURCE_SAGE]
+        unit = {k: float(v) for k, v in zip(sage["key"], sage["unit_cost"]) if pd.notna(v)}
+        info: dict[tuple, tuple] = {}
+        lines: dict[str, dict[str, list]] = {}
+        for side, doc, sheet, key, kind, days, status, qty in zip(
+                rows["side"], rows["doc"], rows["sheet"], rows["key"], rows["kind"], rows["days"],
+                rows["type_status"], rows["qty"]):
+            info.setdefault((side, _norm_val(doc), _norm_val(sheet), key), (kind, days, status))
+            lines.setdefault(key, {"MR": [], "CTR": []})[side].append((_norm_val(doc), qty, days, kind, status))
+        return {"unit": unit, "info": info, "lines": lines}
+
+    def _set_local_cost_frames(self, ctx: dict | None) -> None:
+        total = self._local_mult_chk.isChecked()
+        self._local_tips = {}
+        self._local_edit = {}
+        for name in ("_display_df", "_omr_dl", "_octr_dl"):
+            cells: set = set()
+            df, tips = self._with_local_costs(getattr(self, name), ctx, total, cells)
+            setattr(self, name, df)
+            self._local_tips[name] = tips
+            self._local_edit[name] = cells
+        cells = set()
+        self._combined_df, tips = self._with_local_costs_combined(self._combined_df, ctx, total, cells)
+        self._local_tips["_combined_df"] = tips
+        self._local_edit["_combined_df"] = cells
+
+    def _table_frames(self):
+        """(frame name, view, frame) for the tables that carry Days / Local cost — the Matched table shows
+        either the detail frame or, with Combined View on, the combined one."""
+        matched = (("_combined_df", self._combined_df) if self._combined_btn.isChecked()
+                   else ("_display_df", self._display_df))
+        return [(matched[0], self._tab_matched, matched[1]),
+                ("_omr_dl", self._tab_only_mr, self._omr_dl),
+                ("_octr_dl", self._tab_only_ctr, self._octr_dl)]
+
+    def _decorate_views(self) -> None:
+        """Hover texts (type + Days / Local cost reasons) and the orange of missing Days on every table
+        that shows a frame with those columns."""
+        for name, view, df in self._table_frames():
+            proxy = view.model()
+            if proxy is None or df.empty:
+                continue
+            model = proxy.sourceModel()
+            if model.rowCount() != len(df):
+                continue
+            tips = dict(self._type_tips(df))
+            tips.update(getattr(self, "_local_tips", {}).get(name, {}))
+            editable = getattr(self, "_local_edit", {}).get(name, set())
+            for cell in editable:                                   # tell the user the cell can be edited
+                tips[cell] = (tips.get(cell, "").rstrip() + "\n" if cell in tips else "") + \
+                             "Double-click to edit the days (you will be asked whether to sync the other side)."
+            model.set_tooltips(tips)
+            reason = self._waiting_reason()
+            model.set_waiting("⏳ waiting" if reason else None, reason or "")
+            model.set_days_editable(editable)
+            model.set_days_needed({k for k, t in getattr(self, "_local_tips", {}).get(name, {}).items()
+                                   if k[1].startswith("Days (") and t.startswith("Equipment needs Days")})
+            if not getattr(model, "_days_wired", False):
+                model.days_edited.connect(lambda r, c, t, n=name: self._on_days_edited(n, r, c, t))
+                model._days_wired = True
+
+    def _sync_local_toggle(self, *_a) -> None:
+        """The "Local cost total" box only makes sense on Matched / Only in MR / Only in CTR."""
+        on = self._tabs.currentWidget() in (self._stack_matched, self._stack_only_mr, self._stack_only_ctr)
+        has_results = not (self._display_df.empty and self._omr_dl.empty and self._octr_dl.empty)
+        self._local_mult_chk.setVisible(on and has_results)
+
+    def _apply_local_costs(self) -> None:
+        """Fill / rebuild the Days and Local cost column(s) of the three tables from the statistics,
+        keeping each table's sort, selection and hidden columns. Runs when the statistics finish, when
+        the user types or picks days, decides a type, or toggles the "Local cost total" box."""
+        if self._display_df is None:
+            return
+        self._set_local_cost_frames(self._local_cost_context())
+        for name, view, df in self._table_frames():
+            proxy = view.model()
+            if proxy is None or df.empty:
+                continue
+            model = proxy.sourceModel()
+            if model.rowCount() != len(df):
+                continue
+            tail_names = [c for c in df.columns if str(c).startswith(("Local cost", "Days ("))]
+            base_n = len(df.columns) - len(tail_names)
+            model.set_tail_columns(base_n, df[tail_names])
+            for col in range(base_n, model.columnCount()):
+                view.resizeColumnToContents(col)
+        self._decorate_views()
+
+    def _on_days_edited(self, frame_name: str, row: int, col_name: str, text: str) -> None:
+        """The user typed days into a Days (MR) / Days (CTR) cell of one of the tables: the statistics keep them
+        per side, ask whether to sync the other side, and everything is rebuilt from there."""
+        frame = getattr(self, frame_name, None)
+        if frame is None or row >= len(frame) or col_name not in frame.columns:
+            return
+        side = "MR" if col_name.endswith("(MR)") else "CTR"
+        current = frame.iloc[row][col_name]
+        shown = "" if pd.isna(current) else (f"{current:g}" if isinstance(current, (int, float)) else str(current))
+        ok, value = self._stats_panel.parse_days(text)
+        unchanged = text.strip() == shown or (
+            ok and value is not None and isinstance(current, (int, float)) and not pd.isna(current)
+            and abs(float(current) - value) < 1e-9)
+        if unchanged:
+            return                                              # nothing changed (e.g. Enter on "7 / 182" or "10.0")
+        if not ok:
+            self._set_status(f'"{text}" is not a number of days — nothing was changed.')
+            return
+        key = cost_stats.norm_key(frame.iloc[row]["Stock Code"])
+        self._stats_panel.edit_days(key, side, value)
+
+    def _on_types_changed(self) -> None:
+        if self._display_df is None or self._display_df.empty:
+            return
+        self._type_combo.setEnabled(self._types_known())       # the chosen filter is kept
+        self._refresh_type_tooltips()
+        self._apply_doc_filter()
+        self._apply_local_costs()                              # the kind decides whether days apply
+
+    def _types_known(self) -> bool:
+        """The Type box works when the CTR sections are known (a fresh Compare) or the Stock Code
+        types list has entries."""
+        types = current_types()
+        return self._category_by_key is not None or bool(types["equipment"] or types["consumable"])
+
+    def _type_and_source(self, stock_code) -> tuple[str, str]:
+        section = (self._category_by_key or {}).get(cost_stats.norm_key(stock_code), cost_stats.UNCATEGORISED)
+        kind, source = cost_stats.kind_for(stock_code, section, current_types())
+        return (kind or cost_stats.UNCATEGORISED), source
 
     def _type_of(self, stock_code) -> str:
-        return (self._category_by_key or {}).get(cost_stats.norm_key(stock_code),
-                                                 cost_stats.UNCATEGORISED)
+        return self._type_and_source(stock_code)[0]
 
     def _type_tips(self, df: pd.DataFrame) -> dict[tuple[int, str], str]:
         """Hover text on each Stock Code cell saying its type and where that
         comes from."""
-        if self._category_by_key is None or df.empty or "Stock Code" not in df.columns:
+        if not self._types_known() or df.empty or "Stock Code" not in df.columns:
             return {}
-        why = {
-            cost_stats.EQUIPMENT: "Type: Equipment (CTR section “Plant & Equipment”)",
-            cost_stats.CONSUMABLE: "Type: Consumable (CTR section “Consumables & Materials”)",
-            cost_stats.UNCATEGORISED: "Type: Uncategorised — this Stock Code is not in any CTR "
-                                      "section (or is in both), so its type is unknown",
-        }
-        return {(i, "Stock Code"): why[self._type_of(k)] for i, k in enumerate(df["Stock Code"])}
+        def why(code) -> str:
+            kind, source = self._type_and_source(code)
+            if kind == cost_stats.UNCATEGORISED:
+                return ("Type: Uncategorised — this Stock Code is not in the Stock Code types list and "
+                        "no CTR section lists it (add it in Settings → Stock Code types)")
+            where = {"confirmed": "your decision", "list": "the Stock Code types list",
+                     "CTR section": "its CTR section"}[source]
+            return f"Type: {kind} (from {where})"
+        return {(i, "Stock Code"): why(k) for i, k in enumerate(df["Stock Code"])}
 
     def _type_mask(self, df: pd.DataFrame) -> list[bool] | None:
         """Per-row result of the Type box (None = every row)."""
         want = self._type_combo.currentText()
-        if (want == "All types" or self._category_by_key is None
+        if (want == "All types" or not self._types_known()
                 or df.empty or "Stock Code" not in df.columns):
             return None
         return [self._type_of(k) == want for k in df["Stock Code"]]
@@ -2722,6 +3559,7 @@ class MainWindow(QMainWindow):
             source.set_highlights({})
             self._mismatch_rows = []
             self._mismatch_pos  = -1
+            self._set_mismatch_kinds({})
             self._prev_mm_btn.setEnabled(False)
             self._next_mm_btn.setEnabled(False)
             self._mismatch_lbl.setVisible(False)
@@ -2765,6 +3603,7 @@ class MainWindow(QMainWindow):
         source.set_highlights(mismatch_cells)
         self._mismatch_rows = sorted(r for r in mismatch_row_set if self._row_visible(r))
         self._mismatch_pos  = 0 if self._mismatch_rows else -1
+        self._set_mismatch_kinds({r: {"red"} for r in self._mismatch_rows})
 
         has = len(self._mismatch_rows) > 0
         self._prev_mm_btn.setEnabled(has)
@@ -2800,6 +3639,7 @@ class MainWindow(QMainWindow):
         on top and feeds the same ↑/↓ navigation."""
         self._mismatch_rows = []
         self._mismatch_pos  = -1
+        self._set_mismatch_kinds({})
         self._prev_mm_btn.setEnabled(False)
         self._next_mm_btn.setEnabled(False)
 
@@ -2812,6 +3652,7 @@ class MainWindow(QMainWindow):
         cells: dict[tuple[int, str], str] = {}
         row_set: set[int] = set()
         n_doc = 0
+        kinds: dict[int, set[str]] = {}
         highlight_cols = [c for c in ("Stock Code", "Description (MR)", "Description (CTR)",
                                        "MR Document", "CTR Document")
                           if c in self._combined_df.columns]
@@ -2820,6 +3661,7 @@ class MainWindow(QMainWindow):
             if active and (len(agg.get("mr_docs", [])) > 1 or len(agg.get("ctr_docs", [])) > 1):
                 n_doc += 1
                 row_set.add(row_idx)
+                kinds.setdefault(row_idx, set()).add("orange")
                 for col in highlight_cols:
                     cells[(row_idx, col)] = "combined"
 
@@ -2839,6 +3681,7 @@ class MainWindow(QMainWindow):
                 if bad_cols:
                     n_val += 1
                     row_set.add(row_idx)
+                    kinds.setdefault(row_idx, set()).add("red")
                     for col in bad_cols:
                         if col in self._combined_df.columns:
                             cells[(row_idx, col)] = "mismatch"
@@ -2847,6 +3690,7 @@ class MainWindow(QMainWindow):
         source.set_highlights(cells)
         self._mismatch_rows = rows
         self._mismatch_pos  = 0 if rows else -1
+        self._set_mismatch_kinds({r: kinds.get(r, set()) for r in rows})
 
         has = len(rows) > 0
         self._prev_mm_btn.setEnabled(has)
@@ -2876,21 +3720,63 @@ class MainWindow(QMainWindow):
             self._mismatch_lbl.setVisible(True)
             self._set_status(f"Combined — {what.lower()}.")
 
+    def _set_mismatch_kinds(self, kinds: dict[int, set[str]]) -> None:
+        """Remember what highlights each navigable row, and show the colour selector only
+        when both red and orange rows exist (Combined View)."""
+        self._mismatch_kinds = kinds
+        has_red = any("red" in k for k in kinds.values())
+        has_orange = any("orange" in k for k in kinds.values())
+        self._mm_kind_combo.blockSignals(True)
+        self._mm_kind_combo.setCurrentIndex(0)                  # back to "All highlighted"
+        self._mm_kind_combo.blockSignals(False)
+        self._mm_kind_combo.setVisible(has_red and has_orange)
+
+    def _navigable_rows(self) -> list[int]:
+        """The highlighted source rows the arrows step through, in the order they are shown
+        now (after sorting), limited to the colour chosen in the selector. Rows the document
+        filter hides are left out."""
+        proxy = self._tab_matched.model()
+        if proxy is None:
+            return []
+        want = self._mm_kind_combo.currentData() if self._mm_kind_combo.isVisible() else "all"
+        src = proxy.sourceModel()
+        shown = []
+        for r in self._mismatch_rows:
+            if want != "all" and want not in self._mismatch_kinds.get(r, set()):
+                continue
+            pr = proxy.mapFromSource(src.index(r, 0)).row()
+            if pr >= 0:
+                shown.append((pr, r))
+        return [r for _, r in sorted(shown)]
+
     def _nav_mismatch(self, step: int, absolute: bool = False):
         if not self._mismatch_rows:
             return
-        n = len(self._mismatch_rows)
-        if absolute:
-            self._mismatch_pos = step          # step is the target index
-        else:
-            self._mismatch_pos = (self._mismatch_pos + step) % n
-
-        src_row = self._mismatch_rows[self._mismatch_pos]
-        proxy   = self._tab_matched.model()
+        proxy = self._tab_matched.model()
         if proxy is None:
             return
-        src_idx   = proxy.sourceModel().index(src_row, 0)
-        proxy_idx = proxy.mapFromSource(src_idx)
+        rows = self._navigable_rows()
+        if not rows:
+            self._set_status("No highlighted rows of that colour to step through.")
+            return
+        src = proxy.sourceModel()
+        n = len(rows)
+        if absolute:
+            pos = max(0, min(step, n - 1))               # step is the target index
+        else:
+            # Relative to the row selected on screen, so sorting, clicking elsewhere or
+            # filtering never leaves the arrows walking a stale order.
+            cur = self._tab_matched.currentIndex().row()
+            on_screen = [proxy.mapFromSource(src.index(r, 0)).row() for r in rows]
+            if cur < 0:
+                pos = 0 if step > 0 else n - 1
+            elif step > 0:
+                pos = next((i for i, pr in enumerate(on_screen) if pr > cur), 0)
+            else:
+                pos = next((i for i in range(n - 1, -1, -1) if on_screen[i] < cur), n - 1)
+        self._mismatch_pos = pos
+        src_row = rows[pos]
+        proxy_idx = proxy.mapFromSource(src.index(src_row, 0))
         self._tab_matched.scrollTo(
             proxy_idx, QAbstractItemView.ScrollHint.PositionAtCenter)
         self._tab_matched.setCurrentIndex(proxy_idx)
@@ -2899,7 +3785,7 @@ class MainWindow(QMainWindow):
         active_df   = self._combined_df if combined else self._display_df
         label       = "Combined item" if combined else "Mismatch"
         self._set_status(
-            f"{label} {self._mismatch_pos + 1} of {n}  — "
+            f"{label} {pos + 1} of {n}  — "
             f"Stock Code: {active_df.iloc[src_row]['Stock Code']}")
 
     # ── Combined view ────────────────────────────────────────────────────────
@@ -2974,6 +3860,14 @@ class MainWindow(QMainWindow):
             if rows_error else pd.DataFrame(columns=error_cols)
         )
 
+        cells: set = set()
+        self._combined_df, tips = self._with_local_costs_combined(
+            self._combined_df, self._local_cost_context(), self._local_mult_chk.isChecked(), cells)
+        self._local_tips = getattr(self, "_local_tips", {})
+        self._local_tips["_combined_df"] = tips
+        self._local_edit = getattr(self, "_local_edit", {})
+        self._local_edit["_combined_df"] = cells
+
         self._fill_review_list()
         self._update_review_tab_badge()
         _show_result(self._stack_error, self._tab_error, self._combined_error_df)
@@ -2984,6 +3878,7 @@ class MainWindow(QMainWindow):
             # A fresh model has no highlights — reapply Show Combined's
             # multi-document highlighting if it was on before this rebuild.
             self._apply_value_highlights(self._compare_vals_btn.isChecked())
+            self._decorate_views()
 
     def _update_review_tab_badge(self):
         """So a pending review (unit conflicts, rows with no quantity) is
@@ -3101,6 +3996,7 @@ class MainWindow(QMainWindow):
         # highlighting in Combined).
         self._apply_value_highlights(self._compare_vals_btn.isChecked())
         self._apply_doc_column_visibility(self._show_docs_btn.isChecked())
+        self._decorate_views()
 
     def _arrange_toolbar(self, combined: bool):
         """Lay out the corner toolbar. In Combined view the Compare Values
@@ -3112,6 +4008,7 @@ class MainWindow(QMainWindow):
             cl.takeAt(0)          # detaches the item; widgets stay alive
         cl.addWidget(self._prev_mm_btn)
         cl.addWidget(self._next_mm_btn)
+        cl.addWidget(self._mm_kind_combo)
         cl.addSpacing(4)
         if combined:
             cl.addWidget(self._combined_cmp_btn)
@@ -3127,6 +4024,8 @@ class MainWindow(QMainWindow):
         cl.addWidget(self._show_docs_btn)
         cl.addSpacing(4)
         cl.addWidget(self._cols_btn)
+        cl.addSpacing(4)
+        cl.addWidget(self._local_mult_chk)
         cl.addStretch(1)          # left-aligned toolbar row above the tabs
 
     def _set_compare_vals_mode(self, combined: bool):
@@ -3238,6 +4137,11 @@ class MainWindow(QMainWindow):
                 if frames is not None:
                     frames[0].to_excel(writer, index=False, sheet_name="Statistics")
                     frames[1].to_excel(writer, index=False, sheet_name="Statistics Items")
+                # The same rows valued at what the documents bill (Document price).
+                pframes = self._stats_panel.price_report_frames()
+                if pframes is not None:
+                    pframes[0].to_excel(writer, index=False, sheet_name="Price Statistics")
+                    pframes[1].to_excel(writer, index=False, sheet_name="Price Items")
                 if not self._missing_qty_df.empty:
                     self._missing_qty_df.rename(columns={
                         "side": "Side", "doc": "Document", "sheet": "Sheet", "key": "Stock Code",
@@ -3270,6 +4174,7 @@ class MainWindow(QMainWindow):
             box.setDefaultButton(overwrite_btn)
             box.exec()
             clicked = box.clickedButton()
+            box.deleteLater()
             if clicked is overwrite_btn:
                 path = str(self._loaded_comparison_path)
             elif clicked is not new_btn:
@@ -3317,9 +4222,12 @@ class MainWindow(QMainWindow):
             return
 
         dlg = ComparisonPickerDialog(entries, parent=self)
-        if dlg.exec() != QDialog.DialogCode.Accepted or dlg.selected_path is None:
+        accepted = dlg.exec() == QDialog.DialogCode.Accepted
+        selected = dlg.selected_path
+        dlg.deleteLater()
+        if not accepted or selected is None:
             return
-        path = dlg.selected_path
+        path = selected
 
         try:
             data = load_comparison(path)

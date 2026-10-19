@@ -33,6 +33,8 @@ build:
 installer: build
     if (Get-Command iscc -ErrorAction SilentlyContinue) { iscc setup.iss } else { & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" setup.iss }
 
-# Remove build artefacts
+# Remove build artefacts.
+# Output/ is deliberately NOT removed: it holds the built installers (Inno Setup's OutputDir),
+# which are releases, not artefacts. Delete old ones by hand when you are sure.
 clean:
-    rm -rf build dist __pycache__ .pytest_cache Output
+    rm -rf build dist __pycache__ .pytest_cache

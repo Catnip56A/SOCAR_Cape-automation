@@ -6,6 +6,8 @@ import stat
 import ctr_tools.presets as P
 import harness as H
 from common import settings_view as S
+
+
 class _Gen:
     """The few Generator methods the Settings window calls, over the sandboxed files."""
     sage_path_changed = type("Sig", (), {"connect": staticmethod(lambda f: None)})()
@@ -60,6 +62,7 @@ def test_restore_brings_a_backup_back_and_saves_the_current_list_first():
         def __init__(self, *a): pass
         def exec(self): return S.QDialog.DialogCode.Accepted
         def chosen(self): return old
+        def deleteLater(self): pass                       # the real window is deleted after use
     real = S._RestoreDialog
     S._RestoreDialog = _Pick
     try:

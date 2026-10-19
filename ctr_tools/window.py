@@ -1461,12 +1461,30 @@ class _SaveLocationDialog(QDialog):
 # Main dialog
 # ─────────────────────────────────────────────────────────────────────────────
 
+def file_stamp(path) -> tuple[int, int] | None:
+    """(modified time in ns, size) of a file — its fingerprint: when it differs from the one taken when the file
+    was read, the file changed on disk since. None when the path is empty or the file is not there."""
+    if not path:
+        return None                                  # an empty path would otherwise mean "the current folder"
+    try:
+        st = Path(path).stat()
+    except (OSError, TypeError, ValueError):
+        return None
+    return (st.st_mtime_ns, st.st_size)
+
+
 class CTRGeneratorWidget(QWidget):
     # Emitted whenever the SAGE Export path text changes (typed, browsed or
     # restored). The MR vs CTR tab keeps its own SAGE field in step with this
     # one — see MainWindow, and set_sage_path() below.
     sage_path_changed = Signal(str)
     choices_reloaded = Signal(object)          # the saved rechargeability choices were re-read (Settings reset / restore)
+    # The USD Pricebook / Combined DB path text changed. The MR vs CTR tab has its own fields
+    # for them (the price statistics need both) and keeps them in step with these, like SAGE.
+    usd_pricebook_path_changed = Signal(str)
+    combined_db_path_changed = Signal(str)
+    stats_defaults_changed = Signal()          # Settings changed the statistics defaults (mode, scaffold, markup)
+    files_loaded = Signal()                    # Load Files finished: the reference tables were just re-read from disk
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1479,6 +1497,15 @@ class CTRGeneratorWidget(QWidget):
         self._sage_loading_path: str = ""
         self._usd_pb_df:   pd.DataFrame = pd.DataFrame()
         self._names_db_df: pd.DataFrame = pd.DataFrame()
+        # Which files those two were parsed from (see loaded_usd_df / loaded_names_df).
+        self._usd_pb_df_path:      str = ""
+        self._names_db_df_path:    str = ""
+        self._usd_loading_path:    str = ""
+        self._names_loading_path:  str = ""
+        # The files' fingerprints (modified time, size) taken when they were read: a parsed table is only
+        # reused (loaded_*_df) while its file is unchanged on disk.
+        self._sage_df_stamp = self._usd_pb_df_stamp = self._names_db_df_stamp = None
+        self._loading_stamps: dict = {}
         # Manpower encoding rules from the Combined DB (parse_encoding_info):
         # valid encodings per role, and the roles that are always Onshore.
         self._enc_variants: dict[str, list[str]] = {}
@@ -1589,6 +1616,8 @@ class CTRGeneratorWidget(QWidget):
         row2, self._sage_edit   = _file_picker_row("SAGE Export", "Excel (*.xlsx *.xlsm *.xls)")
         row3, self._usd_pb_edit = _file_picker_row("USD Pricebook", "Excel (*.xlsx *.xls)")
         self._sage_edit.textChanged.connect(self.sage_path_changed)
+        self._usd_pb_edit.textChanged.connect(self.usd_pricebook_path_changed)
+        self._combined_db_edit.textChanged.connect(self.combined_db_path_changed)
         tl.addLayout(row1)
         tl.addLayout(row2)
         tl.addLayout(row3)
@@ -1999,6 +2028,7 @@ class CTRGeneratorWidget(QWidget):
 
     def _build_stats_section(self, parent_layout: QVBoxLayout):
         grp = QGroupBox("Cost statistics — SAGE expected cost of this request (Equipment & Consumables)")
+        self._stats_grp = grp
         gl = QVBoxLayout(grp)
         gl.setSpacing(4)
 
@@ -2010,6 +2040,7 @@ class CTRGeneratorWidget(QWidget):
             "(✓) lines are counted — the ones that go into the CTR — and scaffold is not "
             "included. This is SAGE's expected cost, not what the client is billed."
         )
+        self._stats_info = info
         info.setWordWrap(True)
         info.setStyleSheet(f"color: {MUTED}; font-size: 11px;")
         gl.addWidget(info)
@@ -2048,14 +2079,25 @@ class CTRGeneratorWidget(QWidget):
 
         self._stats_panel = StatsPanel(
             group_labels={"CTR": "CTR Request — equipment & consumables"},
-            show_type_filter=False, min_tree_height=240,
+            show_type_filter=False, min_tree_height=240, show_markup=True,
             no_sage_note="Please enter their cost by hand: a Stock Code that is not in SAGE has no SAGE "
                          "cost, so the CTR's internal SC cost cell stays EMPTY for it until you do.")
         self._stats_panel.reload_requested.connect(self._refresh_stats)
         self._stats_panel.row_clicked.connect(self._show_stats_row)
         self._stats_panel.choices_changed.connect(self._on_choices_changed)
         self._stats_panel.set_choices(load_choices())          # remembered from earlier runs
+        self._stats_panel.view_changed.connect(self._refresh_price_totals)
+        self._stats_panel.view_changed.connect(self._sync_stats_texts)
+        self.stats_defaults_changed.connect(self._stats_panel.apply_defaults)
         gl.addWidget(self._stats_panel)
+        self._sync_stats_texts()
+
+        # Price totals of the request, per category and per currency (AZN and USD are never added).
+        self._price_totals_lbl = QLabel("")
+        self._price_totals_lbl.setTextFormat(Qt.TextFormat.RichText)
+        self._price_totals_lbl.setWordWrap(True)
+        self._price_totals_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        gl.addWidget(self._price_totals_lbl)
 
         self._stats_note_lbl = QLabel("")
         self._stats_note_lbl.setStyleSheet(f"color: {MUTED}; font-size: 11px;")
@@ -2332,16 +2374,18 @@ class CTRGeneratorWidget(QWidget):
             self._qty_jump_btn.setText(f"Go to value ({n})")
 
     def _stats_items(self) -> tuple[pd.DataFrame, int]:
-        """The Equipment and Consumables lines that go into the CTR, as input
-        for cost_stats. Returns (items, unmatched lines not counted)."""
+        """The Equipment and Consumables lines that go into the CTR (and the scaffold
+        line), as input for cost_stats. Returns (items, unmatched lines not counted).
+        Each line carries its own description, rate cell and days, so the price view
+        shows what the CTR would bill; scaffold is flagged and always rechargeable."""
         specs = (
             (self._req_equip_tbl, "Equipment", "Plant & Equipment",
-             _EQ_DESC, _EQ_CODE, _EQ_MATCH, _EQ_QTY, _EQ_RATE, _EQ_STATUS),
+             _EQ_DESC, _EQ_CODE, _EQ_MATCH, _EQ_QTY, _EQ_RATE, _EQ_STATUS, _EQ_DAYS),
             (self._req_cons_tbl, "Consumables", "Consumables & Materials",
-             _CS_DESC, _CS_CODE, _CS_MATCH, _CS_QTY, _CS_PRICE, _CS_STATUS),
+             _CS_DESC, _CS_CODE, _CS_MATCH, _CS_QTY, _CS_PRICE, _CS_STATUS, None),
         )
         rows, unmatched = [], 0
-        for tbl, label, section, c_desc, c_code, c_match, c_qty, c_rate, c_status in specs:
+        for tbl, label, section, c_desc, c_code, c_match, c_qty, c_rate, c_status, c_days in specs:
             for r in range(tbl.rowCount()):
                 def txt(c, _r=r, _t=tbl):
                     item = _t.item(_r, c)
@@ -2351,8 +2395,7 @@ class CTRGeneratorWidget(QWidget):
                     unmatched += 1
                     continue
                 desc_item = tbl.item(r, c_desc)
-                if desc_item is not None and desc_item.data(_SCAFFOLD_ROLE):
-                    continue                      # scaffold has no SAGE cost
+                scaffold = bool(desc_item is not None and desc_item.data(_SCAFFOLD_ROLE))
                 key = txt(c_match) or txt(c_code) or txt(c_desc)
                 if not key:
                     continue
@@ -2362,9 +2405,15 @@ class CTRGeneratorWidget(QWidget):
                     status = "RECHARGE"
                 except ValueError:
                     status = "NONRECHARG" if rate == "NONRECHARG" else None
+                if scaffold:
+                    status = "RECHARGE"               # scaffold is rechargeable
                 rows.append({"key": key, "doc": label, "sheet": "", "side": "CTR",
-                             "qty": txt(c_qty), "status": status, "section": section})
-        cols = ["key", "doc", "sheet", "side", "qty", "status", "section"]
+                             "qty": txt(c_qty), "status": status, "section": section,
+                             "description": txt(c_desc), "rate": txt(c_rate),
+                             "days": txt(c_days) if c_days is not None else "",
+                             "scaffold": scaffold})
+        cols = ["key", "doc", "sheet", "side", "qty", "status", "section",
+                "description", "rate", "days", "scaffold"]
         return pd.DataFrame(rows, columns=cols), unmatched
 
     def _refresh_stats(self):
@@ -2373,8 +2422,134 @@ class CTRGeneratorWidget(QWidget):
         matched with), so this is instant and runs on the UI thread."""
         if self._apply_all_choices_to_lines():          # a chosen SAGE value changed a line: this runs again
             return
+        spin = getattr(self, "_markup_spin", None)
+        if spin is not None:
+            self._stats_panel.set_markup_rate(spin.value() / 100.0)
         self._refresh_stats_inner()
         self._update_goto_button()      # after the panel is rebuilt (it knows the not-in-SAGE codes)
+        self._refresh_price_totals()
+
+    _COST_TITLE = "Cost statistics — SAGE expected cost of this request (Equipment & Consumables)"
+    _COST_INFO = None            # the original intro text, remembered on first use
+
+    def _sync_stats_texts(self) -> None:
+        """The box's title and intro follow the view: Document costs or Document price."""
+        info, grp = getattr(self, "_stats_info", None), getattr(self, "_stats_grp", None)
+        if info is None or grp is None:
+            return
+        if self._COST_INFO is None:
+            CTRGeneratorWidget._COST_INFO = info.text()
+        if self._stats_panel.mode() == "price":
+            grp.setTitle("Price statistics — what this request bills (Equipment & Consumables)")
+            info.setText(
+                "What the loaded CTR Request bills: quantity × the line's rate (× days for equipment "
+                "and scaffold), split into rechargeable and non-rechargeable. A non-rechargeable line "
+                "is 0. Only matched (✓) lines are counted — the ones that go into the CTR. Scaffold "
+                "and the markup on consumables are switched with the tick boxes below; the price "
+                "totals under the list show every category. A line whose rate or days are missing is "
+                "not counted (shown in red).")
+        else:
+            grp.setTitle(self._COST_TITLE)
+            info.setText(self._COST_INFO)
+
+    def price_totals(self) -> dict:
+        """What the loaded request bills, per category, from the tables' own Total cells
+        (the numbers a generated CTR carries). AZN: manpower + transport. USD: equipment
+        (scaffold apart: it is added only when the statistics' "Include scaffold" is on)
+        + consumables (with the Markup Rate when "With markup" is on). A row with a
+        missing required value is left out, as Generate does, and counted in `left_out`.
+        AZN and USD are never added together. Non-rechargeable lines are 0."""
+        def cell(tbl, r, c) -> float:
+            it = tbl.item(r, c)
+            try:
+                v = float(it.text()) if it else 0.0
+            except ValueError:
+                return 0.0
+            return v if v == v else 0.0
+
+        gone = {(id(c["tbl"]), c["row"]) for c in self._incomplete_cells()}
+        left = {"manpower": 0, "transport": 0, "equipment": 0, "consumables": 0}
+
+        def included(tbl, r, c_status, bucket):
+            if c_status is not None:
+                st = tbl.item(r, c_status)
+                if not (st and st.text().startswith("✓")):
+                    return False
+            if (id(tbl), r) in gone:
+                left[bucket] += 1
+                return False
+            return True
+
+        manpower = sum(cell(self._req_manpower_tbl, r, _MP_TOTAL)
+                       for r in range(self._req_manpower_tbl.rowCount())
+                       if included(self._req_manpower_tbl, r, _MP_STATUS, "manpower"))
+        transport = 0.0
+        for r in range(self._transport_tbl.rowCount()):
+            if included(self._transport_tbl, r, None, "transport"):
+                if cell(self._transport_tbl, r, _TR_QTY) > 0:      # a line at 0 or less is hidden in the CTR
+                    transport += cell(self._transport_tbl, r, _TR_TOTAL)
+        equipment = scaffold = 0.0
+        for r in range(self._req_equip_tbl.rowCount()):
+            if included(self._req_equip_tbl, r, _EQ_STATUS, "equipment"):
+                d = self._req_equip_tbl.item(r, _EQ_DESC)
+                if d is not None and d.data(_SCAFFOLD_ROLE):
+                    scaffold += cell(self._req_equip_tbl, r, _EQ_TOTAL)
+                else:
+                    equipment += cell(self._req_equip_tbl, r, _EQ_TOTAL)
+        cons_raw = sum(cell(self._req_cons_tbl, r, _CS_TOTAL)
+                       for r in range(self._req_cons_tbl.rowCount())
+                       if included(self._req_cons_tbl, r, _CS_STATUS, "consumables"))
+        spin = getattr(self, "_markup_spin", None)
+        markup = spin.value() / 100.0 if spin is not None and self._stats_panel.markup_on() else 0.0
+        consumables = cons_raw * (1.0 + markup)
+        with_scaffold = self._stats_panel.include_scaffold()
+        usd_total = equipment + consumables + (scaffold if with_scaffold else 0.0)
+        return {"manpower": manpower, "transport": transport, "azn_total": manpower + transport,
+                "equipment": equipment, "scaffold": scaffold, "scaffold_included": with_scaffold,
+                "consumables": consumables, "markup": markup, "usd_total": usd_total, "left_out": left}
+
+    def _refresh_price_totals(self) -> None:
+        """Show price_totals() under the statistics: one block per currency."""
+        t = self.price_totals()
+        left = t["left_out"]
+        waiting = sum(1 for tbl, c in ((self._req_manpower_tbl, _MP_STATUS), (self._req_equip_tbl, _EQ_STATUS),
+                                       (self._req_cons_tbl, _CS_STATUS))
+                      for r in range(tbl.rowCount())
+                      if (tbl.item(r, c) is not None and tbl.item(r, c).text().startswith("⏳")))
+
+        def note(*keys):
+            n = sum(left[k] for k in keys)
+            return (f" <span style='color:#C62828'>({n} line(s) not priced — a required value is missing)</span>"
+                    if n else "")
+
+        def row(label, amount, symbol, extra="", bold=False):
+            amt = f"{symbol} {amount:,.2f}"
+            if bold:
+                label, amt = f"<b>{label}</b>", f"<b>{amt}</b>"
+            return (f"<tr><td style='padding-right:18px'>{label}</td>"
+                    f"<td align='right' style='padding-right:12px'>{amt}</td><td>{extra}</td></tr>")
+
+        scaffold_txt = (f"Scaffold included: {t['scaffold']:,.2f}" if t["scaffold_included"] else
+                        f"Scaffold not included ({t['scaffold']:,.2f}) — tick “Include scaffold” in Document price"
+                        if t["scaffold"] else "Scaffold not included")
+        markup_txt = (f"with {t['markup'] * 100:g}% markup" if t["markup"] else
+                      "without markup (tick “With markup” in Document price)")
+        wait_note = (f"<br><span style='color:#E65100'>⏳ Waiting for Load Files — {waiting} line(s) cannot be "
+                     "matched or priced yet, so they are not in these totals.</span>" if waiting else "")
+        html = (
+            "<div style='font-size:11px'>"
+            "<b>Price totals</b> — what this request bills (AZN and USD are never added together)"
+            + wait_note
+            + "<table cellspacing='2'>"
+            + row("AZN — Manpower", t["manpower"], "₼", note("manpower"))
+            + row("AZN — Transport (Third Party Activities)", t["transport"], "₼", note("transport"))
+            + row("AZN CTR total", t["azn_total"], "₼", bold=True)
+            + row("USD — Equipment", t["equipment"] + (t["scaffold"] if t["scaffold_included"] else 0.0), "$",
+                  scaffold_txt + note("equipment"))
+            + row("USD — Consumables", t["consumables"], "$", markup_txt + note("consumables"))
+            + row("USD CTR total", t["usd_total"], "$", bold=True)
+            + "</table></div>")
+        self._price_totals_lbl.setText(html)
 
     def _refresh_stats_inner(self):
         cells = self._incomplete_cells()
@@ -2394,9 +2569,9 @@ class CTRGeneratorWidget(QWidget):
         panel = self._stats_panel
         if self._sage_df.empty:
             self._stats_note_lbl.setText("")
-            panel.clear("The SAGE Export is not loaded yet. These statistics appear here by "
-                        "themselves once the files are loaded: set the SAGE Export above and "
-                        "press “Load Files”.", "warn")
+            panel.clear("⏳ Waiting for Load Files — the SAGE Export is not loaded yet. These statistics "
+                        "appear here by themselves once the files are loaded: set the SAGE Export above "
+                        "and press “Load Files”.", "warn")
             return
         items, unmatched = self._stats_items()
         self._stats_note_lbl.setText(
@@ -2460,37 +2635,74 @@ class CTRGeneratorWidget(QWidget):
         SAGE non-rechargeable → the rate/price cell becomes NONRECHARG; SAGE
         rechargeable and the cell is NONRECHARG → the cell is emptied (a rate or
         price must be entered — nothing is assumed). Choosing the document changes
-        no cell. Returns True when a cell was changed."""
+        no cell.
+
+        The change is reversible: the cell's text before the first change is remembered, and when
+        the choice is cleared (or the document is chosen instead) the line gets that text back —
+        unless the user has edited the cell since (their edit is never overwritten).
+        Returns True when a cell was changed."""
+        tables = {
+            "equipment": (self._req_equip_tbl, _EQ_MATCH, _EQ_CODE, _EQ_DESC, _EQ_RATE, _EQ_STATUS),
+            "consumable": (self._req_cons_tbl, _CS_MATCH, _CS_CODE, _CS_DESC, _CS_PRICE, _CS_STATUS),
+        }
+
+        def line_key(tbl, r, c_match, c_code, c_desc) -> str:
+            def _t(c):
+                it = tbl.item(r, c)
+                return it.text().strip() if it else ""
+            return cost_stats.norm_key(_t(c_match) or _t(c_code) or _t(c_desc))
+
+        rewrites = self.__dict__.setdefault("_choice_rewrites", {})
         sage_codes = {k for k, v in self._stats_panel.choices().items() if v == "SAGE"}
-        if not sage_codes or self._sage_df.empty:
-            return False
         changed = False
-        for tbl, c_match, c_code, c_desc, c_rate, c_status in (
-                (self._req_equip_tbl, _EQ_MATCH, _EQ_CODE, _EQ_DESC, _EQ_RATE, _EQ_STATUS),
-                (self._req_cons_tbl, _CS_MATCH, _CS_CODE, _CS_DESC, _CS_PRICE, _CS_STATUS)):
-            for r in range(tbl.rowCount()):
-                st = tbl.item(r, c_status)
-                if not (st and st.text().startswith("✓")):
-                    continue
-                d = tbl.item(r, c_desc)
-                if d is not None and d.data(_SCAFFOLD_ROLE):
-                    continue
-                def _t(c, _r=r, _tb=tbl):
-                    it = _tb.item(_r, c)
-                    return it.text().strip() if it else ""
-                key = _t(c_match) or _t(c_code) or _t(c_desc)
-                nk = cost_stats.norm_key(key)
-                if nk not in sage_codes:
-                    continue
-                nr = _sage_non_recharge(self._sage_df, key)
-                if nr is None:
-                    continue
-                cell = _t(c_rate).upper()
-                if nr and cell != "NONRECHARG":
-                    tbl.item(r, c_rate).setText("NONRECHARG")
+
+        # 1. Give back what a choice changed, once the choice is gone.
+        for (name, r), rec in list(rewrites.items()):
+            tbl, c_match, c_code, c_desc, c_rate, _c_status = tables[name]
+            cell = tbl.item(r, c_rate) if r < tbl.rowCount() else None
+            if cell is None or line_key(tbl, r, c_match, c_code, c_desc) != rec["code"]:
+                del rewrites[(name, r)]                       # the row is gone or is another line now
+            elif rec["code"] not in sage_codes:
+                if cell.text() == rec["written"]:              # still what we wrote: not edited since
+                    cell.setText(rec["orig"])
                     changed = True
-                elif not nr and cell == "NONRECHARG":
-                    tbl.item(r, c_rate).setText("")
+                del rewrites[(name, r)]
+
+        # 2. Apply the SAGE choices.
+        if sage_codes and not self._sage_df.empty:
+            for name, (tbl, c_match, c_code, c_desc, c_rate, c_status) in tables.items():
+                for r in range(tbl.rowCount()):
+                    st = tbl.item(r, c_status)
+                    if not (st and st.text().startswith("✓")):
+                        continue
+                    d = tbl.item(r, c_desc)
+                    if d is not None and d.data(_SCAFFOLD_ROLE):
+                        continue
+                    nk = line_key(tbl, r, c_match, c_code, c_desc)
+                    if nk not in sage_codes:
+                        continue
+                    key = (tbl.item(r, c_match).text().strip() if tbl.item(r, c_match) else "") or \
+                          (tbl.item(r, c_code).text().strip() if tbl.item(r, c_code) else "") or \
+                          (d.text().strip() if d else "")
+                    nr = _sage_non_recharge(self._sage_df, key)
+                    if nr is None:
+                        continue
+                    cell_item = tbl.item(r, c_rate)
+                    old = cell_item.text() if cell_item else ""
+                    cell = old.strip().upper()
+                    new = None
+                    if nr and cell != "NONRECHARG":
+                        new = "NONRECHARG"
+                    elif not nr and cell == "NONRECHARG":
+                        new = ""
+                    if new is None:
+                        continue
+                    rec = rewrites.get((name, r))
+                    if rec is None or rec["code"] != nk:
+                        rewrites[(name, r)] = {"code": nk, "orig": old, "written": new}
+                    else:
+                        rec["written"] = new
+                    cell_item.setText(new)
                     changed = True
         return changed
 
@@ -2573,9 +2785,12 @@ class CTRGeneratorWidget(QWidget):
         filename = f"CTR_Statistics_{job or 'request'}_{now:%Y-%m-%d_%H%M}.xlsx"
         start = self._out_dir_edit.text().strip() or str(Path.home())
         dlg = _SaveLocationDialog(self, "Save statistics", folder, filename, start)
-        if dlg.exec() != QDialog.DialogCode.Accepted or not dlg.folder():
+        accepted = dlg.exec() == QDialog.DialogCode.Accepted
+        chosen_folder = dlg.folder()
+        dlg.deleteLater()
+        if not accepted or not chosen_folder:
             return
-        folder = dlg.folder()
+        folder = chosen_folder
         settings.setValue(self._STATS_DIR_KEY, folder)     # remembered right away
         path = Path(folder) / filename
 
@@ -2593,14 +2808,22 @@ class CTRGeneratorWidget(QWidget):
                                 "a priced line is rechargeable (up for discussion with the department)."),
             ("Lines not matched (not counted)", unmatched),
             ("Rows with a required value missing", n_missing_rows),
-            ("Scaffold", "Not included."),
+            ("Scaffold", "Not in the cost sheets (it has no SAGE cost). The Price sheets include it "
+                         "when “Include scaffold” is ticked."),
+            ("Price sheets", "Price Statistics / Price Items: quantity × rate (× days for equipment and "
+                             "scaffold) as the CTR lines carry them; non-rechargeable = 0; consumables "
+                             + (f"with {self._markup_rate() * 100:g}% markup"
+                                if self._stats_panel.markup_rate() else "without markup") + "."),
         ], columns=["Item", "Value"])
+        pframes = self._stats_panel.price_report_frames()
         try:
             from io import BytesIO
             buf = BytesIO()
             with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-                for df, name in ((frames[0], "Statistics"), (frames[1], "Statistics Items"),
-                                 (info, "Info")):
+                sheets = [(frames[0], "Statistics"), (frames[1], "Statistics Items")]
+                if pframes is not None:
+                    sheets += [(pframes[0], "Price Statistics"), (pframes[1], "Price Items")]
+                for df, name in (*sheets, (info, "Info")):
                     df.to_excel(writer, index=False, sheet_name=name)
                     ws = writer.sheets[name]
                     for i, col in enumerate(df.columns, start=1):
@@ -2855,6 +3078,39 @@ class CTRGeneratorWidget(QWidget):
         if self._sage_edit.text() != path:
             self._sage_edit.setText(path)
 
+    def sage_names(self) -> dict[str, str]:
+        """{STOCK CODE: SAGE description} of the loaded SAGE Export (empty before Load Files); lets
+        the Settings window show each Stock Code's description."""
+        return cost_stats.sage_name_map(self._sage_df)
+
+    def usd_pricebook_path(self) -> str:
+        return self._usd_pb_edit.text().strip()
+
+    def set_usd_pricebook_path(self, path: str) -> None:
+        if self._usd_pb_edit.text() != path:
+            self._usd_pb_edit.setText(path)
+
+    def combined_db_path(self) -> str:
+        return self._combined_db_edit.text().strip()
+
+    def set_combined_db_path(self, path: str) -> None:
+        if self._combined_db_edit.text() != path:
+            self._combined_db_edit.setText(path)
+
+    def loaded_usd_df(self, path: str) -> pd.DataFrame | None:
+        """The parsed USD Pricebook if it was loaded from exactly `path`, else None."""
+        if (path and path == self._usd_pb_df_path and not self._usd_pb_df.empty
+                and file_stamp(path) == self._usd_pb_df_stamp):
+            return self._usd_pb_df
+        return None
+
+    def loaded_names_df(self, path: str) -> pd.DataFrame | None:
+        """The parsed Equipment Names bridge if it was loaded from exactly `path`, else None."""
+        if (path and path == self._names_db_df_path and not self._names_db_df.empty
+                and file_stamp(path) == self._names_db_df_stamp):
+            return self._names_db_df
+        return None
+
     # ── Used by the Settings tab ─────────────────────────────────────────────
 
     def sage_path(self) -> str:
@@ -2904,9 +3160,10 @@ class CTRGeneratorWidget(QWidget):
     def loaded_sage_df(self, path: str) -> pd.DataFrame | None:
         """The parsed SAGE table if it was loaded from exactly `path`, else
         None (not loaded yet, or loaded from a different file)."""
-        if path and path == self._sage_df_path and not self._sage_df.empty:
+        if (path and path == self._sage_df_path and not self._sage_df.empty
+                and file_stamp(path) == self._sage_df_stamp):
             return self._sage_df
-        return None
+        return None                              # not loaded, another file, or the file changed since it was read
 
     def restore_settings(self) -> None:
         """Load last-used paths from QSettings. Call after the widget is shown."""
@@ -3054,6 +3311,11 @@ class CTRGeneratorWidget(QWidget):
             tasks.append(("enc_info", lambda p=combined: parse_encoding_info(p)))
 
         self._sage_loading_path = sage
+        self._usd_loading_path = usd_pb
+        self._names_loading_path = combined
+        # Taken BEFORE the files are read: a file edited while it is being read then counts as changed next time.
+        self._loading_stamps = {"sage": file_stamp(sage), "usd": file_stamp(usd_pb),
+                                "names": file_stamp(combined) if combined else None}
         job = TASKS.begin_job("Load pricebook files", [name for name, _fn in tasks],
                                parallel=True)
         self._pending_loads += len(tasks)
@@ -3085,12 +3347,17 @@ class CTRGeneratorWidget(QWidget):
             elif name == "sage":
                 self._sage_df = result
                 self._sage_df_path = self._sage_loading_path
+                self._sage_df_stamp = self._loading_stamps.get("sage")
                 self._load_status.append(f"SAGE Export ({len(result)} rows)")
             elif name == "usd_pb":
                 self._usd_pb_df = result
+                self._usd_pb_df_path = self._usd_loading_path
+                self._usd_pb_df_stamp = self._loading_stamps.get("usd")
                 self._load_status.append(f"USD Pricebook ({len(result)} rows)")
             elif name == "names_db":
                 self._names_db_df = result
+                self._names_db_df_path = self._names_loading_path
+                self._names_db_df_stamp = self._loading_stamps.get("names")
                 self._load_status.append(f"Equipment Names DB ({len(result)} rows)")
             elif name == "enc_info":
                 self._enc_variants = result["variants"]
@@ -3142,6 +3409,7 @@ class CTRGeneratorWidget(QWidget):
                 "Loaded for matching (no rows added to the CTR tables): "
                 + "; ".join(self._load_status)
             )
+        self.files_loaded.emit()                 # e.g. the MR vs CTR statistics recalculate from the fresh tables
 
     def _prune_workers(self) -> None:
         """Drops workers that have finished (see MainWindow._prune_workers)."""
@@ -3346,6 +3614,7 @@ class CTRGeneratorWidget(QWidget):
         dlg = AliasManagerDialog(self._aliases, self._desc_renames, parent=self,
                                   applied_count=applied, category=category)
         dlg.exec()
+        dlg.deleteLater()
 
     def _apply_aliases_to_manpower_rows(self) -> int:
         """
@@ -4590,7 +4859,9 @@ class CTRGeneratorWidget(QWidget):
             go = box.addButton("Generate without them", QMessageBox.ButtonRole.AcceptRole)
             box.addButton(QMessageBox.StandardButton.Cancel)
             box.exec()
-            if box.clickedButton() is not go:
+            generate_anyway = box.clickedButton() is go
+            box.deleteLater()
+            if not generate_anyway:
                 self._empty_qty_idx = -1
                 self._jump_empty_qty()
                 return
@@ -4776,6 +5047,7 @@ class CTRGeneratorWidget(QWidget):
 
         def _done(paths: list[str]):
             dlg.close()
+            dlg.deleteLater()
             body = "\n".join(f"  • {p}" for p in paths) or "  (nothing was written)"
             note = (
                 f"\n\nSkipped {total_skipped} unmatched row(s) — not included "
@@ -4798,6 +5070,7 @@ class CTRGeneratorWidget(QWidget):
 
         def _err(msg: str):
             dlg.close()
+            dlg.deleteLater()
             QMessageBox.critical(self, "Generation failed", msg)
 
         worker.finished.connect(_done)

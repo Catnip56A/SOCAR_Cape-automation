@@ -613,6 +613,7 @@ class CTRTrackerWidget(QWidget):
 
         def _done(written: list, skipped: list, backup_path, notes: list):
             dlg.close()
+            dlg.deleteLater()
             self._workers.remove(worker)
 
             n_written, n_total = len(written), len(written) + len(skipped)
@@ -640,6 +641,7 @@ class CTRTrackerWidget(QWidget):
 
         def _err(message: str):
             dlg.close()
+            dlg.deleteLater()
             self._workers.remove(worker)
             QMessageBox.critical(self, "Write failed", message)
             self._refresh_batch_state()

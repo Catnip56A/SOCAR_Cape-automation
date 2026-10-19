@@ -16,6 +16,11 @@ Paths that are off-limits to test runs:
   returned by `ctr_tools/paths.py:user_data_dir`) — `match_aliases.json`,
   `desc_renames.json`, `ctr_presets.json`
 - `TEST_Files/**/Output/` — real generated CTRs and the user's own templates
+- The native **QSettings** store (`QSettings("SOCAR", "CTRGenerator")`: last-used paths,
+  statistics defaults — `~/.config/SOCAR/CTRGenerator.conf` on Linux, the registry on
+  Windows). Constructing the window or a settings dialog reads and writes it, so a test
+  run must redirect it first: set `XDG_CONFIG_HOME`, `XDG_DATA_HOME` and `HOME` to a temp
+  folder before the app is imported (`tests/harness.py` does this for every test).
 
 To sandbox a run, redirect the persistence paths before importing the window:
 
