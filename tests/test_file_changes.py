@@ -300,24 +300,6 @@ def test_a_table_that_the_new_version_no_longer_has_is_named():
     assert {t["table_name"] for t in win._mr_tables} == {"Socar-Cape"}
 
 
-def test_two_loaded_files_with_the_same_name_are_not_guessed_between():
-    import shutil
-    import app as A
-    win, copy = _reload_window()
-    other = H.SANDBOX / "elsewhere"
-    other.mkdir(exist_ok=True)
-    twin = other / copy.name
-    shutil.copy(_MR_A, twin)
-    _browsed(win, "mr", twin)                                  # same name, other folder
-    n = len(win._mr_tables)
-    shutil.copy(_MR_B, twin)
-    _touch_later(twin)
-    win._reload_changed_files()
-    _wait_reloaded(win)
-    assert len(win._mr_tables) == n                            # nothing was swapped
-    assert win.reports and "two files with this name" in win.reports[0][0]
-
-
 def test_a_file_without_a_location_says_why_it_cannot_be_reloaded():
     win, mr_file, ctr_file = _window_with_files()
     win._file_origin.clear()
@@ -350,3 +332,98 @@ def test_stopping_the_parse_during_a_reload_keeps_the_old_tables():
     stopped = [line for r in getattr(win, "reports", []) for line in r if "stopped" in line]
     flagged = {n for _s, n, _w in win._changed_source_files()}
     assert flagged == {line.split(": ")[1].split(" —")[0].split(";")[0] for line in stopped}
+
+
+# ── the five caveats found by the challenger agent ──────────────────────────────────
+
+def test_adding_a_file_with_a_name_that_is_already_loaded_replaces_it_instead_of_doubling():
+    import shutil
+    win, copy = _reload_window()                               # reload_mr_N.xlsm = _MR_B (CH-1 + cover)
+    rows = sorted(len(t["data"]) for t in win._mr_tables)
+    other = H.SANDBOX / "elsewhere2"
+    other.mkdir(exist_ok=True)
+    twin = other / copy.name                                   # same name, other folder, other content
+    shutil.copy(_MR_A, twin)
+    n_before = len(win._mr_tables)
+    _browsed_replace(win, "mr", twin)
+    assert win._mr_file_list.count() == 1                      # still one row
+    assert all(t["source_file"] == copy.name for t in win._mr_tables)
+    assert sorted(len(t["data"]) for t in win._mr_tables) != rows and len(win._mr_tables) != n_before + 1
+    assert win._file_origin[("mr", copy.name)][0] == str(twin)  # later changes are watched on the NEW path
+    _touch_later(twin)
+    assert [n for _s, n, _w in win._changed_source_files()] == [copy.name]
+
+
+def _browsed_replace(win, side, path):
+    import app as A
+    A.QFileDialog.getOpenFileNames = staticmethod(lambda *a, **k: ([str(path)], ""))
+    win._browse(side)
+    assert H.wait(lambda: win._reload_pending == 0 and not any(w.isRunning() for w in win._workers), 120)
+    H.pump(30)
+
+
+def test_a_failed_replace_keeps_the_old_tables_and_the_old_origin():
+    import app as A
+    win, copy = _reload_window()
+    bad = H.SANDBOX / "elsewhere3"
+    bad.mkdir(exist_ok=True)
+    twin = bad / copy.name
+    twin.write_bytes(b"not a workbook")
+    old_origin, n = win._file_origin[("mr", copy.name)], len(win._mr_tables)
+    shown = []
+    A.QMessageBox.warning = staticmethod(lambda *a, **k: shown.append(a[2]))
+    _browsed_replace(win, "mr", twin)
+    assert len(win._mr_tables) == n and win._file_origin[("mr", copy.name)] == old_origin and shown
+
+
+def test_compare_anyway_is_offered_when_a_file_cannot_be_reloaded():
+    win, copy = _reload_window()
+    _browsed(win, "ctr", _CTR_A)
+    copy.unlink()
+    win.missing_file_chooser = lambda side, name, path: "keep"      # stays stuck
+    win.changed_files_chooser = lambda changed: "reload"
+    offered = []
+    win.reload_report = lambda lines: offered.append(lines) or True  # "Compare anyway"
+    win._run_compare()
+    _wait_reloaded(win)
+    assert offered and H.wait(lambda: "Compared at" in win.statusBar().currentMessage(), 60)
+    assert H.wait(lambda: not win._stats_workers, 120)
+
+
+def test_unticked_sheets_stay_unticked_when_a_located_file_has_another_name():
+    import shutil
+    win, copy = _reload_window()
+    rows = [win._mr_table_list.itemWidget(win._mr_table_list.item(i)) for i in range(win._mr_table_list.count())]
+    ch = next(r for r in rows if r._table_key and r._table_key[2] == "CH-1")
+    ch._checkbox.setChecked(False)
+    moved = H.SANDBOX / "renamed_copy_of_b.xlsm"
+    shutil.copy(_MR_B, moved)
+    copy.unlink()
+    win.missing_file_chooser = lambda side, name, path: str(moved)
+    win._reload_changed_files()
+    _wait_reloaded(win)
+    rows = [win._mr_table_list.itemWidget(win._mr_table_list.item(i)) for i in range(win._mr_table_list.count())]
+    state = {r._table_key[2]: r._checkbox.isChecked() for r in rows if r._table_key}
+    assert state["CH-1"] is False and all(r._table_key[0] == moved.name for r in rows if r._table_key)
+
+
+def test_files_cannot_be_removed_or_cleared_while_a_reload_is_parsing():
+    import shutil
+    win, copy = _reload_window()
+    shutil.copy(_MR_A, copy)
+    _touch_later(copy)
+    win._reload_changed_files()
+    assert win._reload_pending
+    win._remove_file("mr", copy.name)
+    win._clear("mr")
+    assert win._mr_file_list.count() == 1 and win._mr_tables       # nothing was removed
+    _wait_reloaded(win)
+    assert win._mr_tables and win._mr_file_list.count() == 1
+
+
+def test_the_files_are_checked_off_the_ui_thread_when_the_window_is_activated():
+    win, copy = _reload_window()
+    _touch_later(copy)
+    win._check_files_in_background()
+    assert H.wait(lambda: win._reload_btn.isVisibleTo(win), 30) and "(1)" in win._reload_btn.text()
+    assert win._stamp_worker.isFinished() or H.wait(lambda: win._stamp_worker.isFinished(), 10)

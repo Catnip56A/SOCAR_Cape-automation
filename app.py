@@ -920,6 +920,19 @@ class ParseWorker(QThread):
 # Main window
 # ─────────────────────────────────────────────────────────────────────────────
 
+class StampWorker(QThread):
+    """Reads the modified time / size of the added files off the UI thread: a network share or an offline
+    OneDrive folder can make a plain stat() block for seconds each time the window gets focus."""
+    done = Signal(dict)
+
+    def __init__(self, paths: list[str], parent=None):
+        super().__init__(parent)
+        self._paths = paths
+
+    def run(self):
+        self.done.emit({p: file_stamp(p) for p in self._paths})
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -1109,7 +1122,7 @@ class MainWindow(QMainWindow):
                 color: #9E9E9E;
             }}
         """)
-        self._compare_btn.clicked.connect(self._run_compare)
+        self._compare_btn.clicked.connect(lambda _=False: self._run_compare())
 
         # Alternative to uploading + comparing: reopen a past comparison
         # directly. Lives here (not with Download/Save below) so it works
@@ -1689,13 +1702,22 @@ class MainWindow(QMainWindow):
         )
         if not paths:
             return
+        if self._reload_pending:
+            self._set_status("Wait for the files to finish reloading, then add files.")
+            return
         log.info("%s: browsing %d file(s)", side.upper(), len(paths))
         payloads: list[tuple[str, bytes]] = []
+        lw0 = self._mr_file_list if side == "mr" else self._ctr_file_list
+        already = [lw0.item(k).data(Qt.ItemDataRole.UserRole) for k in range(lw0.count())]
+        new_origin: dict[str, tuple] = {}
         for p in paths:
             try:
                 stamp = file_stamp(p)                    # before reading: an edit during the read counts as a change
                 payloads.append((Path(p).name, Path(p).read_bytes()))
-                self._file_origin[(side, Path(p).name)] = (str(p), stamp)
+                if Path(p).name in already:
+                    new_origin[Path(p).name] = (str(p), stamp)       # committed only when the new version is parsed
+                else:
+                    self._file_origin[(side, Path(p).name)] = (str(p), stamp)
             except Exception as exc:
                 log.exception("Failed to read file: %s", p)
                 QMessageBox.warning(self, "File error",
@@ -1703,10 +1725,26 @@ class MainWindow(QMainWindow):
         if not payloads:
             return
         lw = self._mr_file_list if side == "mr" else self._ctr_file_list
+        loaded = [lw.item(k).data(Qt.ItemDataRole.UserRole) for k in range(lw.count())]
+        replace = {}
         for name, _ in payloads:
-            self._add_file_row(lw, side, name)
+            if name in loaded:                           # same name again: the new file REPLACES the old tables, never adds to them
+                path, stamp = new_origin.get(name) or self._file_origin[(side, name)]
+                replace[name] = {"old": name, "path": path, "stamp": stamp}
+            else:
+                self._add_file_row(lw, side, name)
         self._set_status(f"Parsing {side.upper()} files…")
-        self._parse(side, payloads)
+        if not replace:
+            self._parse(side, payloads)
+            return
+
+        def _replaced(ok, failed):
+            if failed:
+                QMessageBox.warning(self, "Not replaced", "These files could not be read, so their earlier "
+                                    "tables were kept:\n" + "\n".join(f"  • {side.upper()}: {f}" for f in failed))
+            self._mark_changed_files()
+            self._set_status(f"Replaced {len(ok)} file(s) that were already added.")
+        self._parse(side, payloads, replace=replace, on_done=_replaced)
 
     def _add_file_row(self, lw: QListWidget, side: str, name: str):
         """One Step 1 entry: the file name plus a ✕ that removes just that
@@ -1741,6 +1779,9 @@ class MainWindow(QMainWindow):
         """Removes one whole file: its Step 1 entry and every table it
         contributed (including its Socar-Cape row). Different from
         _remove_table, which drops a single sheet and leaves the file listed."""
+        if self._reload_pending:
+            self._set_status("Wait for the files to finish reloading, then remove it.")
+            return
         tables = self._mr_tables if side == "mr" else self._ctr_tables
         flw    = self._mr_file_list if side == "mr" else self._ctr_file_list
         tlw    = self._mr_table_list if side == "mr" else self._ctr_table_list
@@ -1756,6 +1797,9 @@ class MainWindow(QMainWindow):
         self._set_status(f"Removed {name} from {side.upper()} files.")
 
     def _clear(self, side: str):
+        if self._reload_pending:
+            self._set_status("Wait for the files to finish reloading, then clear.")
+            return
         if side == "mr":
             self._mr_file_list.clear()
             self._mr_table_list.clear()
@@ -2068,7 +2112,7 @@ class MainWindow(QMainWindow):
 
     # ── Compare ───────────────────────────────────────────────────────────────
 
-    def _changed_source_files(self) -> list[tuple[str, str, str]]:
+    def _changed_source_files(self, stamps: dict | None = None) -> list[tuple[str, str, str]]:
         """(side, file name, what happened) for every MR / CTR file whose tables are loaded but whose file on disk
         changed (or is gone) since it was read. Files reopened from a saved comparison have no origin: skipped."""
         out = []
@@ -2078,18 +2122,30 @@ class MainWindow(QMainWindow):
                 if origin is None:
                     continue
                 path, before = origin
-                now = file_stamp(path)
+                now = stamps[path] if stamps is not None and path in stamps else file_stamp(path)
                 if now is None:
                     out.append((side, name, "the file is no longer there"))
                 elif now != before:
                     out.append((side, name, "the file was changed after it was added"))
         return out
 
-    def _mark_changed_files(self):
+    def _check_files_in_background(self):
+        """Window activation: look at the files off the UI thread, then mark the changed ones."""
+        w = getattr(self, "_stamp_worker", None)
+        if w is not None and w.isRunning():
+            return
+        paths = sorted({path for path, _s in self._file_origin.values()})
+        if not paths:
+            return
+        self._stamp_worker = StampWorker(paths, self)
+        self._stamp_worker.done.connect(lambda stamps: self._mark_changed_files(stamps))
+        self._stamp_worker.start()
+
+    def _mark_changed_files(self, stamps: dict | None = None):
         """Orange ⟳ on the Step 1 rows whose file changed on disk (or is gone), and the Reload button above the lists."""
         for side in ("mr", "ctr"):
             self._paint_file_warnings(side)
-        changed = self._changed_source_files()
+        changed = self._changed_source_files(stamps)
         why = {(side.lower(), name): w for side, name, w in changed}
         for side, lw in (("mr", self._mr_file_list), ("ctr", self._ctr_file_list)):
             for i in range(lw.count()):
@@ -2117,7 +2173,7 @@ class MainWindow(QMainWindow):
     def changeEvent(self, event):
         super().changeEvent(event)
         if event.type() == QEvent.Type.ActivationChange and self.isActiveWindow() and hasattr(self, "_reload_btn"):
-            self._mark_changed_files()                  # e.g. back from saving the file in Excel
+            self._check_files_in_background()           # e.g. back from saving the file in Excel
 
     def _ask_changed_files(self, changed: list[tuple[str, str, str]]) -> str:
         """Warn that loaded files changed on disk: "reload", "anyway" or "cancel". `changed_files_chooser`
@@ -2173,6 +2229,12 @@ class MainWindow(QMainWindow):
         self._file_origin.pop((side, old), None)
         self._file_origin[(side, new)] = (path, stamp)
         if new != old:
+            tlw = self._mr_table_list if side == "mr" else self._ctr_table_list
+            for k in range(tlw.count()):                         # the unticked sheets stay unticked under the new name
+                w = tlw.itemWidget(tlw.item(k))
+                key = getattr(w, "_table_key", None)
+                if key is not None and key[0] == old:
+                    w._table_key = (new,) + tuple(key[1:])
             flw = self._mr_file_list if side == "mr" else self._ctr_file_list
             for k in reversed(range(flw.count())):
                 if flw.item(k).data(Qt.ItemDataRole.UserRole) == old:
@@ -2249,20 +2311,29 @@ class MainWindow(QMainWindow):
         done = f"Reloaded {len(reloaded)} file(s) — press Compare to see them." if reloaded else "Nothing was reloaded."
         notes = list(self._reload_notes)
         self._set_status(done if not problems else done + f" {len(problems)} problem(s).")
+        anyway = False
         if problems or (notes and not compare_after):
             lines = problems + notes
             if getattr(self, "reload_report", None) is not None:
-                self.reload_report(lines)
+                anyway = bool(self.reload_report(lines)) and compare_after and bool(problems)
             else:
-                QMessageBox.warning(self, "Some files were not reloaded" if problems else "Reloaded — some tables are gone",
-                                    "\n".join(f"  • {p}" for p in lines))
-        if not problems and compare_after:
+                box = QMessageBox(self)
+                box.setIcon(QMessageBox.Icon.Warning)
+                box.setWindowTitle("Some files were not reloaded" if problems else "Reloaded — some tables are gone")
+                box.setText("\n".join(f"  • {p}" for p in lines))
+                go = box.addButton("Compare anyway (old tables for those files)", QMessageBox.ButtonRole.DestructiveRole) \
+                    if (compare_after and problems) else None
+                box.addButton(QMessageBox.StandardButton.Close)
+                box.exec()
+                anyway = go is not None and box.clickedButton() is go
+                box.deleteLater()
+        if compare_after and (not problems or anyway):
             if notes:
                 log.info("Reload before compare: %s", "; ".join(notes))
-            self._run_compare()
+            self._run_compare(skip_file_check=anyway)       # "Compare anyway" was just chosen: do not ask again
 
-    def _run_compare(self):
-        changed = self._changed_source_files()
+    def _run_compare(self, skip_file_check: bool = False):
+        changed = [] if skip_file_check else self._changed_source_files()
         if changed:
             choice = self._ask_changed_files(changed)
             if choice == "reload":
