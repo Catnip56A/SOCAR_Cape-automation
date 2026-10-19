@@ -20,9 +20,9 @@ from PySide6.QtWidgets import (
     QTableWidget, QTableWidgetItem, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
-import cost_stats as cs
-from find_bar import install_find
-from hover_text import install_elided_tooltips
+from stats import cost_stats as cs
+from common.find_bar import install_find
+from common.hover_text import install_elided_tooltips
 from ctr_tools.parser import parse_sage
 from ctr_tools.tasks import TASKS
 

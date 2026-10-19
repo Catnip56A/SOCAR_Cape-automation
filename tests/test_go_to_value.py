@@ -1,7 +1,7 @@
 """'Go to value' (click = next, arrow = list), the orange target cell, and the statistics list navigation."""
-import cost_stats
+from stats import cost_stats
 import harness as H
-import stats_view as SV
+from stats import stats_view as SV
 from harness import W
 
 

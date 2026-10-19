@@ -16,7 +16,7 @@ Compare again.
 
 Public API
 ----------
-    from comparison_history import save_comparison, load_comparison, \
+    from comparator.comparison_history import save_comparison, load_comparison, \
         list_saved_comparisons, default_label, suggest_save_path, comparisons_dir
 
     path = suggest_save_path(default_label(mr_files, ctr_files))

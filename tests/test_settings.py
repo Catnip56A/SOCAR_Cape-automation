@@ -5,9 +5,7 @@ import stat
 
 import ctr_tools.presets as P
 import harness as H
-import settings_view as S
-
-
+from common import settings_view as S
 class _Gen:
     """The few Generator methods the Settings window calls, over the sandboxed files."""
     sage_path_changed = type("Sig", (), {"connect": staticmethod(lambda f: None)})()

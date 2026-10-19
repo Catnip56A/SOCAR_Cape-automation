@@ -7,7 +7,7 @@ from PySide6.QtWidgets import (
 )
 
 import harness as H
-from find_bar import install_find
+from common.find_bar import install_find
 
 
 def _table():

@@ -2,7 +2,7 @@
 from PySide6.QtWidgets import QTableWidget, QTableWidgetItem, QTreeWidget, QTreeWidgetItem
 
 import harness as H
-from hover_text import install_elided_tooltips, tooltip_for
+from common.hover_text import install_elided_tooltips, tooltip_for
 
 LONG = "A very long description that certainly does not fit in a narrow column of a table"
 

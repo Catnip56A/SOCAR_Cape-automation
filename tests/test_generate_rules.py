@@ -1,7 +1,7 @@
 """Generate: nothing is assumed, incomplete rows are left out, builders refuse to guess."""
 import openpyxl
 
-import cost_stats
+from stats import cost_stats
 import harness as H
 from harness import W
 

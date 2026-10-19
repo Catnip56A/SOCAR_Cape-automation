@@ -71,7 +71,7 @@ def _resolve_log_dir() -> Path:
     if getattr(sys, "frozen", False):
         base = Path(sys.executable).resolve().parent
     else:
-        base = Path(__file__).resolve().parent
+        base = Path(__file__).resolve().parent.parent      # the repo root (this file is in common/)
     candidate = base / "logs"
     try:
         candidate.mkdir(parents=True, exist_ok=True)

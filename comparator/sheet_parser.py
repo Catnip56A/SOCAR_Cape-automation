@@ -17,7 +17,7 @@ Fallback: sheet-based keyword detection (for files without named ranges).
 
 Public API
 ----------
-    from sheet_parser import parse_workbook
+    from comparator.sheet_parser import parse_workbook
 
     tables = parse_workbook("file.xlsm")
     # → list of {"source_file", "source_sheet", "table_name", "data": DataFrame}

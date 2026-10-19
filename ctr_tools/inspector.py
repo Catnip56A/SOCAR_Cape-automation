@@ -34,7 +34,7 @@ from html import escape
 from pathlib import Path
 
 import pandas as pd
-from find_bar import install_find
+from common.find_bar import install_find
 from PySide6.QtCore import QSettings, QTimer, QUrl, Qt
 from PySide6.QtGui import QDesktopServices, QFont, QGuiApplication
 from PySide6.QtWidgets import (
@@ -192,7 +192,7 @@ def _open_folder(path: Path | None) -> None:
 
 
 def _log_dir() -> Path | None:
-    from app_logging import get_log_dir
+    from common.app_logging import get_log_dir
     return get_log_dir()
 
 

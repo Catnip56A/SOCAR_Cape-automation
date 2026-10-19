@@ -62,10 +62,10 @@ from ctr_tools.desc_renames import (
     save_desc_renames,
 )
 from ctr_tools.config import CFG
-import cost_stats
-from find_bar import install_find
-from hover_text import install_elided_tooltips
-from stats_view import StatsPanel
+from stats import cost_stats
+from common.find_bar import install_find
+from common.hover_text import install_elided_tooltips
+from stats.stats_view import StatsPanel
 from ctr_tools.presets import load_presets, save_presets, _PRESET_FIELDS
 from ctr_tools.source_choices import load_choices, save_choices
 from ctr_tools.builder_azn import (

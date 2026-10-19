@@ -3,11 +3,11 @@ import importlib
 
 import pandas as pd
 
-import cost_stats as cs
+from stats import cost_stats as cs
 import harness as H
 from harness import W
 from ctr_tools import source_choices as SC
-from stats_view import DisparitiesDialog, StatsPanel
+from stats.stats_view import DisparitiesDialog, StatsPanel
 
 COSTS = {"A": 10.0, "B": 20.0, "C": 30.0, "D": 40.0}
 TAGS = {"A": cs.RECHARGEABLE, "B": cs.NON_RECHARGEABLE, "C": cs.RECHARGEABLE, "D": cs.NON_RECHARGEABLE}

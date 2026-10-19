@@ -28,14 +28,14 @@ from PySide6.QtWidgets import (
 )
 
 sys.path.insert(0, str(Path(__file__).parent))
-from sheet_parser import is_cover_sheet, parse_workbook
-import doc_filter
-import cost_stats
-from stats_view import STOPPED as _STATS_STOPPED, StatsPanel, StatsWorker
-from settings_view import SettingsDialog, gear_icon
-from find_bar import install_find
-from hover_text import install_elided_tooltips
-from comparison_history import (
+from comparator.sheet_parser import is_cover_sheet, parse_workbook
+from comparator import doc_filter
+from stats import cost_stats
+from stats.stats_view import STOPPED as _STATS_STOPPED, StatsPanel, StatsWorker
+from common.settings_view import SettingsDialog, gear_icon
+from common.find_bar import install_find
+from common.hover_text import install_elided_tooltips
+from comparator.comparison_history import (
     comparisons_dir, default_label, list_saved_comparisons, load_comparison,
     save_comparison, suggest_save_path,
 )
@@ -3508,7 +3508,7 @@ class MainWindow(QMainWindow):
 # ─────────────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    from app_logging import setup_logging
+    from common.app_logging import setup_logging
     log_dir = setup_logging()
     log.info("Application starting (log directory: %s)", log_dir)
 
