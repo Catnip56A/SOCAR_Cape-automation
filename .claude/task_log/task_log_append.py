@@ -14,18 +14,19 @@
 
 missing  changelog versions that have no row in the log yet (version + date), then
          "version<TAB>id<TAB>value" for every row whose Version is not a release number
-         (Planned / Unreleased are not used any more), then
+         (Planned / Unreleased are not used any more; "In process" is fine), then
          "summary<TAB>key" for each Version|App Part group with no text in short_summaries.json
 open     rows whose Completion % < 100 (a note in Remaining on a 100% row is a
          known limitation or idea, not unfinished work, so it is not listed)
 add      append rows; FILE.json is a list of objects with keys
-         version (a release number such as 1.0.20 - the release the work is for, planned work
-         included; default: the number in VERSION), part, name, functionality, priority,
+         version (a release number such as 1.0.20, default: the number in VERSION; ignored for
+         unfinished rows, which get "In process" until they reach 100 %), part, name, functionality, priority,
          pct (0-100), remaining, comment, phase (default 0; e.g. 1, "1A"),
          completed (default true; false = not finished: Completion Date left blank),
          start / completion (optional YYYY-MM-DD; completion default: today when completed)
          Start Date is always filled: the day the row is logged, unless "start" is given.
 update   change Completion % / Remaining / Comments / Phase / Version / dates of one existing row.
+         Version: below 100 % it is always "In process"; reaching 100 % writes --version, else the number in VERSION.
          Always: a blank Start Date is filled with today; reaching 100 % fills a blank
          Completion Date with today; going below 100 % clears the Completion Date.
 update-many  the same for several rows in ONE write (one backup): FILE.json is a list of objects
@@ -37,7 +38,7 @@ delete-row   remove one row for good (only when the user asks) and move every hi
          prefix down by one, so the numbering stays gapless; sheets 2 and 3 are rebuilt. Make a copy of the
          file first: the per-release backup is not taken again when one already exists
 refresh  rebuild sheets 2 and 3 only (use after editing short_summaries.json)
-Sheet 3 ("Shortened Form") has one row per Version x App Part: a one-line plain-language summary
+Sheet 3 ("Shortened Form", completed tasks only, stated in its row 1) has one row per Version x App Part: a one-line plain-language summary
 (from short_summaries.json, key "Version|App Part") plus figures computed from sheet 1.
 Columns are found by their header text in row 1, so the user may delete or move
 columns (e.g. the spare "Col N" ones); only the headers listed in NEEDED must exist.
@@ -74,6 +75,7 @@ NEEDED = ["Task ID", "Task Name", "Functionality", "Version", "App Part", "Start
 CENTER = {"Task ID", "Version", "Start Date", "Completion Date", "Deadline", "Priority (importance)",
           "Completion %", "Phase"}
 VERSION_RE = re.compile(r"^\d+\.\d+\.\d+$")
+IN_PROCESS = "In process"  # Version of every row below 100 %; replaced by a release number on completion
 
 
 def parse_date(text, what):
@@ -204,9 +206,11 @@ def load_summaries():
 
 
 def groups(ws1, L):
-    """Rows of sheet 1 grouped by (Version, App Part), in order of first appearance."""
+    """Rows of sheet 1 grouped by (Version, App Part), in order of first appearance; "In process" rows are skipped."""
     out = {}
     for r in data_rows(ws1):
+        if ws1.cell(r, L.col["Version"]).value == IN_PROCESS:
+            continue  # open work is not part of a release's summary until it finishes
         key = (str(ws1.cell(r, L.col["Version"]).value), ws1.cell(r, L.col["App Part"]).value)
         out.setdefault(key, []).append({h: ws1.cell(r, c).value for h, c in L.col.items()})
     return out
@@ -219,17 +223,18 @@ def rebuild_sheet3(wb, L):
         del wb[S3]
     ws = wb.create_sheet(S3)
     head = ["Version", "App Part", "What was done", "Tasks", "Priority", "Started", "Finished", "Done %", "Still open", "Phase"]
+    ws.cell(1, 1, "Lists only tasks that are completed (released). Tasks still in process are not shown here - see 'All Tasks'.").font = Font(italic=True, color="595959")
     for c, (h, w) in enumerate(zip(head, [11, 24, 80, 8, 10, 12, 12, 9, 34, 8]), 1):
-        ws.cell(1, c, h)
+        ws.cell(2, c, h)
         ws.column_dimensions[get_column_letter(c)].width = w
     for c in range(1, len(head) + 1):
-        cell = ws.cell(1, c)
+        cell = ws.cell(2, c)
         cell.font = Font(bold=True, color="FFFFFF")
         cell.fill = PatternFill("solid", fgColor="1F3864")
         cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
         cell.border = BORDER
-    ws.row_dimensions[1].height = 24
-    r = 1
+    ws.row_dimensions[2].height = 24
+    r = 2
     for (ver, part), items in groups(ws1, L).items():
         r += 1
         starts = [to_date(i["Start Date"]) for i in items if i.get("Start Date")]
@@ -250,10 +255,10 @@ def rebuild_sheet3(wb, L):
         # Excel does not auto-fit rows written by a script; size by the longest wrapped cell (~1.1 chars per width unit).
         lines = max(-(-len(str(vals[i])) // int(w * 1.1)) for i, w in ((1, 24), (2, 80), (8, 34)))
         ws.row_dimensions[r].height = 15 * max(lines, 1)
-    tb = Table(displayName="ShortForm", ref=f"A1:{get_column_letter(len(head))}{max(r, 2)}")
+    tb = Table(displayName="ShortForm", ref=f"A2:{get_column_letter(len(head))}{max(r, 3)}")
     tb.tableStyleInfo = TableStyleInfo(name="TableStyleLight1", showRowStripes=False)
     ws.add_table(tb)
-    ws.freeze_panes = "A2"
+    ws.freeze_panes = "A3"
 
 
 def drop_column(ws, name):
@@ -335,7 +340,7 @@ def main():
                 print(f"{v}\t{d}")
         for r in rows:
             v = ws.cell(r, col["Version"]).value
-            if not VERSION_RE.match(str(v)):
+            if not VERSION_RE.match(str(v)) and v != IN_PROCESS:
                 print(f"version\t{ws.cell(r, 1).value}\t{v}")
         summ = load_summaries()
         for ver, part in groups(ws, L):
@@ -359,7 +364,8 @@ def main():
         for it in items:
             nxt += 1
             done = it.get("completed", True)
-            ver = check_version(it.get("version") or current_version())
+            ver = (IN_PROCESS if not done or it.get("pct", 100) < 100
+                   else check_version(it.get("version") or current_version()))
             start = parse_date(it["start"], "start") if it.get("start") else (
                 vdates.get(ver, date.today()) if done else date.today())
             vals = {
@@ -392,7 +398,7 @@ def main():
                 sys.exit("No Phase column in the task log")
             ws.cell(r, col["Phase"], int(phase) if str(phase).isdigit() else phase)
         if version is not None:
-            ws.cell(r, col["Version"], check_version(version))
+            check_version(version)
         if start is not None:
             ws.cell(r, col["Start Date"], parse_date(start, "start"))
         if completion is not None:
@@ -401,6 +407,14 @@ def main():
         if not ws.cell(r, col["Start Date"]).value:
             ws.cell(r, col["Start Date"], date.today())
         pct_now = ws.cell(r, col["Completion %"]).value or 0
+        # Rows below 100 % are "In process"; reaching 100 % writes the release number (--version, else VERSION).
+        vcell = ws.cell(r, col["Version"])
+        if pct_now < 1:
+            vcell.value = IN_PROCESS
+        elif version is not None:
+            vcell.value = version
+        elif vcell.value == IN_PROCESS:
+            vcell.value = current_version()
         if pct_now >= 1 and not ws.cell(r, col["Completion Date"]).value:
             ws.cell(r, col["Completion Date"], date.today())
         elif pct_now < 1 and completion is None:

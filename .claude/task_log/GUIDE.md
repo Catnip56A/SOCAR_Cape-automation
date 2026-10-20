@@ -38,7 +38,7 @@ listed by `missing` as `summary<TAB>key`. Write the text, then run `refresh`.
 |---|---|
 | Task ID | `X - MA###` (MA = Magsud Abbaszade), numbered in order of creation |
 | Functionality | Adding a function · Calculation fix · Output / rendering fix · UI behaviour change · UI loading / performance · Bug fix / debugging · Refactor / maintenance · Logging / error handling · Testing · Process / approval |
-| Version | always a **release number** such as `1.0.20`: the release the work belongs to, planned work included. `Planned` and `Unreleased` are **not used** (the script refuses them); `add` defaults to the number in `VERSION`. `missing` lists any row that still has a non-number |
+| Version | a **release number** such as `1.0.20` for finished work (`add` defaults to the number in `VERSION`); **`In process`** for every row below 100 % (the script sets it, whatever version is passed). When a row reaches 100 % via `update`, `--version` or else the current `VERSION` is written. `Planned`/`Unreleased` are refused. In-process rows are left out of the Shortened Form sheet until they finish (a note in its row 1 says it lists completed tasks only). `missing` lists any other non-number |
 | App Part | CTR Generator · MR vs CTR Comparator · CTR Tracker · App-wide / Infrastructure · Proposals / Documents (a new part gets its own table automatically) |
 | Start Date | **always filled**: the day the row was first logged (planned work included) unless the JSON gives `start`; a blank one is filled with today by any `update` |
 | Completion Date | the day it was finished; filled with today when a row reaches 100 %, cleared if it drops below 100 %; blank for unfinished work |
