@@ -19,7 +19,8 @@ missing  changelog versions that have no row in the log yet (version + date), th
 open     rows whose Completion % < 100 (a note in Remaining on a 100% row is a
          known limitation or idea, not unfinished work, so it is not listed)
 add      append rows; FILE.json is a list of objects with keys
-         version (a release number such as 1.0.20, default: the number in VERSION; ignored for
+         version (a release number such as 1.0.20, default: the number in VERSION, or "Outside app" for the
+         parts in OUTSIDE_PARTS (work not tied to any app release; shown in sheet 3 as its own group); ignored for
          unfinished rows, which get "In process" until they reach 100 %), part, name, functionality, priority,
          pct (0-100), remaining, comment, phase (default 0; e.g. 1, "1A"),
          completed (default true; false = not finished: Completion Date left blank),
@@ -76,6 +77,8 @@ CENTER = {"Task ID", "Version", "Start Date", "Completion Date", "Deadline", "Pr
           "Completion %", "Phase"}
 VERSION_RE = re.compile(r"^\d+\.\d+\.\d+$")
 IN_PROCESS = "In process"  # Version of every row below 100 %; replaced by a release number on completion
+OUTSIDE_APP = "Outside app"  # Version of finished rows in OUTSIDE_PARTS (work not tied to any app release)
+OUTSIDE_PARTS = {"Outside app / Automation"}
 
 
 def parse_date(text, what):
@@ -91,6 +94,8 @@ def to_date(v):
 
 
 def check_version(v, what="version"):
+    if v == OUTSIDE_APP:
+        return v
     if not VERSION_RE.match(str(v)):
         sys.exit(f"{what}: {v!r} is not a release number like 1.0.20 ('Planned'/'Unreleased' are not used)")
     return str(v)
@@ -98,6 +103,11 @@ def check_version(v, what="version"):
 
 def current_version():
     return (ROOT / "VERSION").read_text(encoding="utf-8").strip()
+
+
+def done_version(part):
+    """Version written when a row reaches 100 %: OUTSIDE_APP for non-app work, else the number in VERSION."""
+    return OUTSIDE_APP if part in OUTSIDE_PARTS else current_version()
 WRAP = {"Task Name", "Functionality", "App Part", "Remaining", "Comments"}
 
 _thin = Side(style="thin", color="BFBFBF")
@@ -340,7 +350,7 @@ def main():
                 print(f"{v}\t{d}")
         for r in rows:
             v = ws.cell(r, col["Version"]).value
-            if not VERSION_RE.match(str(v)) and v != IN_PROCESS:
+            if not VERSION_RE.match(str(v)) and v not in (IN_PROCESS, OUTSIDE_APP):
                 print(f"version\t{ws.cell(r, 1).value}\t{v}")
         summ = load_summaries()
         for ver, part in groups(ws, L):
@@ -365,7 +375,7 @@ def main():
             nxt += 1
             done = it.get("completed", True)
             ver = (IN_PROCESS if not done or it.get("pct", 100) < 100
-                   else check_version(it.get("version") or current_version()))
+                   else check_version(it.get("version") or done_version(it["part"])))
             start = parse_date(it["start"], "start") if it.get("start") else (
                 vdates.get(ver, date.today()) if done else date.today())
             vals = {
@@ -414,7 +424,7 @@ def main():
         elif version is not None:
             vcell.value = version
         elif vcell.value == IN_PROCESS:
-            vcell.value = current_version()
+            vcell.value = done_version(ws.cell(r, col["App Part"]).value)
         if pct_now >= 1 and not ws.cell(r, col["Completion Date"]).value:
             ws.cell(r, col["Completion Date"], date.today())
         elif pct_now < 1 and completion is None:

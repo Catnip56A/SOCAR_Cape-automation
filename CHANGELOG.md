@@ -5,6 +5,19 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and version numbers come from the [VERSION](VERSION) file.
 
+## [1.0.22] - 2026-10-22
+### Added
+- **MR vs CTR: Qty mode for Compare Values.** A drop-down next to the Compare Values buttons chooses which Qty differences are marked red: **Qty: all differences** (default) or **Qty: CTR < MR only** (CTR − MR below 0, i.e. CTR has fewer than MR; a quantity on one side only is skipped). Unit differences are always marked. It applies to the detail tables and to the Combined View (Qty (MR) Total, Qty (CTR) Total and Diff in red, and the ↑/↓ rows) and is remembered between runs (QSettings `compare/qty_mode`). `_qty_counts`, `_qty_mode_combo`, `_on_qty_mode_changed`, `_apply_value_highlights`, `_apply_combined_doc_highlights` (`app.py`). 4 tests in `tests/test_qty_mode.py`.
+- **The mouse wheel no longer changes a drop-down.** Scrolling a page or table past a drop-down (also one open inside a table cell) used to change its value; the wheel now scrolls the page instead. Spin boxes keep the wheel. `common/no_wheel.py` (`install_no_wheel`, installed in `app.py`); `tests/test_no_wheel.py`.
+
+### Changed
+- **MR vs CTR: the MR column is called "Rechargeable (MR)"** in the Matched / Only in MR / Only in CTR tables and the Excel report (it was "Rechargeable"), so it is recognisable next to Rate (CTR). Comparisons saved before 1.0.22 are renamed when they load. Statistics and Disparities still say "Rechargeable" — they mean the rechargeability, not this column.
+- **MR vs CTR: missing values are grey.** An empty cell in an MR or CTR column is grey (it was a paler blue / teal); red and orange highlights are still drawn over it. A column the loaded files do not have at all (Description, Qty or Unit of either side, Rechargeable (MR), Allocation, Rate (CTR)) is still shown, empty and grey, and is left out of Compare Values. `_build_display`, `_absent_cols`, `_EMPTY_BG` (`app.py`).
+- **Linux/WSLg: the app uses X11 (xcb).** Under WSLg's Wayland plugin a drop-down's popup could stay open as a window that could not be closed. The UI is slightly blurry in WSLg (the X11 screen is upscaled 2×). Windows and the .exe are unaffected. `QT_QPA_PLATFORM` default at the top of `app.py`.
+
+### Fixed
+- **MR vs CTR: an MR (or CTR) file without a column showed the other side's column instead.** For example an MR file without Unit displayed the CTR's Unit under "Unit (MR)". Each column is now taken from its own side only (`_own` in `_build_display`).
+
 ## [1.0.21] - 2026-10-13
 ### Added
 - **MR vs CTR Statistics: the Include scaffold box is gone** (scaffold only exists in the CTR Generator); in Document price the toolbar says "Scaffold: not included here" instead, with a tooltip explaining it (`StatsPanel(show_scaffold=False)`). The Generator keeps the option.

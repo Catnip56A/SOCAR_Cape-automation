@@ -42,5 +42,6 @@
   "1.0.20|MR vs CTR Comparator": "A Disparities button (red exclamation mark) lists Stock Codes whose rechargeability in the documents contradicts SAGE; those items are left out of the statistics.",
   "1.0.21|CTR Generator": "The statistics can now show what the CTR bills (price) as well as what it costs, with price totals per category in AZN and USD.",
   "1.0.21|MR vs CTR Comparator": "The Statistics tab gets a Document price view with its own Excel sheets (equipment or consumable from an editable Stock Code list, days from the matching CTR), and the results tables show each item's local cost.",
-  "1.0.21|App-wide / Infrastructure": "Repository tidied into packages, the window now fits smaller screens, rechargeability choices can be edited in Settings, statistics defaults were added, and 29 new tests were written."
+  "1.0.21|App-wide / Infrastructure": "Repository tidied into packages, the window now fits smaller screens, rechargeability choices can be edited in Settings, statistics defaults were added, and 29 new tests were written.",
+  "Outside app|Outside app / Automation": "Work outside the app: checked that the database (OLE DB) connection of the SAGE workbook refreshes correctly on another laptop, as groundwork for the nightly automatic refresh."
 }

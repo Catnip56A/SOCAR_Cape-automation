@@ -96,9 +96,9 @@ Three boxes show:
 **Matched tab**
 Shows every item found in both documents. Columns are arranged in comparison pairs so you can read across one row:
 
-| Stock Code | Description (MR) | Description (CTR) | Qty (MR) | Qty (CTR) | Unit (MR) | Unit (CTR) | Rechargeable | Allocation | Rate (CTR) | MR Document | CTR Document |
+| Stock Code | Description (MR) | Description (CTR) | Qty (MR) | Qty (CTR) | Unit (MR) | Unit (CTR) | Rechargeable (MR) | Allocation | Rate (CTR) | MR Document | CTR Document |
 
-MR columns have a light blue tint. CTR columns have a light teal tint. Neutral columns (Stock Code) have no tint.
+MR columns have a light blue tint. CTR columns have a light teal tint. Neutral columns (Stock Code) have no tint. A **missing value** in an MR or CTR column is **grey**; a column the files do not have at all (for example no Unit or Rate column) is still shown, empty and grey, and is left out of Compare Values. Red and orange highlights are drawn over the grey.
 
 **Only in MR tab**
 Shows items present in MR but absent from CTR. The same column layout is used; CTR columns are empty (shown as blank teal cells).
@@ -123,9 +123,11 @@ In the top-right corner of the result tabs there is a **Compare Values** button.
 Click it while the **Matched** tab is open to highlight every row where:
 - **Qty (MR)** and **Qty (CTR)** are different, or
 - **Unit (MR)** and **Unit (CTR)** are different, or
-- MR's **Rechargeable** flag and CTR's **Rate** disagree about whether the item is billable (a number in Rate means rechargeable; `NONRECHARG` means not)
+- MR's **Rechargeable (MR)** flag and CTR's **Rate** disagree about whether the item is billable (a number in Rate means rechargeable; `NONRECHARG` means not)
 
 This Rate/Rechargeable check is only highlighted while Compare Values is on.
+
+The drop-down next to the button chooses which **Qty** differences count: **Qty: all differences** (default) or **Qty: CTR < MR only** (CTR − MR below 0, i.e. CTR has fewer than MR; a row with a quantity on one side only is skipped). Unit differences are always marked. The same choice applies to the Combined View's Compare Values (Qty (MR) Total, Qty (CTR) Total and Diff in red, and the ↑/↓ rows) and is remembered between runs.
 
 Mismatched cells are highlighted in **red** with dark red text. The mismatch highlight stays visible even when the row is selected (blue selection bar).
 

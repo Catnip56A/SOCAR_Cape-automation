@@ -22,6 +22,8 @@ folder (`tests/harness.py`; the path is printed). Use the same harness for any n
 | `test_disparities.py` | documents vs SAGE rechargeability: not counted, choose a source per Stock Code, shared by both lists, remembered, Generate held back |
 | `test_price_stats.py` | Document price: rate × quantity × days, non-rechargeable = 0, equipment from the pricebook / consumables from SAGE, markup and scaffold toggles and their Settings defaults, the editable rechargeability choices, the Generator's price totals, the MR vs CTR window and both Excel files |
 | `test_window_size.py` | the window's minimum height after Compare stays small (MA164); Maximize / Hide results still work |
+| `test_no_wheel.py` | the wheel never changes a drop-down (the page scrolls instead); spin boxes keep it |
+| `test_qty_mode.py` | Compare Values Qty mode (all differences / only CTR < MR) in the detail and Combined views, remembered |
 | `test_mismatch_navigation.py` | MR vs CTR results: header click cycle (asc / desc / original), arrows follow the sorted order, red-only / orange-only stepping, 200 filter suggestions |
 | `test_tracker_calc.py` | the CTR Tracker's fast write path sets recalculate-on-open and the saved file still opens (temp copy of the test tracker) |
 | `test_stock_types.py` | the Stock Code types list: file module (seeding, merge, reset), how a kind is decided and when the user is asked, the decisions window, the Settings editor, 'how to fix' hints, git-ignored and bundled |

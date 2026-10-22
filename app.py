@@ -7,6 +7,7 @@ Build: pyinstaller app.spec   (Windows only, see justfile)
 
 import json
 import logging
+import os
 import re
 import sys
 from datetime import datetime
@@ -28,6 +29,12 @@ from PySide6.QtWidgets import (
     QTableView, QToolButton, QVBoxLayout, QWidget,
 )
 
+# Under WSLg the Qt Wayland plugin cannot create the popup of a drop-down ("Failed to
+# create grabbing popup"): it stays open as a window that cannot be closed. X11 (xcb,
+# also provided by WSLg) works. A value already set (the offscreen tests) is kept.
+if sys.platform.startswith("linux"):
+    os.environ.setdefault("QT_QPA_PLATFORM", "xcb")
+
 sys.path.insert(0, str(Path(__file__).parent))
 from comparator.sheet_parser import is_cover_sheet, parse_workbook
 from comparator import doc_filter
@@ -38,6 +45,7 @@ from common.settings_view import SettingsDialog, gear_icon
 from common.attention import ATTENTION_ROLE, AttentionDelegate
 from common.find_bar import install_find
 from common.hover_text import install_elided_tooltips
+from common.no_wheel import install_no_wheel
 from comparator.comparison_history import (
     comparisons_dir, default_label, list_saved_comparisons, load_comparison,
     save_comparison, suggest_save_path,
@@ -97,6 +105,34 @@ def _norm_val(v) -> str:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Which Qty differences Compare Values highlights (user choice, remembered).
+QTY_MODE_ALL  = "all"     # any difference between MR and CTR
+QTY_MODE_LESS = "less"    # only CTR − MR < 0 (CTR has fewer than MR)
+_QTY_MODE_KEY = "compare/qty_mode"
+
+
+def _to_float(v) -> float | None:
+    try:
+        f = float(str(v).strip())
+    except (ValueError, TypeError):
+        return None
+    return None if f != f else f          # NaN -> None
+
+
+def _qty_counts(mr, ctr, mode: str) -> bool:
+    """Whether an MR/CTR quantity pair is highlighted under `mode`. Values may be
+    numbers, numeric text, or blank/None. In QTY_MODE_LESS a pair counts only when
+    both sides are numbers and CTR − MR < 0; a missing side is not a difference."""
+    a, b = _to_float(mr), _to_float(ctr)
+    if mode == QTY_MODE_LESS:
+        return a is not None and b is not None and (b - a) < -1e-9
+    if a is None and b is None:
+        sa, sb = str(mr).strip().lower(), str(ctr).strip().lower()
+        blank = ("", "nan", "none")
+        return (sa in blank) != (sb in blank) or (sa not in blank and sa != sb)
+    return a is None or b is None or abs(a - b) > 1e-9
+
+
 # Rate (CTR) vs Rechargeable (MR) consistency check
 # ─────────────────────────────────────────────────────────────────────────────
 # Both sides encode "not billable" with the same literal token, "NONRECHARG"
@@ -124,12 +160,12 @@ def _find_rate_rechargeable_mismatches(display_df: pd.DataFrame) -> set[tuple[in
     """(row, col) cells where MR's Rechargeable flag and CTR's Rate disagree
     about whether the item is billable."""
     cells: set[tuple[int, str]] = set()
-    if "Rechargeable" not in display_df.columns or "Rate (CTR)" not in display_df.columns:
+    if "Rechargeable (MR)" not in display_df.columns or "Rate (CTR)" not in display_df.columns:
         return cells
     # .map() over just the two needed columns instead of .iterrows() over
     # the whole frame — iterrows() reconstructs a full mixed-type row
     # (every column) for every row just to read two values out of it.
-    rech = display_df["Rechargeable"].map(lambda v: _norm_val(v).upper())
+    rech = display_df["Rechargeable (MR)"].map(lambda v: _norm_val(v).upper())
     rate_status = display_df["Rate (CTR)"].map(_rate_implied_status)
     mismatch = (
         rech.isin(("RECHARGE", "NONRECHARG"))
@@ -137,7 +173,7 @@ def _find_rate_rechargeable_mismatches(display_df: pd.DataFrame) -> set[tuple[in
         & (rate_status != rech)
     )
     for row_idx in display_df.index[mismatch]:
-        cells.add((row_idx, "Rechargeable"))
+        cells.add((row_idx, "Rechargeable (MR)"))
         cells.add((row_idx, "Rate (CTR)"))
     return cells
 
@@ -311,7 +347,7 @@ class EmptyState(QWidget):
 
 def _col_side(col_name: str) -> str:
     """Return 'mr', 'ctr', or '' (neutral) for a display column name."""
-    if "(MR)" in col_name or col_name in ("MR Document", "MR Sheet", "Rechargeable", "Allocation"):
+    if "(MR)" in col_name or col_name in ("MR Document", "MR Sheet", "Allocation"):
         return "mr"
     if "(CTR)" in col_name or col_name in ("CTR Document", "CTR Sheet"):
         return "ctr"
@@ -320,9 +356,8 @@ def _col_side(col_name: str) -> str:
 
 # Cell background colours (filled vs empty within MR/CTR columns)
 _MR_FILL   = QColor("#DDEEFF")   # light blue — MR cell with data
-_MR_EMPTY  = QColor("#F2F7FF")   # very light blue — MR cell, no data
 _CTR_FILL  = QColor("#D6F0EA")   # light teal — CTR cell with data
-_CTR_EMPTY = QColor("#EFF9F6")   # very light teal — CTR cell, no data
+_EMPTY_BG  = QColor("#E3E5E8")   # grey — MR / CTR cell, no data (a highlight still overrides it)
 
 
 
@@ -502,9 +537,9 @@ class PandasModel(QAbstractTableModel):
                 is_empty = (val is None
                             or (isinstance(val, float) and pd.isna(val))
                             or str(val).strip() == "")
-                if side == "mr":
-                    return QBrush(_MR_EMPTY if is_empty else _MR_FILL)
-                return QBrush(_CTR_EMPTY if is_empty else _CTR_FILL)
+                if is_empty:
+                    return QBrush(_EMPTY_BG)
+                return QBrush(_MR_FILL if side == "mr" else _CTR_FILL)
 
         return None
 
@@ -951,6 +986,7 @@ class MainWindow(QMainWindow):
         self._mismatch_pos:  int       = -1   # current navigation position
         self._mismatch_kinds: dict[int, set[str]] = {}   # source row -> {"red", "orange"} (what highlights it)
         self._rate_rech_mismatch_cells: set[tuple[int, str]] = set()
+        self._absent_cols: set[str] = set()      # display columns the loaded files do not have
 
         # Combined view: per-Stock-Code MR/CTR qty totals for matched keys.
         self._combined_raw:      dict[str, dict] = {}   # key -> {mr_qty, mr_units, ctr_qty, ctr_units}
@@ -1402,6 +1438,24 @@ class MainWindow(QMainWindow):
         self._compare_vals_btn.setEnabled(False)
         self._set_compare_vals_mode(combined=False)   # starts out as "Compare Values"
         self._compare_vals_btn.toggled.connect(self._apply_value_highlights)
+
+        # Which Qty differences Compare Values highlights (both the detail and the
+        # Combined button). Remembered between runs.
+        self._qty_mode_combo = QComboBox()
+        self._qty_mode_combo.addItem("Qty: all differences", QTY_MODE_ALL)
+        self._qty_mode_combo.addItem("Qty: CTR < MR only", QTY_MODE_LESS)
+        self._qty_mode_combo.setToolTip(
+            "Which Qty differences Compare Values marks in red:\n"
+            "all differences, or only where CTR − MR is below 0 (CTR has fewer than MR).\n"
+            "Unit differences are always marked. Applies to the Combined View too.")
+        self._qty_mode_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
+        try:
+            _saved = str(self._app_settings().value(_QTY_MODE_KEY, QTY_MODE_ALL))
+        except Exception:
+            _saved = QTY_MODE_ALL
+        _i = self._qty_mode_combo.findData(_saved)
+        self._qty_mode_combo.setCurrentIndex(_i if _i >= 0 else 0)
+        self._qty_mode_combo.currentIndexChanged.connect(self._on_qty_mode_changed)
 
         # Combined-view-only value check (Qty totals / Unit). Separate from
         # _compare_vals_btn, which is "Show Combined" while Combined is on.
@@ -2387,6 +2441,24 @@ class MainWindow(QMainWindow):
         unit_ctr  = _find_col(merged, "Unit_CTR")
         rate_col  = _find_col(merged, "Rate_CTR",         "Rate")
 
+        # A name without _MR/_CTR is only on one side after the merge; it must be that side's own
+        # column, never the other side's (an MR file without Unit would show the CTR's Unit as MR's).
+        def _own(found: str | None, side_df: pd.DataFrame) -> str | None:
+            if found and not found.endswith(("_MR", "_CTR")) and found not in side_df.columns:
+                return None
+            return found
+        desc_mr, qty_mr, unit_mr = (_own(c, mr) for c in (desc_mr, qty_mr, unit_mr))
+        rech_col, alloc_col      = _own(rech_col, mr), _own(alloc_col, mr)
+        desc_ctr, qty_ctr, unit_ctr, rate_col = (_own(c, ctr) for c in (desc_ctr, qty_ctr, unit_ctr, rate_col))
+
+        # Display columns the files do not have at all: shown empty, and left out of Compare Values.
+        self._absent_cols = {name for name, src in (
+            ("Description (MR)", desc_mr), ("Description (CTR)", desc_ctr),
+            ("Qty (MR)", qty_mr), ("Qty (CTR)", qty_ctr),
+            ("Unit (MR)", unit_mr), ("Unit (CTR)", unit_ctr),
+            ("Rechargeable (MR)", rech_col), ("Allocation", alloc_col),
+            ("Rate (CTR)", rate_col)) if not src}
+
         def _build_display(df: pd.DataFrame) -> pd.DataFrame:
             """
             Build the standardised display table for any merge subset.
@@ -2397,19 +2469,22 @@ class MainWindow(QMainWindow):
             """
             out = pd.DataFrame({"Stock Code": df["_KEY_"].values})
             # Description pair (side by side)
-            if desc_mr:  out["Description (MR)"]  = df[desc_mr].values
-            if desc_ctr: out["Description (CTR)"] = df[desc_ctr].values
+            # A column the files do not have is still shown, empty (grey in the table).
+            def _put(name: str, src: str | None) -> None:
+                out[name] = df[src].values if src else [None] * len(df)
+            _put("Description (MR)",  desc_mr)
+            _put("Description (CTR)", desc_ctr)
             # Qty pair (side by side)
-            if qty_mr:   out["Qty (MR)"]   = df[qty_mr].values
-            if qty_ctr:  out["Qty (CTR)"]  = df[qty_ctr].values
+            _put("Qty (MR)",   qty_mr)
+            _put("Qty (CTR)",  qty_ctr)
             # Unit pair (side by side)
-            if unit_mr:  out["Unit (MR)"]  = df[unit_mr].values
-            if unit_ctr: out["Unit (CTR)"] = df[unit_ctr].values
+            _put("Unit (MR)",  unit_mr)
+            _put("Unit (CTR)", unit_ctr)
             # MR-only fields
-            if rech_col:  out["Rechargeable"] = df[rech_col].values
-            if alloc_col: out["Allocation"]   = df[alloc_col].values
+            _put("Rechargeable (MR)", rech_col)
+            _put("Allocation",        alloc_col)
             # CTR-only fields
-            if rate_col:  out["Rate (CTR)"]   = df[rate_col].values
+            _put("Rate (CTR)",        rate_col)
             # Source documents — rightmost so they don't crowd the comparison columns
             out["MR Document"]  = df[src_mr].values  if src_mr  in df.columns else ""
             out["CTR Document"] = df[src_ctr].values if (src_ctr and src_ctr in df.columns) else ""
@@ -3614,6 +3689,16 @@ class MainWindow(QMainWindow):
 
     # ── Value comparison highlights ───────────────────────────────────────────
 
+    def _qty_mode(self) -> str:
+        return self._qty_mode_combo.currentData() or QTY_MODE_ALL
+
+    def _on_qty_mode_changed(self, _=0) -> None:
+        try:
+            self._app_settings().setValue(_QTY_MODE_KEY, self._qty_mode())
+        except Exception:
+            pass
+        self._apply_value_highlights(self._compare_vals_btn.isChecked())
+
     def _apply_value_highlights(self, active: bool):
         proxy = self._tab_matched.model()
         if proxy is None:
@@ -3659,14 +3744,19 @@ class MainWindow(QMainWindow):
         }
         mismatch_row_set: set[int] = {r for r, _ in self._rate_rech_mismatch_cells}
 
+        qty_mode = self._qty_mode()
         for col_mr, col_ctr in [("Qty (MR)", "Qty (CTR)"), ("Unit (MR)", "Unit (CTR)")]:
             if col_mr not in df.columns or col_ctr not in df.columns:
                 continue
+            if col_mr in self._absent_cols or col_ctr in self._absent_cols:
+                continue          # a column the files do not have is not a difference
+            is_qty = col_mr == "Qty (MR)"
             # Extract each column once and zip, instead of two separate
             # df.iloc[row_idx][col] positional lookups per row — each
             # .iloc[] call reconstructs that row from scratch.
             for row_idx, val_mr, val_ctr in zip(df.index, df[col_mr], df[col_ctr]):
-                if _differs(val_mr, val_ctr):
+                if (_qty_counts(val_mr, val_ctr, qty_mode) if is_qty
+                        else _differs(val_mr, val_ctr)):
                     mismatch_cells[(row_idx, col_mr)] = "mismatch"
                     mismatch_cells[(row_idx, col_ctr)] = "mismatch"
                     mismatch_row_set.add(row_idx)
@@ -3744,8 +3834,7 @@ class MainWindow(QMainWindow):
                 agg = self._combined_raw.get(key, {})
                 bad_cols: list[str] = []
                 mr_q, ctr_q = agg.get("mr_qty"), agg.get("ctr_qty")
-                if (mr_q is None) != (ctr_q is None) or (
-                        mr_q is not None and abs(mr_q - ctr_q) > 1e-9):
+                if _qty_counts(mr_q, ctr_q, self._qty_mode()):
                     bad_cols += ["Qty (MR) Total", "Qty (CTR) Total", "Diff (CTR − MR)"]
                 if sorted(agg.get("mr_units", [])) != sorted(agg.get("ctr_units", [])):
                     bad_cols.append("Unit")
@@ -4092,6 +4181,8 @@ class MainWindow(QMainWindow):
             cl.addWidget(self._combined_cmp_btn)
             cl.addWidget(self._combined_btn)
         cl.addSpacing(4)
+        cl.addWidget(self._qty_mode_combo)
+        cl.addSpacing(4)
         cl.addWidget(self._show_docs_btn)
         cl.addSpacing(4)
         cl.addWidget(self._cols_btn)
@@ -4344,14 +4435,23 @@ class MainWindow(QMainWindow):
             self._refresh_file_warnings("mr")
             self._refresh_file_warnings("ctr")
 
-            self._display_df                = data["display_df"]
-            self._omr_dl                    = data["omr_df"]
-            self._octr_dl                   = data["octr_df"]
+            # Comparisons saved before 1.0.22 call the MR column "Rechargeable".
+            _renamed = {"Rechargeable": "Rechargeable (MR)"}
+            self._display_df                = data["display_df"].rename(columns=_renamed)
+            self._omr_dl                    = data["omr_df"].rename(columns=_renamed)
+            self._octr_dl                   = data["octr_df"].rename(columns=_renamed)
             self._combined_raw              = data["combined_raw"]
             self._combined_decisions        = data["combined_decisions"]
             self._mr_files_used             = data["mr_files"]
             self._ctr_files_used            = data["ctr_files"]
             self._rate_rech_mismatch_cells = _find_rate_rechargeable_mismatches(self._display_df)
+            # A saved table does not say which columns the files lacked: an expected column that
+            # is empty all the way down counts as absent.
+            self._absent_cols = {
+                c for c in ("Description (MR)", "Description (CTR)", "Qty (MR)", "Qty (CTR)",
+                            "Unit (MR)", "Unit (CTR)", "Rechargeable (MR)", "Allocation", "Rate (CTR)")
+                if c in self._display_df.columns
+                and self._display_df[c].map(lambda v: _norm_val(v) == "").all()}
             self._loaded_comparison_path    = path
 
             self._pending_stats = None
@@ -4372,6 +4472,7 @@ class MainWindow(QMainWindow):
             self._combined_raw       = {}
             self._combined_decisions = {}
             self._rate_rech_mismatch_cells = set()
+            self._absent_cols = set()
             self._loaded_comparison_path   = None
             self._pending_saved_stats      = None
             self._results_w.setVisible(False)
@@ -4493,6 +4594,7 @@ if __name__ == "__main__":
 
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
+    install_no_wheel(app)       # the wheel scrolls the page, it never changes a drop-down
 
     # Force a light palette/colour scheme explicitly, rather than letting
     # Qt inherit whatever the OS reports, as one layer of defense against
