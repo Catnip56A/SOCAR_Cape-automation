@@ -53,3 +53,9 @@ def ctr_output_filename(job_ref: str, currency: str, location: str, scope: str) 
         "CTR",
     ]
     return "_".join(p for p in parts if p) + ".xlsx"
+
+
+def pdms_output_filename(prp_number: str, job_title: str) -> str:
+    """Builds "{prp_number} {job title}.docx" for the PDMS proposal."""
+    parts = [sanitize_filename_part(prp_number), sanitize_filename_part(job_title)]
+    return " ".join(p for p in parts if p) + ".docx"

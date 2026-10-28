@@ -371,8 +371,12 @@ def test_a_failed_replace_keeps_the_old_tables_and_the_old_origin():
     twin.write_bytes(b"not a workbook")
     old_origin, n = win._file_origin[("mr", copy.name)], len(win._mr_tables)
     shown = []
-    A.QMessageBox.warning = staticmethod(lambda *a, **k: shown.append(a[2]))
-    _browsed_replace(win, "mr", twin)
+    real_warning = A.QMessageBox.warning                      # the harness's recorder: put it back afterwards, or every
+    A.QMessageBox.warning = staticmethod(lambda *a, **k: shown.append(a[2]))      # later test sees a "warning" that never answers Yes
+    try:
+        _browsed_replace(win, "mr", twin)
+    finally:
+        A.QMessageBox.warning = real_warning
     assert len(win._mr_tables) == n and win._file_origin[("mr", copy.name)] == old_origin and shown
 
 

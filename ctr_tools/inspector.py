@@ -12,6 +12,10 @@ Data tab shows tables the app already holds. The one control is the Tasks
 tab's Stop button, which asks a job to stop *between* its tasks (see
 ctr_tools/tasks.py).
 
+The CBAR tab is the one place that reads a data file: it plots the app's own CBAR
+rate log (public exchange rates) and lists which generated documents used a
+rate. Snapshots carry counts only, never the document names.
+
 The collect_*() functions take the main window and return plain data, so
 they can be exercised without showing any UI.
 """
@@ -35,16 +39,18 @@ from pathlib import Path
 
 import pandas as pd
 from common.find_bar import install_find
-from PySide6.QtCore import QSettings, QTimer, QUrl, Qt
-from PySide6.QtGui import QDesktopServices, QFont, QGuiApplication
+from PySide6.QtCore import QDateTime, QSettings, QTimer, QUrl, Qt
+from PySide6.QtGui import QCursor, QDesktopServices, QFont, QGuiApplication
 from PySide6.QtWidgets import (
     QAbstractItemView, QCheckBox, QComboBox, QDockWidget, QFormLayout,
     QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMessageBox, QPushButton, QTableWidget,
-    QTableWidgetItem, QTabWidget, QTextEdit, QToolButton, QTreeWidget,
+    QTableWidgetItem, QTableWidgetSelectionRange, QTabWidget, QTextEdit, QToolButton, QToolTip,
+    QTreeWidget,
     QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
 from ctr_tools import __version__
+from ctr_tools import cbar_rates
 from ctr_tools.tasks import DONE, FAILED, QUEUED, RUNNING, SKIPPED, TASKS
 
 _PROCESS_STARTED = time.time()
@@ -52,7 +58,7 @@ _PROCESS_STARTED = time.time()
 try:                                    # Qt Charts ships with PySide6, but a
     from PySide6.QtCharts import (      # frozen build must list it explicitly
         QBarCategoryAxis, QBarSeries, QBarSet, QChart, QChartView,
-        QLineSeries, QValueAxis,
+        QDateTimeAxis, QLineSeries, QScatterSeries, QValueAxis,
     )
     _HAVE_CHARTS = True
 except ImportError:                     # pragma: no cover
@@ -367,6 +373,11 @@ def collect_storage(win) -> list[dict]:
     add("App data", "Description renames", _renames._DESC_RENAMES_PATH, loaded="yes (rename table)")
     add("App data", "CTR presets", _presets._PRESETS_PATH, loaded="yes (preset list)")
     add("App data", "Saved comparisons folder", _socar_data_root() / "Comparisons", "dir")
+    from ctr_tools import cbar_rates as _cbar
+    add("App data", "CBAR rates (saved, what the app starts from)", _cbar._RATES_PATH, loaded="yes (CBAR rates)")
+    add("App data", "CBAR rate log", _cbar._LOG_PATH, loaded="yes (CBAR tab)")
+    add("App data", "CBAR currencies turned on", _cbar._CURRENCIES_PATH, loaded="yes (Settings)")
+    add("App data", "CBAR document-usage log", _cbar._USAGE_PATH, loaded="yes (CBAR tab)")
     loaded_cmp = getattr(win, "_loaded_comparison_path", None)
     if loaded_cmp:
         add("App data", "Open comparison", loaded_cmp, loaded="yes (MR/CTR results)")
@@ -393,6 +404,7 @@ def collect_storage(win) -> list[dict]:
         src("Combined DB (names + request)", "_combined_db_edit", "_names_db_df")
         src("AZN Template", "_azn_tpl_edit")
         src("USD Template", "_usd_tpl_edit")
+        src("PDMS Template (shared by the department, not in git)", "_pdms_tpl_edit")
         src("Output folder", "_out_dir_edit", kind="dir")
 
     # CTR Tracker
@@ -1038,6 +1050,194 @@ class TasksTab(QWidget):
         return QBrush(QColor(cls._COLORS.get(status, "#212121")))
 
 
+def _entry_rates(u: dict) -> dict[str, tuple[float | None, str | None]]:
+    """{currency: (rate, CBAR day or None)} a usage-log entry used. Entries from before several
+    currencies existed carry only the USD rate at the top level."""
+    rates = {c: (v.get("rate"), v.get("rate_date")) for c, v in (u.get("rates") or {}).items()
+             if isinstance(v, dict)}
+    if not rates and u.get("rate") is not None:
+        rates = {"USD": (u.get("rate"), u.get("rate_date"))}
+    return rates
+
+
+class CbarTab(QWidget):
+    """Rate history (one currency at a time) from the CBAR log, and the documents that used rates."""
+
+    def __init__(self):
+        super().__init__()
+        self._cur = QComboBox()
+        self._cur.setToolTip("Which currency's rate history to show. The orange dots and the list "
+                             "follow it: they are the days a document used that currency's rate.")
+        self._cur.currentIndexChanged.connect(lambda _i: self.refresh())
+        refresh = QPushButton("Refresh")
+        refresh.clicked.connect(self.refresh)
+        check = QPushButton("Check log")
+        check.setToolTip("Look through the whole log for values that look like a typo or a parsing "
+                         "error (outside 1.60–1.80, big day-to-day jumps, EUR/USD out of line).")
+        check.clicked.connect(self._check)
+        self._note = QLabel("")
+        self._note.setWordWrap(True)
+        self._note.setStyleSheet(f"color: {MUTED}; font-size: 11px;")
+        top = QHBoxLayout()
+        top.addWidget(self._cur)
+        top.addWidget(self._note, 1)
+        top.addWidget(check)
+        top.addWidget(refresh)
+        lay = QVBoxLayout(self)
+        lay.addLayout(top)
+        if _HAVE_CHARTS:
+            self._view = QChartView()
+            self._view.setMinimumHeight(200)
+            self._chart = None
+            lay.addWidget(self._view, 2)
+        else:
+            lay.addWidget(QLabel("Charts are unavailable: PySide6.QtCharts is missing from this build."), 1)
+        lay.addWidget(QLabel("Documents that used a rate (newest first)"))
+        self._table = QTableWidget(0, 5)
+        install_find(self._table)
+        self._table.setHorizontalHeaderLabels(["Generated", "Document", "PRP", "Rates used", "Selected currency"])
+        self._table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self._table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self._table.verticalHeader().setVisible(False)
+        lay.addWidget(self._table, 2)
+        self._rates: dict[str, float] = {}      # day -> rate, as drawn
+        self._row_days: list[str] = []          # the rate date of each table row
+
+    def _code(self) -> str:
+        return self._cur.currentText() or "USD"
+
+    @staticmethod
+    def _day_of(point) -> str:
+        return QDateTime.fromMSecsSinceEpoch(int(round(point.x()))).toString("yyyy-MM-dd")
+
+    def _day_text(self, day: str) -> str:
+        docs = [self._table.item(r, 1).text() for r, d in enumerate(self._row_days) if d == day]
+        head = f"{day}  —  {self._code()} {self._rates.get(day, 0):.4f}"
+        if not docs:
+            return head + "\nNo document used this rate"
+        shown = "\n".join("  • " + d for d in docs[:8]) + (f"\n  … +{len(docs) - 8} more" if len(docs) > 8 else "")
+        return f"{head}\n{len(docs)} document(s) used this rate (click to show them below):\n{shown}"
+
+    def _on_hover(self, point, state: bool) -> None:
+        if state:
+            QToolTip.showText(QCursor.pos(), self._day_text(self._day_of(point)), self._view)
+        else:
+            QToolTip.hideText()
+
+    def _on_click(self, point) -> None:
+        """Take the user to the table rows of the clicked day."""
+        day = self._day_of(point)
+        rows = [r for r, d in enumerate(self._row_days) if d == day]
+        self._table.clearSelection()
+        if not rows:
+            self._note.setText(f"{day}: no document used this day's rate.")
+            return
+        for r in rows:
+            self._table.setRangeSelected(
+                QTableWidgetSelectionRange(r, 0, r, self._table.columnCount() - 1), True)
+        self._table.scrollToItem(self._table.item(rows[0], 1), QAbstractItemView.ScrollHint.PositionAtTop)
+        self._table.setFocus()
+        self._note.setText(f"{day}: {len(rows)} document(s) used {self._code()} {self._rates.get(day, 0):.4f}.")
+
+    def _check(self):
+        problems = cbar_rates.validate_log()
+        QMessageBox.information(
+            self, "CBAR log check",
+            "\n".join(problems[:40]) if problems
+            else f"No problems found in {len(cbar_rates.load_log())} logged day(s).")
+
+    def refresh(self):
+        choices = list(dict.fromkeys(["USD", *cbar_rates.enabled_currencies()]))
+        if [self._cur.itemText(i) for i in range(self._cur.count())] != choices:
+            keep = self._cur.currentText()
+            self._cur.blockSignals(True)
+            self._cur.clear()
+            self._cur.addItems(choices)
+            self._cur.setCurrentText(keep if keep in choices else "USD")
+            self._cur.blockSignals(False)
+        code = self._code()
+        hist = cbar_rates.history(code)
+        usage = list(reversed(cbar_rates.load_usage()))
+        if _HAVE_CHARTS:
+            self._draw(hist, [{"rate_date": _entry_rates(u).get(code, (None, None))[1]} for u in usage])
+        self._table.setRowCount(len(usage))
+        self._row_days = [_entry_rates(u).get(code, (None, None))[1] or "" for u in usage]
+        self._rates = dict(hist)
+        for r, u in enumerate(usage):
+            rates = _entry_rates(u)
+            raw = u.get("rates") or {}
+
+            def _how(c, day):                    # the CBAR day, or how else the rate came to be
+                return day or (raw.get(c, {}).get("source") if isinstance(raw.get(c), dict) else None) or "typed"
+            used = "; ".join(f"{c} {v[0]:.4f} ({_how(c, v[1])})" for c, v in rates.items()
+                             if isinstance(v[0], (int, float)))
+            mine = rates.get(code)
+            vals = [str(u.get("used_at", "")).replace("T", " "), u.get("document", ""), u.get("prp", ""),
+                    used, (f"{mine[0]:.4f} ({_how(code, mine[1])})" if mine and isinstance(mine[0], (int, float))
+                           else "—")]
+            for c, v in enumerate(vals):
+                self._table.setItem(r, c, QTableWidgetItem(str(v)))
+        self._table.resizeColumnToContents(0)
+        if hist:
+            self._note.setText(f"{len(hist)} day(s) logged; latest {hist[-1][0]}: {code} {hist[-1][1]:.4f}. "
+                               "Orange dots = days a document used that CBAR rate. "
+                               "Hover a dot for details; click it to show its documents below.")
+        else:
+            self._note.setText(f"No {code} rate has been fetched yet — press Reload in the PDMS header's CBAR rates.")
+
+    def _draw(self, hist, usage):
+        chart = QChart()
+        chart.setAnimationOptions(QChart.AnimationOption.NoAnimation)
+        chart.legend().hide()
+        chart.setTitle(f"{self._code()} → AZN (CBAR)")
+        self._chart = chart
+        self._view.setChart(chart)
+
+        def ms(day: str) -> float:
+            return QDateTime.fromString(day, "yyyy-MM-dd").toMSecsSinceEpoch()
+
+        line = QLineSeries()
+        for day, value in hist:
+            line.append(ms(day), value)
+        chart.addSeries(line)
+        used_days = {u.get("rate_date") for u in usage if u.get("rate_date")}
+        every = QScatterSeries()                    # a small dot on every logged day, so any day can be hovered
+        every.setColor(Qt.GlobalColor.darkCyan)
+        every.setMarkerSize(6)
+        dots = QScatterSeries()                     # bigger orange dots where documents used the rate
+        dots.setColor(Qt.GlobalColor.darkYellow)
+        dots.setMarkerSize(11)
+        for day, value in hist:
+            every.append(ms(day), value)
+            if day in used_days:
+                dots.append(ms(day), value)
+        chart.addSeries(every)
+        chart.addSeries(dots)
+        self._every, self._dots = every, dots       # kept for the tests and so the signals stay connected
+        for series in (every, dots):
+            series.hovered.connect(self._on_hover)
+            series.clicked.connect(self._on_click)
+        ax, ay = QDateTimeAxis(), QValueAxis()
+        ax.setFormat("dd.MM")
+        ax.setTickCount(6)
+        ay.setTitleText(f"AZN per {self._code()}")
+        ay.setLabelFormat("%.4f")
+        xs = [ms(d) for d, _v in hist] or [QDateTime.currentMSecsSinceEpoch() - 86400000,
+                                           QDateTime.currentMSecsSinceEpoch()]
+        ys = [v for _d, v in hist] or [1.6, 1.8]
+        if min(xs) == max(xs):
+            xs = [xs[0] - 86400000, xs[0] + 86400000]
+        pad = max((max(ys) - min(ys)) * 0.2, 0.005)
+        ax.setRange(QDateTime.fromMSecsSinceEpoch(int(min(xs))), QDateTime.fromMSecsSinceEpoch(int(max(xs))))
+        ay.setRange(min(ys) - pad, max(ys) + pad)
+        chart.addAxis(ax, Qt.AlignmentFlag.AlignBottom)
+        chart.addAxis(ay, Qt.AlignmentFlag.AlignLeft)
+        for series in (line, every, dots):
+            series.attachAxis(ax)
+            series.attachAxis(ay)
+
+
 _CHART_CHOICES = ["Memory over time", "CPU over time", "Time per task",
                   "Memory per loaded table", "Space per folder"]
 
@@ -1360,9 +1560,31 @@ def build_snapshot(win, dock=None) -> str:
                 out.append(f"    {e['label']}: {fmt_bytes(_dir_size(e['path']))}  ({e['path']})")
         return out
 
+    def cbar():
+        hist, usage = cbar_rates.usd_history(), cbar_rates.load_usage()
+        if not hist:
+            return ["No CBAR rate logged yet."]
+        out = [f"{len(hist)} day(s) logged, latest {hist[-1][0]}: USD {hist[-1][1]:.4f}",
+               "Turned-on currencies: " + ", ".join(cbar_rates.enabled_currencies()),
+               f"{len(usage)} document(s) generated with a rate (names are not written here)"]
+        gen = getattr(win, "_ctr_gen", None)
+        fx = getattr(gen, "_fx", None) if gen is not None else None
+        if fx:
+            out.append("PDMS proposal mode: " + ("on" if gen._pdms_on() else "off")
+                       + f", mark-up {gen._markup_spin.value():g} %")
+            out.append("Rates in the header (what a proposal would use):")
+            for code, d in fx.items():
+                out.append(f"    {code}: {d['edit'].text() or '—'}   source: "
+                           + (f"CBAR {d['date']}" if d.get("date") else "typed / default")
+                           + f"   last: {d.get('stamp') or '—'}  {d.get('action') or '—'}")
+            out.append("Default currencies: " + ", ".join(f"{k} {c.currentText()}" for k, c in gen._cat_combos.items()))
+        problems = cbar_rates.validate_log()
+        return out + (["Log check:"] + [f"    {p}" for p in problems[:20]] if problems else ["Log check: nothing found"])
+
     for title, fn in (("OVERVIEW", overview), ("LOGS", logs), ("DATA IN MEMORY", data),
                       ("STORAGE (paths only)", storage), ("THREADS", threads),
-                      ("VARIABLES", variables), ("TASKS", tasks), ("CHARTS (data)", charts)):
+                      ("VARIABLES", variables), ("TASKS", tasks), ("CHARTS (data)", charts),
+                      ("CBAR RATES", cbar)):
         lines += _section(title, fn)
     return redact("\n".join(lines)) + "\n"
 
@@ -1436,10 +1658,11 @@ class InspectorDock(QDockWidget):
         self.variables = VariablesTab(win)
         self.tasks = TasksTab()
         self.charts = ChartsTab(win)
+        self.cbar = CbarTab()
         for tab, name in ((self.overview, "Overview"), (self.logs, "Logs"), (self.data, "Data"),
                           (self.storage, "Storage"), (self.threads, "Threads"),
                           (self.variables, "Variables"), (self.tasks, "Tasks"),
-                          (self.charts, "Charts")):
+                          (self.charts, "Charts"), (self.cbar, "CBAR")):
             self._tabs.addTab(tab, name)
 
         self._float_btn = QToolButton()

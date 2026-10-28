@@ -20,7 +20,7 @@ import tempfile
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import QPointF, Qt
+from PySide6.QtCore import QPointF, Qt, QThread, Signal
 from PySide6.QtGui import QColor, QIcon, QPainter, QPainterPath, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView, QCheckBox, QComboBox, QDialog, QFileDialog, QGroupBox, QHBoxLayout, QLabel,
@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
 )
 
 import ctr_tools.aliases as _aliases
+import ctr_tools.cbar_rates as _cbar
 import ctr_tools.desc_renames as _renames
 import ctr_tools.presets as _presets
 import ctr_tools.source_choices as _choices
@@ -407,6 +408,18 @@ class SettingsDialog(QDialog):
         self.activateWindow()
 
 
+class _CurrencyListWorker(QThread):
+    """Downloads CBAR's list of currencies off the main thread."""
+    done  = Signal(list)
+    error = Signal(str)
+
+    def run(self):
+        try:
+            self.done.emit(_cbar.fetch_available())
+        except Exception as exc:                      # network down, CBAR format changed …
+            self.error.emit(str(exc))
+
+
 class SettingsTab(QWidget):
     def __init__(self, ctr_gen, parent=None):
         super().__init__(parent)
@@ -492,6 +505,31 @@ class SettingsTab(QWidget):
         hint.setWordWrap(True)
         g3.addWidget(hint)
         lay.addWidget(grp3)
+
+        # ── CBAR currencies (PDMS proposal) ──────────────────────────────────
+        grp4 = QGroupBox("CBAR currencies (PDMS proposal)")
+        g4 = QVBoxLayout(grp4)
+        hint4 = QLabel("The currencies a PDMS proposal can use. Each one that is ticked gets its own "
+                       "rate line (and Reload button) under CBAR rates in the CTR header, and is offered "
+                       "in the price cells' currency drop-downs. AZN is always on (rate 1). USD, EUR and GBP are on "
+                       "unless you change it.")
+        hint4.setStyleSheet(_MUTED)
+        hint4.setWordWrap(True)
+        g4.addWidget(hint4)
+        self._cur_list = QListWidget()
+        self._cur_list.setMaximumHeight(150)
+        self._cur_list.itemChanged.connect(lambda _i: self._save_currencies())
+        g4.addWidget(self._cur_list)
+        cur_row = QHBoxLayout()
+        self._cur_refresh = QPushButton("Refresh the list from CBAR")
+        self._cur_refresh.setToolTip("Download CBAR's current list of currencies, so any of them can be ticked.")
+        self._cur_refresh.clicked.connect(self._refresh_currency_list)
+        cur_row.addWidget(self._cur_refresh)
+        self._cur_note = QLabel("")
+        self._cur_note.setStyleSheet(_MUTED)
+        cur_row.addWidget(self._cur_note, 1)
+        g4.addLayout(cur_row)
+        lay.addWidget(grp4)
 
         self._where = QLabel()
         self._where.setStyleSheet(_MUTED)
@@ -590,6 +628,47 @@ class SettingsTab(QWidget):
             btn.setToolTip(f"{n} backup(s) of this list; choose one to bring back." if n
                            else "No backup yet — one is made whenever this list is reset or restored.")
         self._where.setText(f"Saved lists are stored in: {user_data_dir()}")
+        self._fill_currencies()
+
+    # ── CBAR currencies ──────────────────────────────────────────────────────
+
+    def _fill_currencies(self) -> None:
+        on = set(_cbar.enabled_currencies())
+        self._cur_list.blockSignals(True)
+        self._cur_list.clear()
+        for code, name in _cbar.available_currencies():
+            it = QListWidgetItem(f"{code}  —  {name}" if name else code)
+            it.setData(Qt.ItemDataRole.UserRole, code)
+            it.setFlags(it.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            it.setCheckState(Qt.CheckState.Checked if code in on else Qt.CheckState.Unchecked)
+            self._cur_list.addItem(it)
+        self._cur_list.blockSignals(False)
+
+    def _save_currencies(self) -> None:
+        codes = [self._cur_list.item(i).data(Qt.ItemDataRole.UserRole) for i in range(self._cur_list.count())
+                 if self._cur_list.item(i).checkState() == Qt.CheckState.Checked]
+        _cbar.set_enabled_currencies(codes)
+        self._gen.cbar_currencies_changed.emit()
+
+    def _refresh_currency_list(self) -> None:
+        self._cur_refresh.setEnabled(False)
+        self._cur_note.setText("Fetching…")
+        worker = _CurrencyListWorker(self)
+        self._cur_worker = worker                     # keep it alive until it finishes
+
+        def _done(items: list):
+            self._cur_refresh.setEnabled(True)
+            self._cur_note.setText(f"{len(items)} currencies in CBAR's list.")
+            self._fill_currencies()
+
+        def _err(msg: str):
+            self._cur_refresh.setEnabled(True)
+            self._cur_note.setText("")
+            QMessageBox.warning(self, "CBAR currencies", f"Could not get CBAR's list:\n\n{msg}")
+
+        worker.done.connect(_done)
+        worker.error.connect(_err)
+        worker.start()
 
     def showEvent(self, event):          # values may have changed in another tab
         self.refresh()

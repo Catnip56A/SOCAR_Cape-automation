@@ -1,42 +1,43 @@
-# Handoff — 2026-10-22
+# Handoff — 2026-10-28
 
 ## Goal
-MR vs CTR Comparator, version 1.0.22, part 1 (small UI/behaviour fixes). Part 2 (the major part) starts in a new chat.
+CTR Generator, version 1.0.22 part 2 (same version as part 1; VERSION and CHANGELOG [1.0.22] already updated): PDMS proposal (Word), CBAR rates/currencies, PDMS overview sheet.
 
-## Done
-- MR column is now **Rechargeable (MR)** in the Matched / Only in MR / Only in CTR tables, Excel report, USER_GUIDE; old saved comparisons are renamed on load. Verified: offscreen tests (mismatch_nav, local_cost, attention).
-- **Qty mode** drop-down next to Compare Values ("Qty: all differences" / "Qty: CTR < MR only", i.e. CTR − MR < 0), for the detail tables and the Combined View (Qty totals + Diff red, ↑/↓ follow it), Units always red, remembered in QSettings (`compare/qty_mode`). Verified: tests/test_qty_mode.py (4 tests).
-- **Grey missing cells/columns**: empty cell in an MR/CTR column is grey (`_EMPTY_BG`); Description/Qty/Unit pairs, Rechargeable (MR), Allocation, Rate (CTR) are always present (empty if the files lack them) and skipped by Compare Values (`_absent_cols`). Highlights still override grey. Also fixed an old bug: an MR file without Unit showed the CTR's Unit as "Unit (MR)" (`_own` in `_build_display`).
-- **xcb on Linux** (`app.py` top, `QT_QPA_PLATFORM` setdefault): WSLg's Wayland plugin left drop-down popups as unclosable windows. Cost: UI is blurry in WSLg (X11 screen is 1280x800, upscaled 2x); user accepted it.
-- **Wheel no longer changes drop-downs** (`common/no_wheel.py`, installed in `app.py` `__main__`); wheel scrolls the page; spin boxes keep the wheel. Verified: tests/test_no_wheel.py.
-- The user tried the changes themselves and said they work.
+## Done (full offscreen suite 236/236 passed on 2026-10-27; LibreOffice Calc recalculation checked the sheet)
+- PDMS proposal: checkbox in the CTR Generator header → .docx from the tagged PDMS template (`builder_pdms.py`: `compute_pdms` figures + `build_pdms`); the sample's own tables are filled; labour shows days and day rate (shift length from the Encoding); transport lines sit in the consumables table; PDF export works (user saw it).
+- Hotbed line under Manpower (rate 59 editable, currency, days, Include box); the user enters it by hand each time.
+- Currencies: category defaults + per-cell currency (number left, sign right, drop-down, one click); totals in manats; box titles list currencies. Order: convert → mark-up → round line totals to 2 decimals. Mark-up 10 % in PDMS mode, 6.5 % otherwise.
+- CBAR: rates group with Reload per currency/all, Settings → CBAR currencies, rate log + validation, Yes/No question for an unusual rate, last checked/last action, document-usage log, Inspector CBAR tab, Storage/snapshot entries.
+- "PDMS overview" first sheet in the statistics workbook (formulas, stock codes, encodings) = same figures as the Word file.
+- Re-match All buttons ask first and list consequences; notes under the buttons.
+- Test fix: `test_file_changes` left `QMessageBox.warning` replaced (caused the 120 s Generate hangs); harness resets PDMS state between tests.
+- Docs (CHANGELOG, README, USER_GUIDE, tests/README) updated. Task log: MA202, MA203 closed; MA205 (wording) added.
 
 ## In progress / not fully done
-- NOT verified on Windows (the built .exe): header text, grey colours, Qty drop-down in the toolbar, window min height. Not tested with a real multi-sheet MR/CTR pair or an older saved comparison.
-- Full offscreen suite did not finish in 500 s; two test_generate_rules tests timed out (~123 s) in that run but pass alone (file 5/5). Cause unknown, not re-run before my changes.
-- Nothing is committed. VERSION bumped to 1.0.22 and a CHANGELOG [1.0.22] section (2026-10-22) written for part 1; add part 2 to the same section. New files: common/no_wheel.py, tests/test_qty_mode.py, tests/test_no_wheel.py. Task log updated 2026-10-22: rows MA196–MA200 added at 90 % ("In process", waiting for the Windows check and the commit); change their Version/pct when 1.0.22 is released. Parked rows untouched.
+- Part 1 is committed (c82f142). Part 2 is NOT committed (19 files; new: `ctr_tools/builder_pdms.py`, `pdms_overview.py`, `tests/test_builder_pdms.py`, `test_cbar_log.py`, `test_pdms_overview.py`); the user commits and pushes (never me).
+- Release rows for the built work are not in the task log yet: write them together with MA127's percentage (user will say) at release time.
+- Not verified on the real Windows app / Word / Excel (user checks at build time, tracked in MA204).
 
 ## Decisions (with reasoning)
-- xcb stays the default on Linux: Wayland popups are unusable, blur accepted.
-- Wheel is blocked only for drop-downs, not spin boxes (the wheel is intended there).
-- Grey applies to MR/CTR columns only, not Stock Code / Days / Local cost (those have their own marks).
-- "CTR < MR only" skips rows with a quantity on one side only; Unit differences stay in both modes.
+- Unusual CBAR rate is always logged, never silently dropped: the user is asked and may approve it (it may be right); an unreadable entry keeps the old rate.
+- Currency is stored on the rate cell (no extra column); only turned-on currencies can be chosen.
+- PDMS template is shared by the department, not in git; the Word proposal has no stock-code column (the overview sheet does).
+- Hotbed: with rate and days it is calculated whatever Include says; incomplete → inserted as given only while Include is ticked.
+- Wording/capitals/visual choices wait for the commercial department's first look (MA205); parked rows are changed at the end of feature development.
 
 ## Next
-1. New chat for part 2 of 1.0.22: continue the same version (VERSION and CHANGELOG already at 1.0.22); /release at the end.
-2. After the Windows check, set MA196–MA200 to 100 % (use /tasklog).
+1. User builds the .exe and runs the Windows checks (MA204). 2. User commits part 2 (suggested title: "1.0.22 - part 2: PDMS proposal (Word), CBAR rates and currencies, PDMS overview sheet"). 3. /tasklog with MA127 for the release rows, then /release.
 
 ## Open questions
-- Commit part 1 now or with part 2? (user said "not right now")
-- Push the older local commits to origin? Still not answered.
+- MA201: Onshore schedule-of-activities text — stays as is for 1.0.22; to be made different in the next version.
+- MA127 (short proposal, 1 %): the user will say what percentage it should show.
 
 ## Parked
-- MA124, MA127–MA130, MA133, MA194 stay ignored until the user says.
-- MA193 (Windows test of the reload/browse fixes) and MA164 (screen-ratio test, 1080p at 150 %) still to do by the user.
-- Disparities segfault (crash.log 2026-10-15) not reproduced.
+- MA124, MA127–MA130, MA133, MA194 untouched until feature development ends; MA164, MA193 are the user's tests; Disparities segfault (crash.log 2026-10-15) not reproduced.
 
 ## Windows checks
-- Matched table: "Rechargeable (MR)" header, blue tint, red Rate/Rechargeable mismatch after Compare Values; open one older saved comparison.
-- Qty drop-down: both modes, in detail and Combined view; fits the toolbar; choice survives a restart; window min height unchanged.
-- Grey cells: Only in MR / Only in CTR tabs, a file missing a column, multi-sheet files; red/orange still on top; selected-row colours.
-- Scrolling over a drop-down (also inside a table cell) scrolls the page; the Markup Rate box still changes with the wheel.
+- Generated .docx in Word: no repair prompt, tables/fills/page break/header/footer; PDMS overview sheet in Excel (change a rate).
+- Reload per currency against the real CBAR site; the Yes/No question; Settings → CBAR currencies.
+- In-cell currency drop-down (click the right half), NON-RECHARGEABLE from the left, Re-match All question.
+- Inspector CBAR tab (9 tabs fit; hover/click); PDMS checkbox does not raise the window's minimum height.
+- Part 1 (MA197–MA200): Qty drop-down in the toolbar, grey cells with a multi-sheet pair, wheel over a drop-down.

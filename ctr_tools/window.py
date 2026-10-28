@@ -43,14 +43,14 @@ from pathlib import Path
 import pandas as pd
 from ctr_tools import __version__ as _VERSION
 from PySide6.QtCore import (
-    Qt, QItemSelectionModel, QObject, QPoint, QRunnable, QSettings, QThread, QThreadPool, QTimer, Signal,
+    QEvent, Qt, QItemSelectionModel, QObject, QPoint, QRunnable, QSettings, QThread, QThreadPool, QTimer, Signal,
 )
 from PySide6.QtGui import QBrush, QColor, QCursor, QPen
 from PySide6.QtWidgets import (
-    QAbstractItemView, QComboBox, QDialog, QDoubleSpinBox, QFileDialog,
+    QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog, QDoubleSpinBox, QFileDialog,
     QGroupBox, QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit,
     QListWidget, QMenu, QMessageBox, QProgressDialog, QPushButton, QScrollArea,
-    QSizePolicy, QStyledItemDelegate, QTableWidget, QTableWidgetItem, QTabWidget,
+    QSizePolicy, QStyle, QStyleOptionViewItem, QStyledItemDelegate, QTableWidget, QTableWidgetItem, QTabWidget,
     QToolButton, QToolTip, QVBoxLayout, QWidget, QWidgetAction,
 )
 
@@ -75,11 +75,16 @@ from ctr_tools.builder_azn import (
     strip_support_keyword,
 )
 from ctr_tools.builder_usd import build_usd
+from ctr_tools.builder_pdms import (
+    attention_from_requester, build_pdms, compute_pdms, pdms_defaults, salutation_from_attention,
+)
+from ctr_tools.pdms_overview import add_overview_sheet
 from ctr_tools.parser import (
     parse_azn_pricebook, parse_usd_pricebook, parse_sage,
     parse_ctr_request, parse_equip_names_db, parse_encoding_info,
 )
 from ctr_tools.pdf_exporter import export_to_pdf
+from ctr_tools import cbar_rates
 from ctr_tools.tasks import TASKS, Job
 
 log = logging.getLogger(__name__)
@@ -193,6 +198,15 @@ _TRANSPORT_HEADERS = [
     "Rate AZN", "Mark Up %", "Total AZN",
 ]
 
+# What the headers say in PDMS mode: a price is in its own cell's currency (the cell shows the
+# currency's sign), so the fixed AZN / USD goes from the Rate headers; every Total is in manats.
+_PDMS_HEADERS = {
+    "manpower":    {_MP_RATE: "Rate", _MP_TOTAL: "Total AZN"},
+    "equipment":   {_EQ_RATE: "Rate/Day", _EQ_TOTAL: "Total AZN"},
+    "consumables": {_CS_PRICE: "Unit Price", _CS_TOTAL: "Total AZN"},
+    "transport":   {_TR_RATE: "Rate", _TR_TOTAL: "Total AZN"},
+}
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Worker thread
@@ -245,9 +259,13 @@ class CTRWorker(QThread):
         header_azn:    dict | None = None,
         header_usd:    dict | None = None,
         markup_rate:   float | None = None,
+        pdms: dict | None = None,
         parent=None,
     ):
         super().__init__(parent)
+        # PDMS proposal mode: {"template", "header", "rates", "hotbed"}. The AZN / USD Excel CTRs are
+        # then not written; the proposal (and its PDF, where LibreOffice can) is.
+        self._pdms = pdms
         self._support_rows  = support_rows
         self._other_rows    = other_rows
         self._equip_rows    = equip_rows
@@ -262,11 +280,41 @@ class CTRWorker(QThread):
         self._markup_rate   = markup_rate
         # Ordered steps, shown in the F12 Inspector. A stop request is only
         # honoured between steps, so a spreadsheet is never cut off halfway.
-        self.job: Job = TASKS.begin_job(f"Generate CTR {job_ref}", [
-            "Write AZN spreadsheet", "Write USD spreadsheet",
-            "Export AZN PDF", "Export USD PDF",
-        ])
+        self.job: Job = TASKS.begin_job(f"Generate CTR {job_ref}", (
+            ["Write PDMS proposal", "Export PDMS PDF"] if pdms else [
+                "Write AZN spreadsheet", "Write USD spreadsheet",
+                "Export AZN PDF", "Export USD PDF",
+            ]))
         self.stopped = False
+
+    def _run_pdms(self, out: Path, job: Job, produced: list, stop_here) -> None:
+        """PDMS proposal mode: the Word proposal, then (best effort) its PDF."""
+        job.start(0)
+        self.progress.emit("Writing PDMS proposal…")
+        pdms = self._pdms
+        docx_path = build_pdms(
+            self._support_rows, self._other_rows, self._equip_rows, self._consump_rows,
+            pdms["template"], out, pdms["header"], rates=pdms["rates"],
+            markup_rate=self._markup_rate or 0.0, third_party_rows=self._third_party_rows,
+            hotbed=pdms.get("hotbed"), currencies=pdms.get("currencies"),
+        )
+        log.info("CTRWorker: PDMS proposal written: %s", docx_path)
+        cbar_rates.log_usage(docx_path.name, pdms["header"].get("prp_number", ""), pdms["rates_used"])
+        job.done(0)
+        produced.append(str(docx_path))
+        if stop_here(1):
+            return
+        job.start(1)
+        self.progress.emit("Exporting PDMS PDF via LibreOffice…")
+        try:
+            produced.append(str(export_to_pdf(docx_path, out)))
+            job.done(1)
+        except RuntimeError as e:
+            log.warning("CTRWorker: PDMS PDF export skipped: %s", e)
+            produced.append(f"[PDF skipped: {e}]")
+            job.done(1, "PDF skipped")
+        job.finish()
+        self.finished.emit(produced)
 
     def run(self):
         log.info(
@@ -293,6 +341,10 @@ class CTRWorker(QThread):
 
         try:
             out = Path(self._output_dir)
+
+            if self._pdms:
+                self._run_pdms(out, job, produced, _stop_here)
+                return
 
             step = 0
             job.start(step)
@@ -407,6 +459,31 @@ class _LoadTask(QRunnable):
         self._signals.result.emit(self._name, result)
 
 
+class _CbarWorker(QThread):
+    """Fetches today's CBAR rates off the main thread (a task in the F12 Inspector)."""
+    finished = Signal(dict)       # {code: {"rate", "date", "warnings", "error"}}
+    error    = Signal(str)
+
+    def __init__(self, codes: list, parent=None):
+        super().__init__(parent)
+        self._codes = list(codes)
+        self.job = TASKS.begin_job("Fetch CBAR rates (" + ", ".join(self._codes) + ")",
+                                   ["Download CBAR rates"], stoppable=False)
+
+    def run(self):
+        self.job.start(0)
+        try:
+            results = cbar_rates.fetch_rates(self._codes)
+        except Exception as exc:
+            self.job.failed(0, str(exc))
+            self.job.finish()
+            self.error.emit(str(exc))
+            return
+        self.job.done(0)
+        self.job.finish()
+        self.finished.emit(results)
+
+
 class _CTRRequestWorker(QThread):
     """Parses a CTR Request file off the main thread."""
     finished = Signal(dict)
@@ -456,6 +533,7 @@ def _group_css(color: str) -> str:
 
 
 _JUMP_ROLE = Qt.UserRole + 5   # True on the one cell "Go to missing value" last jumped to
+_CUR_ROLE = Qt.UserRole + 50   # a Rate / Price cell's own currency code (None = its category's); PDMS mode
 
 
 class _JumpOverlayDelegate(QStyledItemDelegate):
@@ -465,6 +543,10 @@ class _JumpOverlayDelegate(QStyledItemDelegate):
 
     def paint(self, painter, option, index):
         super().paint(painter, option, index)
+        self._paint_jump(painter, option, index)
+
+    @staticmethod
+    def _paint_jump(painter, option, index):
         if index.data(_JUMP_ROLE):
             painter.save()
             r = option.rect.adjusted(1, 1, -1, -1)
@@ -472,6 +554,123 @@ class _JumpOverlayDelegate(QStyledItemDelegate):
             painter.setPen(QPen(QColor("#E65100"), 2))
             painter.drawRect(r)
             painter.restore()
+
+
+class _MoneyDelegate(_JumpOverlayDelegate):
+    """A Rate / Price cell in PDMS mode: the number in the left half and the currency in the right
+    half, drawn as the currency's sign (₼ $ £ €). The editor is a number box plus a drop-down of
+    the currency codes (AZN, USD, GBP …) that are turned on. Outside PDMS mode it is an ordinary cell."""
+
+    NON_RECHARGEABLE = "NON-RECHARGEABLE"
+
+    def __init__(self, parent, owner, key: str):
+        super().__init__(parent)
+        self._owner, self._key = owner, key
+        self._popup_next = False
+
+    def _active(self) -> bool:
+        return self._owner._pdms_on()
+
+    def parts(self, index) -> tuple[str, str]:
+        """(the number as typed, the currency's sign); no sign for a text such as NONRECHARG."""
+        text = str(index.data(Qt.ItemDataRole.DisplayRole) or "")
+        try:
+            float(text)
+        except ValueError:
+            return text, ""
+        code = str(index.data(_CUR_ROLE) or self._owner._cat_currency(self._key)).upper()
+        return text, cbar_rates.currency_sign(code)
+
+    def paint(self, painter, option, index):
+        text = str(index.data(Qt.ItemDataRole.DisplayRole) or "")
+        if text.strip().upper().startswith("NONRECH"):
+            # A non-rechargeable line (the cell holds the sentinel NONRECHARG): no number, no currency —
+            # the words, in capitals, from the left edge of the whole cell. In every mode.
+            opt = QStyleOptionViewItem(option)
+            self.initStyleOption(opt, index)
+            opt.text = ""
+            style = opt.widget.style() if opt.widget else QApplication.style()
+            style.drawControl(QStyle.ControlElement.CE_ItemViewItem, opt, painter, opt.widget)
+            area = option.rect.adjusted(4, 0, -4, 0)
+            painter.save()
+            painter.setPen(option.palette.highlightedText().color()
+                           if option.state & QStyle.StateFlag.State_Selected else option.palette.text().color())
+            painter.drawText(area, int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
+                             painter.fontMetrics().elidedText(self.NON_RECHARGEABLE, Qt.TextElideMode.ElideRight,
+                                                              area.width()))
+            painter.restore()
+            self._paint_jump(painter, option, index)
+            return
+        if not self._active():
+            return super().paint(painter, option, index)
+        opt = QStyleOptionViewItem(option)
+        self.initStyleOption(opt, index)
+        opt.text = ""
+        style = opt.widget.style() if opt.widget else QApplication.style()
+        style.drawControl(QStyle.ControlElement.CE_ItemViewItem, opt, painter, opt.widget)
+        number, sign = self.parts(index)
+        half = option.rect.width() // 2
+        left = option.rect.adjusted(4, 0, -(option.rect.width() - half) - 2, 0)
+        right = option.rect.adjusted(half + 4, 0, -2, 0)
+        selected = bool(option.state & QStyle.StateFlag.State_Selected)
+        painter.save()
+        painter.setPen(option.palette.highlightedText().color() if selected else option.palette.text().color())
+        painter.drawText(left, int(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter), number)
+        if sign:
+            painter.setPen(option.palette.highlightedText().color() if selected else QColor(MUTED))
+            painter.drawText(right, int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter), sign)
+        painter.restore()
+        self._paint_jump(painter, option, index)
+
+    def editorEvent(self, event, model, option, index):
+        """A click on the right half (the currency) opens the drop-down at once; a click on the left half
+        edits the number. Returning False lets the view open the editor as usual."""
+        if self._active() and event.type() in (QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonRelease):
+            self._popup_next = event.position().x() > option.rect.x() + option.rect.width() // 2
+        return False
+
+    def createEditor(self, parent, option, index):
+        if not self._active():
+            return super().createEditor(parent, option, index)
+        box = QWidget(parent)
+        lay = QHBoxLayout(box)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+        box._edit, box._combo = QLineEdit(box), QComboBox(box)
+        box._combo.addItems(self._owner._currency_choices())
+        box._combo.setToolTip("The currency of this price. Shown in the table as its sign.")
+        lay.addWidget(box._edit, 1)
+        lay.addWidget(box._combo, 1)
+        box.setFocusProxy(box._edit)
+        box.setAutoFillBackground(True)
+        # Choosing a currency is the whole edit: it is stored at once (the totals follow) and the
+        # editor closes — no second click to leave the cell.
+        def _chosen(_i, b=box):
+            self.commitData.emit(b)
+            self.closeEditor.emit(b)
+        box._combo.activated.connect(_chosen)
+        if getattr(self, "_popup_next", False):                   # the click was on the currency half
+            self._popup_next = False
+            QTimer.singleShot(0, lambda b=box: (b._combo.setFocus(), b._combo.showPopup()))
+        return box
+
+    def setEditorData(self, editor, index):
+        if not self._active():
+            return super().setEditorData(editor, index)
+        editor._edit.setText(str(index.data(Qt.ItemDataRole.EditRole) or ""))
+        code = str(index.data(_CUR_ROLE) or self._owner._cat_currency(self._key)).upper()
+        if editor._combo.findText(code) < 0:                     # one that was turned off since: keep it visible
+            editor._combo.addItem(code)
+        editor._combo.setCurrentText(code)
+        editor._edit.selectAll()
+
+    def setModelData(self, editor, model, index):
+        if not self._active():
+            return super().setModelData(editor, model, index)
+        chosen = editor._combo.currentText().upper()
+        own = None if chosen == self._owner._cat_currency(self._key) else chosen   # the default follows the box
+        model.setData(index, own, _CUR_ROLE)
+        model.setData(index, editor._edit.text(), Qt.ItemDataRole.EditRole)
 
 
 def _make_table(headers: list[str], stretch_col: int = 0) -> QTableWidget:
@@ -1483,6 +1682,7 @@ class CTRGeneratorWidget(QWidget):
     # for them (the price statistics need both) and keeps them in step with these, like SAGE.
     usd_pricebook_path_changed = Signal(str)
     combined_db_path_changed = Signal(str)
+    cbar_currencies_changed = Signal()         # Settings turned CBAR currencies on / off
     stats_defaults_changed = Signal()          # Settings changed the statistics defaults (mode, scaffold, markup)
     files_loaded = Signal()                    # Load Files finished: the reference tables were just re-read from disk
 
@@ -1574,10 +1774,12 @@ class CTRGeneratorWidget(QWidget):
         # Output templates + Combined DB — shared by both data-source sub-tabs below
         row4, self._azn_tpl_edit = _file_picker_row("AZN Template", "Excel (*.xlsx *.xls)")
         row5, self._usd_tpl_edit = _file_picker_row("USD Template", "Excel (*.xlsx *.xls)")
+        row_pd, self._pdms_tpl_edit = _file_picker_row("PDMS Template", "Word (*.docx)")
         row6, self._combined_db_edit = _file_picker_row(
             "Combined DB (Names + Request)", "Excel (*.xlsx *.xls)")
         gl.addLayout(row4)
         gl.addLayout(row5)
+        gl.addLayout(row_pd)
         gl.addLayout(row6)
 
         sub_tabs = QTabWidget()
@@ -1689,6 +1891,8 @@ class CTRGeneratorWidget(QWidget):
 
     def _build_manpower_section(self, parent_layout: QVBoxLayout):
         grp = QGroupBox("Manpower — AZN")
+        self._groups = getattr(self, "_groups", {})
+        self._groups["manpower"] = grp
         grp.setStyleSheet(_group_css(MR_COLOR))
         gl = QVBoxLayout(grp)
         gl.setSpacing(6)
@@ -1716,7 +1920,7 @@ class CTRGeneratorWidget(QWidget):
             "before loading the Pricebook-Based files."
         )
         rematch_btn.setStyleSheet(_btn_style(MR_COLOR, MR_LIGHT))
-        rematch_btn.clicked.connect(self._rematch_all_manpower)
+        rematch_btn.clicked.connect(lambda: self._ask_rematch("manpower"))
         top_btn_row.addWidget(rematch_btn)
 
         manage_btn = QPushButton("Manage Manpower Renames…")
@@ -1728,6 +1932,7 @@ class CTRGeneratorWidget(QWidget):
         top_btn_row.addWidget(manage_btn)
         top_btn_row.addStretch()
         gl.addLayout(top_btn_row)
+        gl.addWidget(self._rematch_note())
 
         search_row = QHBoxLayout()
         search_lbl = QLabel("Search:")
@@ -1780,6 +1985,47 @@ class CTRGeneratorWidget(QWidget):
         btn_row.addWidget(mp_next_btn)
         gl.addLayout(btn_row)
 
+        # PDMS proposal only: the standing "Hotbed – if required" labour line. Rate (editable,
+        # standard 59) × Days = its total; left out of the proposal while either is blank. It is a
+        # line of its own, not a table row, so no matching / encoding / "missing value" rule applies.
+        self._hotbed_widgets = []
+        hotbed_row = QHBoxLayout()
+        _hb_lbl = QLabel(f"PDMS — {pdms_defaults()['hotbed_label']}:")
+        _hb_lbl.setStyleSheet(f"color: {MUTED}; font-size: 11px;")
+        self._hotbed_incl_chk = QCheckBox("Include")
+        self._hotbed_incl_chk.setChecked(True)
+        self._hotbed_incl_chk.setToolTip(
+            "Ticked (standard): the Hotbed line is always in the proposal — with a rate and days it is "
+            "calculated; with one of them missing the line just carries what is given, with no total.\n"
+            "Unticked: a line with a rate and days is still calculated and included; an incomplete one "
+            "is left out.")
+        self._hotbed_rate_edit = QLineEdit(f"{float(pdms_defaults()['hotbed_rate']):g}")
+        self._hotbed_rate_edit.setFixedWidth(70)
+        self._hotbed_rate_edit.setToolTip("Rate per day. Standard 59; change it when this job differs.")
+        self._hotbed_days_edit = QLineEdit()
+        self._hotbed_days_edit.setFixedWidth(70)
+        self._hotbed_days_edit.setPlaceholderText("days")
+        self._hotbed_days_edit.setToolTip("Days of hotbed. With a rate and days the total is calculated; "
+                                          "without them the line is inserted without a total (see Include).")
+        self._hotbed_cur_combo = QComboBox()
+        self._hotbed_cur_combo.setToolTip("The currency of the Hotbed rate.")
+        self._hotbed_total_lbl = QLabel("")
+        self._hotbed_total_lbl.setStyleSheet(f"color: {MUTED}; font-size: 11px;")
+        for _w in (_hb_lbl, self._hotbed_incl_chk, QLabel("Rate"), self._hotbed_rate_edit, self._hotbed_cur_combo,
+                   QLabel("× Days"),
+                   self._hotbed_days_edit, self._hotbed_total_lbl):
+            hotbed_row.addWidget(_w)
+            self._hotbed_widgets.append(_w)
+        hotbed_row.addStretch()
+        gl.addLayout(hotbed_row)
+        self._hotbed_rate_edit.textChanged.connect(self._update_hotbed_total)
+        self._hotbed_days_edit.textChanged.connect(self._update_hotbed_total)
+        self._hotbed_incl_chk.toggled.connect(lambda _on: self._update_hotbed_total())
+        self._update_hotbed_total()                  # the label says what the line will do from the start
+        self._hotbed_cur_combo.currentTextChanged.connect(lambda _t: self._update_hotbed_total())
+        for _w in self._hotbed_widgets:
+            _w.setVisible(False)
+
         tot_row = QHBoxLayout()
         self._azn_onshore_lbl = QLabel("Project Support:  ₼ 0.00")
         self._azn_onshore_lbl.setStyleSheet(
@@ -1804,6 +2050,8 @@ class CTRGeneratorWidget(QWidget):
 
     def _build_equipment_section(self, parent_layout: QVBoxLayout):
         grp = QGroupBox("Plant & Equipment — USD")
+        self._groups = getattr(self, "_groups", {})
+        self._groups["equipment"] = grp
         grp.setStyleSheet(_group_css(CTR_COLOR))
         gl = QVBoxLayout(grp)
         gl.setSpacing(6)
@@ -1816,7 +2064,7 @@ class CTRGeneratorWidget(QWidget):
             "load the CTR Request before loading the Pricebook-Based files."
         )
         rematch_btn.setStyleSheet(_btn_style(CTR_COLOR, CTR_LIGHT))
-        rematch_btn.clicked.connect(self._rematch_all_equip)
+        rematch_btn.clicked.connect(lambda: self._ask_rematch("equipment"))
         top_btn_row.addWidget(rematch_btn)
 
         manage_btn = QPushButton("Manage Equipment Renames…")
@@ -1828,6 +2076,7 @@ class CTRGeneratorWidget(QWidget):
         top_btn_row.addWidget(manage_btn)
         top_btn_row.addStretch()
         gl.addLayout(top_btn_row)
+        gl.addWidget(self._rematch_note())
 
         search_row = QHBoxLayout()
         search_lbl = QLabel("Search:")
@@ -1885,6 +2134,8 @@ class CTRGeneratorWidget(QWidget):
 
     def _build_consumables_section(self, parent_layout: QVBoxLayout):
         grp = QGroupBox("Consumables — USD")
+        self._groups = getattr(self, "_groups", {})
+        self._groups["consumables"] = grp
         grp.setStyleSheet(_group_css(MUTED))
         gl = QVBoxLayout(grp)
         gl.setSpacing(4)
@@ -1897,7 +2148,7 @@ class CTRGeneratorWidget(QWidget):
             "loading the Pricebook-Based files."
         )
         rematch_btn.setStyleSheet(_btn_style(MUTED, "#F5F5F5"))
-        rematch_btn.clicked.connect(self._rematch_all_cons)
+        rematch_btn.clicked.connect(lambda: self._ask_rematch("consumables"))
         top_btn_row.addWidget(rematch_btn)
 
         manage_btn = QPushButton("Manage Consumables Renames…")
@@ -1909,6 +2160,7 @@ class CTRGeneratorWidget(QWidget):
         top_btn_row.addWidget(manage_btn)
         top_btn_row.addStretch()
         gl.addLayout(top_btn_row)
+        gl.addWidget(self._rematch_note())
 
         search_row = QHBoxLayout()
         search_lbl = QLabel("Search:")
@@ -1970,6 +2222,8 @@ class CTRGeneratorWidget(QWidget):
 
     def _build_extras_section(self, parent_layout: QVBoxLayout):
         grp = QGroupBox("Additional Info & Transport — AZN")
+        self._groups = getattr(self, "_groups", {})
+        self._groups["transport"] = grp
         grp.setStyleSheet(_group_css(CTR_COLOR))
         gl = QVBoxLayout(grp)
         gl.setSpacing(4)
@@ -2504,7 +2758,15 @@ class CTRGeneratorWidget(QWidget):
         consumables = cons_raw * (1.0 + markup)
         with_scaffold = self._stats_panel.include_scaffold()
         usd_total = equipment + consumables + (scaffold if with_scaffold else 0.0)
-        return {"manpower": manpower, "transport": transport, "azn_total": manpower + transport,
+        hotbed = 0.0                                      # the PDMS proposal's Hotbed line (rate × days, in manats)
+        hb = self._hotbed_values() if self._pdms_on() else None
+        if hb and hb["rate"] and hb["days"]:          # calculated only when both are given
+            code = (hb["currency"] or "AZN").upper()
+            d = self._fx.get(code)
+            rate = 1.0 if code == "AZN" else (cbar_rates.parse_typed_rate(d["edit"].text()) if d else None)
+            hotbed = hb["rate"] * hb["days"] * (rate if rate and rate > 0 else 0.0)
+        return {"manpower": manpower, "transport": transport, "hotbed": hotbed,
+                "azn_total": manpower + transport + hotbed,
                 "equipment": equipment, "scaffold": scaffold, "scaffold_included": with_scaffold,
                 "consumables": consumables, "markup": markup, "usd_total": usd_total, "left_out": left}
 
@@ -2534,6 +2796,10 @@ class CTRGeneratorWidget(QWidget):
                         if t["scaffold"] else "Scaffold not included")
         markup_txt = (f"with {t['markup'] * 100:g}% markup" if t["markup"] else
                       "without markup (tick “With markup” in Document price)")
+        pdms = self._pdms_on()
+        hb_on = pdms and self._hotbed_complete()
+        sign_usd = "₼" if pdms else "$"                    # PDMS mode: every amount is in manats
+        usd_note = ("<span style='color:#757575'>(converted to manats)</span> " if pdms else "")
         wait_note = (f"<br><span style='color:#E65100'>⏳ Waiting for Load Files — {waiting} line(s) cannot be "
                      "matched or priced yet, so they are not in these totals.</span>" if waiting else "")
         html = (
@@ -2541,13 +2807,20 @@ class CTRGeneratorWidget(QWidget):
             "<b>Price totals</b> — what this request bills (AZN and USD are never added together)"
             + wait_note
             + "<table cellspacing='2'>"
-            + row("AZN — Manpower", t["manpower"], "₼", note("manpower"))
+            + row("AZN — Manpower", t["manpower"], "₼",
+                  ("<span style='color:#757575'>(without the Hotbed line — it is listed below)</span> " if hb_on else "")
+                  + note("manpower"))
             + row("AZN — Transport (Third Party Activities)", t["transport"], "₼", note("transport"))
+            + (row("AZN — Hotbed (PDMS proposal)", t["hotbed"], "₼",
+                   ("<span style='color:#C62828'>(no CBAR rate for "
+                    f"{self._hotbed_cur_combo.currentText()} yet)</span>"
+                    if hb_on and not t["hotbed"] else "<span style='color:#757575'>rate × days</span>"))
+               if pdms else "")
             + row("AZN CTR total", t["azn_total"], "₼", bold=True)
-            + row("USD — Equipment", t["equipment"] + (t["scaffold"] if t["scaffold_included"] else 0.0), "$",
-                  scaffold_txt + note("equipment"))
-            + row("USD — Consumables", t["consumables"], "$", markup_txt + note("consumables"))
-            + row("USD CTR total", t["usd_total"], "$", bold=True)
+            + row("USD — Equipment", t["equipment"] + (t["scaffold"] if t["scaffold_included"] else 0.0), sign_usd,
+                  usd_note + scaffold_txt + note("equipment"))
+            + row("USD — Consumables", t["consumables"], sign_usd, usd_note + markup_txt + note("consumables"))
+            + row("USD CTR total", t["usd_total"], sign_usd, bold=True)
             + "</table></div>")
         self._price_totals_lbl.setText(html)
 
@@ -2816,6 +3089,7 @@ class CTRGeneratorWidget(QWidget):
                                 if self._stats_panel.markup_rate() else "without markup") + "."),
         ], columns=["Item", "Value"])
         pframes = self._stats_panel.price_report_frames()
+        overview_note = ""
         try:
             from io import BytesIO
             buf = BytesIO()
@@ -2829,9 +3103,18 @@ class CTRGeneratorWidget(QWidget):
                     for i, col in enumerate(df.columns, start=1):
                         longest = max([len(str(col))] + [len(str(v)) for v in df[col].head(200)])
                         ws.column_dimensions[ws.cell(row=1, column=i).column_letter].width = min(70, longest + 2)
+                if self._pdms_on():
+                    # "PDMS overview": the proposal's figures with their arithmetic, as the first sheet
+                    try:
+                        figures, hdr, days = self._pdms_overview_data()
+                        add_overview_sheet(writer.book, figures, hdr, days, index=0)
+                        writer.book.active = 0
+                    except Exception as exc:       # a missing rate / shift length must not lose the other sheets
+                        log.warning("PDMS overview sheet skipped: %s", exc)
+                        overview_note = f"\n\nThe PDMS overview sheet was NOT added: {exc}"
             path.write_bytes(buf.getvalue())
             log.info("Statistics saved: %s", path)
-            QMessageBox.information(self, "Saved", f"Statistics saved:\n{path}")
+            QMessageBox.information(self, "Saved", f"Statistics saved:\n{path}{overview_note}")
         except Exception as exc:
             log.exception("Failed to save statistics: %s", path)
             QMessageBox.critical(self, "Save error", str(exc))
@@ -2863,6 +3146,7 @@ class CTRGeneratorWidget(QWidget):
             # A blank mark-up is "no mark-up" (a stated case, e.g. the fuel
             # line), not a missing figure.
             "markup":      (_num(_TR_MARKUP) or 0.0) / 100.0,
+            "currency":    self._cell_currency("transport", self._transport_tbl, _TR_RATE, row),
         }
 
     def _append_transport_row(self, line: dict):
@@ -2909,9 +3193,11 @@ class CTRGeneratorWidget(QWidget):
         # Display only: a blank cell counts as 0 in the shown total; the row
         # is flagged and left out of the CTR until it is filled in.
         total = ((vals["quantity"] or 0.0) * (vals["rate_azn"] or 0.0)
-                 * (vals["duration"] or 0.0) * (1 + vals["markup"]))
+                 * (vals["duration"] or 0.0) * (1 + vals["markup"])
+                 * self._fx_factor("transport", self._transport_tbl, _TR_RATE, row))
         self._transport_tbl.blockSignals(True)
-        self._transport_tbl.setItem(row, _TR_TOTAL, _ro_item(f"{total:.2f}"))
+        self._transport_tbl.setItem(row, _TR_TOTAL, self._total_item(
+            total, "transport", self._transport_tbl, _TR_RATE, row))
         self._transport_tbl.blockSignals(False)
 
     # ── Section 3: Generate ──────────────────────────────────────────────────
@@ -2960,8 +3246,82 @@ class CTRGeneratorWidget(QWidget):
             "section header (\"Onshore Activities\" / \"Offshore Activities\")."
         )
 
+        # PDMS proposal mode: a Word proposal instead of the AZN / USD CTRs. The same rows
+        # and values; only the header differs (no Contract No / Sub-Client / Revision /
+        # Comments — a PRP number, the addressee and the signer instead). The two sets of
+        # rows share the same place in the layout: ticking the box swaps them, so the
+        # window does not grow.
+        dflt = pdms_defaults()
+        self._pdms_check = QCheckBox("PDMS proposal (Word) instead of AZN / USD CTR")
+        self._pdms_check.setToolTip(
+            "Generates the PDMS proposal (.docx) from the PDMS Template, with the same "
+            "calculated values. The AZN and USD Excel CTRs are not written.")
+        gl.addWidget(self._pdms_check)
+        row_prp, self._prp_edit      = _hdr_row("PRP No:")
+        row_cu,  self._customer_edit = _hdr_row("Customer:", dflt["customer_name"])
+        row_ci,  self._customer_city_edit = _hdr_row("Customer city:", dflt["customer_city"])
+        row_at,  self._attention_edit = _hdr_row("Attention:")
+        row_ld,  self._letter_date_edit = _hdr_row("Letter date:", _date.today().strftime("%Y-%m-%d"))
+        row_sg,  self._signer_edit   = _hdr_row("Signer:", dflt["signer_name"])
+        row_st,  self._signer_title_edit = _hdr_row("Signer title:", dflt["signer_title"])
+        self._prp_edit.setPlaceholderText("e.g. PRP-26-056")
+        self._attention_edit.setToolTip(
+            "Filled from the requester in the CTR Request; \"Dear …,\" uses its first name.")
+        # CBAR rates: one indented line per turned-on currency (Settings), each with its own
+        # Reload button. PROVISIONAL (task log MA202): the proposal converts every price that is
+        # not in AZN with these rates; how the colleagues want it done is not confirmed yet.
+        self._fx: dict[str, dict] = {}
+        self._cbar_worker = None
+        self._fx_group = QWidget()
+        self._fx_lay = QVBoxLayout(self._fx_group)
+        self._fx_lay.setContentsMargins(0, 2, 0, 2)
+        self._fx_lay.setSpacing(2)
+        # The currency each category is priced in unless a row says otherwise (the ones the CTRs use),
+        # and the currency of the Hotbed rate. A row's own Currency cell wins.
+        self._cat_widget = QWidget()
+        _cl = QHBoxLayout(self._cat_widget)
+        _cl.setContentsMargins(0, 0, 0, 0)
+        _cat_lbl = QLabel("Default currency:")
+        _cat_lbl.setStyleSheet(f"color: {MUTED}; font-size: 11px;")
+        _cl.addWidget(_cat_lbl)
+        self._cat_combos: dict[str, QComboBox] = {}
+        for _key, _title in (("manpower", "Manpower"), ("equipment", "Equipment"),
+                             ("consumables", "Consumables"), ("transport", "Transport")):
+            _l = QLabel(_title)
+            _l.setStyleSheet(f"color: {MUTED}; font-size: 11px;")
+            _c = QComboBox()
+            _c.setToolTip(f"The currency the {_title.lower()} prices are in unless a row's Currency cell says otherwise.")
+            self._cat_combos[_key] = _c
+            _cl.addWidget(_l)
+            _cl.addWidget(_c)
+        _cl.addStretch(1)
+        self._normal_headers = {
+            key: {col: tbl.horizontalHeaderItem(col).text() for col in cols}
+            for key, tbl, cols in (("manpower", self._req_manpower_tbl, _PDMS_HEADERS["manpower"]),
+                                   ("equipment", self._req_equip_tbl, _PDMS_HEADERS["equipment"]),
+                                   ("consumables", self._req_cons_tbl, _PDMS_HEADERS["consumables"]),
+                                   ("transport", self._transport_tbl, _PDMS_HEADERS["transport"]))}
+        self._rebuild_fx_rows()
+        self.cbar_currencies_changed.connect(self._rebuild_fx_rows)
+        # A Rate / Price cell holds the number in its left half and its currency (a drop-down, shown
+        # as the currency's sign) in its right half; the currency is kept on the cell, not in a column.
+        for _key, _tbl, _col in self._money_columns():
+            _tbl.setItemDelegateForColumn(_col, _MoneyDelegate(_tbl, self, _key))
+            _tbl.cellChanged.connect(lambda r, c, cc=_col: c == cc and self._update_group_titles_soon())
+            _tbl.model().rowsInserted.connect(lambda *_a: self._update_group_titles_soon())
+            _tbl.model().rowsRemoved.connect(lambda *_a: self._update_group_titles_soon())
+        for _c in self._cat_combos.values():
+            _c.currentTextChanged.connect(lambda _t: (self._recalc_all_totals(), self._update_group_titles()))
+        self._pdms_rows = [row_prp, row_cu, row_ci, row_at, row_ld, row_sg, row_st]
+        self._ctr_only_rows = [row_sc, row_cna, row_cnu, row_rv, row_cm]
         for row in (row_c, row_sc, row_l, row_s, row_d, row_cna, row_cnu, row_rv, row_pt, row_cm):
             gl.addLayout(row)
+        for row in self._pdms_rows:
+            gl.addLayout(row)
+        gl.addWidget(self._fx_group)
+        gl.addWidget(self._cat_widget)
+        self._pdms_check.toggled.connect(self._set_pdms_mode)
+        self._set_pdms_mode(False)
 
         gl.addSpacing(6)
 
@@ -3171,6 +3531,7 @@ class CTRGeneratorWidget(QWidget):
         _edits = {
             "azn_template":   self._azn_tpl_edit,
             "usd_template":   self._usd_tpl_edit,
+            "pdms_template":  self._pdms_tpl_edit,
             "azn_pricebook":  self._azn_pb_edit,
             "sage_export":    self._sage_edit,
             "usd_pricebook":  self._usd_pb_edit,
@@ -3181,12 +3542,21 @@ class CTRGeneratorWidget(QWidget):
             val = s.value(f"paths/{key}", "")
             if val:
                 edit.setText(val)
+        for key, edit in self._pdms_remembered().items():
+            val = s.value(f"pdms/{key}", "")
+            if val:
+                edit.setText(val)
+        self._pdms_check.setChecked(str(s.value("pdms/enabled", "false")).lower() == "true")
 
     def save_settings(self) -> None:
         """Persist current paths to QSettings. Call from the parent closeEvent."""
         s = self._settings()
         s.setValue("paths/azn_template",  self._azn_tpl_edit.text())
         s.setValue("paths/usd_template",  self._usd_tpl_edit.text())
+        s.setValue("paths/pdms_template", self._pdms_tpl_edit.text())
+        for key, edit in self._pdms_remembered().items():
+            s.setValue(f"pdms/{key}", edit.text())
+        s.setValue("pdms/enabled", self._pdms_on())
         s.setValue("paths/azn_pricebook", self._azn_pb_edit.text())
         s.setValue("paths/sage_export",   self._sage_edit.text())
         s.setValue("paths/usd_pricebook", self._usd_pb_edit.text())
@@ -3194,6 +3564,385 @@ class CTRGeneratorWidget(QWidget):
         s.setValue("paths/output_dir",    self._out_dir_edit.text())
 
     # ── Presets ───────────────────────────────────────────────────────────────
+
+    # ── PDMS proposal mode ────────────────────────────────────────────────────
+
+    def _pdms_remembered(self) -> dict:
+        """The PDMS header fields that are remembered between runs (not PRP No / Attention /
+        Letter date: those belong to one proposal)."""
+        return {
+            "customer": self._customer_edit, "customer_city": self._customer_city_edit,
+            "signer": self._signer_edit, "signer_title": self._signer_title_edit,
+        }               # not the USD→AZN rate: it changes daily (see Reload CBAR)
+
+    def _hotbed_complete(self) -> bool:
+        """True when the Hotbed has both a rate and days (it is then calculated, whatever Include says)."""
+        hb = self._hotbed_values()
+        return bool(hb and hb["rate"] and hb["days"])
+
+    def _hotbed_values(self) -> dict | None:
+        """The Hotbed line as {"rate", "days"}, or None while the rate or the days is blank /
+        not a number (it is then left out — nothing is assumed)."""
+        rate = cbar_rates.parse_typed_rate(self._hotbed_rate_edit.text())
+        days = cbar_rates.parse_typed_rate(self._hotbed_days_edit.text())
+        rate = rate if rate is not None and rate > 0 else None
+        days = days if days is not None and days > 0 else None
+        # Complete: always in, calculated. Incomplete: in with just what is given while Include is
+        # ticked, otherwise left out (None).
+        if (rate is None or days is None) and not self._hotbed_incl_chk.isChecked():
+            return None
+        return {"rate": rate, "days": days, "currency": self._hotbed_cur_combo.currentText() or "AZN"}
+
+    def _update_hotbed_total(self) -> None:
+        hb = self._hotbed_values()
+        cur = self._hotbed_cur_combo.currentText() or "AZN"
+        if hb and hb["rate"] and hb["days"]:
+            self._hotbed_total_lbl.setText(f"= {hb['rate'] * hb['days']:,.2f} {cbar_rates.currency_sign(cur)}")
+        elif hb:
+            self._hotbed_total_lbl.setText("(inserted as given, no total)")
+        else:
+            self._hotbed_total_lbl.setText("(left out of the proposal)")
+        if hasattr(self, "_stats_panel"):              # the price totals and the manpower sums mention it
+            self._refresh_price_totals()
+            self._recalc_azn_totals()
+
+    # ── CBAR rates (PDMS proposal) ────────────────────────────────────────────
+
+    _FX_NOTE = ("PROVISIONAL: prices not in AZN are converted with these rates (then the consumables / "
+                "transport mark-up is added). How the colleagues want this done is not confirmed yet.")
+
+    def _rebuild_fx_rows(self) -> None:
+        """One indented line per turned-on currency (Settings): its rate, its own Reload button and
+        where the figure came from. Values already typed or fetched are kept."""
+        old = {code: (d["edit"].text(), d["date"]) for code, d in self._fx.items()}
+        self._fx_history = {code: (d.get("stamp", ""), d.get("action", "")) for code, d in self._fx.items()}
+        while self._fx_lay.count():
+            item = self._fx_lay.takeAt(0)
+            if item.widget() is not None:
+                item.widget().deleteLater()
+            elif item.layout() is not None:
+                while item.layout().count():
+                    w = item.layout().takeAt(0).widget()
+                    if w is not None:
+                        w.deleteLater()
+        self._fx = {}
+        head = QHBoxLayout()
+        lbl = QLabel("CBAR rates  (AZN per 1 unit)")
+        lbl.setStyleSheet(f"color: {MUTED}; font-size: 11px; font-weight: bold;")
+        lbl.setToolTip(self._FX_NOTE)
+        all_btn = QPushButton("Reload all")
+        all_btn.setToolTip("Fetch the latest official rates of every currency below.")
+        all_btn.clicked.connect(lambda: self._reload_cbar(None))
+        head.addWidget(lbl)
+        head.addStretch(1)
+        head.addWidget(all_btn)
+        self._fx_lay.addLayout(head)
+        self._fx_all_btn = all_btn
+        for code in cbar_rates.enabled_currencies():
+            row = QHBoxLayout()
+            row.setContentsMargins(16, 0, 0, 0)               # the indent
+            name = QLabel(f"{code} → AZN:")
+            name.setFixedWidth(95 - 16 + 16)
+            name.setStyleSheet(f"color: {MUTED}; font-size: 11px;")
+            edit = QLineEdit()
+            edit.setStyleSheet("background: #FFF3E0;")           # orange = provisional
+            btn = QPushButton("Reload")
+            btn.setFixedWidth(70)
+            note = QLabel("")
+            note.setStyleSheet(f"color: {MUTED}; font-size: 11px;")
+            for w in (name, edit, btn, note):
+                row.addWidget(w)
+            row.addStretch(1)
+            self._fx_lay.addLayout(row)
+            d = {"edit": edit, "btn": btn, "note": note, "date": None}
+            self._fx[code] = d
+            text, day = old.get(code, (None, None))
+            saved = None
+            if text is None:                                   # first time: what was saved last (no network)
+                saved = cbar_rates.saved_rate(code)
+                if saved:
+                    text, day = f"{saved[0]:.4f}", saved[1]
+                elif code == "USD":
+                    text = str(pdms_defaults()["default_usd_azn"])
+            edit.setText(text or "")
+            d["date"] = day
+            if code in old:                                     # kept across a rebuild
+                d["stamp"], d["action"] = self._fx_history.get(code, ("", ""))
+            elif saved:
+                self._fx_event(code, "Loaded from the last saved CBAR rate", stamp=cbar_rates.saved_checked_at(code))
+            elif code == "USD":                                 # the only currency with a built-in starting value
+                self._fx_event(code, "Default value, not fetched yet", stamp="")
+            else:
+                self._fx_event(code, "No rate yet", stamp="")
+            self._fx_note(code)
+            edit.textEdited.connect(lambda _t, c=code: self._on_fx_typed(c))   # any rate may be typed
+            edit.textChanged.connect(lambda _t: self._recalc_all_totals())
+            btn.clicked.connect(lambda _=False, c=code: self._reload_cbar([c]))
+        self._fx_group.setVisible(self._pdms_on())
+        self._refresh_currency_combos()
+        if hasattr(self, "_req_manpower_tbl"):
+            self._recalc_all_totals()
+
+    def _currency_choices(self) -> list[str]:
+        return ["AZN", *cbar_rates.enabled_currencies()]
+
+    def _refresh_currency_combos(self) -> None:
+        """AZN + the turned-on currencies in each category combo (and the Hotbed one); a choice that is
+        no longer offered falls back to the category's standard currency."""
+        std = pdms_defaults()["category_currencies"]
+        choices = self._currency_choices()
+        for key, combo in [*self._cat_combos.items(), ("hotbed", self._hotbed_cur_combo)]:
+            prev = combo.currentText()
+            combo.blockSignals(True)
+            combo.clear()
+            combo.addItems(choices)
+            want = prev if prev in choices else (std.get(key, "AZN") if std.get(key, "AZN") in choices else "AZN")
+            combo.setCurrentText(want)
+            combo.blockSignals(False)
+
+    def _switch_markup(self, pdms: bool) -> None:
+        """A PDMS proposal usually carries a 10 % mark-up, the CTRs 6.5 %: ticking PDMS puts the
+        PDMS figure in the Markup Rate box, unticking puts the value it had back. Either can be
+        changed by hand in between."""
+        spin = getattr(self, "_markup_spin", None)
+        if spin is None:
+            return
+        if pdms and getattr(self, "_markup_before_pdms", None) is None:
+            self._markup_before_pdms = spin.value()
+            spin.setValue(float(pdms_defaults()["markup_rate"]) * 100.0)
+        elif not pdms and getattr(self, "_markup_before_pdms", None) is not None:
+            spin.setValue(self._markup_before_pdms)
+            self._markup_before_pdms = None
+        spin.setToolTip(
+            ("USD consumables markup — written into the generated CTR's \"Mark up (For Consumables)\" cell. "
+             "Saved/loaded with presets." if not pdms else
+             "Mark-up added to the consumables (after the conversion to AZN) in the PDMS proposal. "
+             "Usually 10 %; change it when the job differs. Unticking PDMS puts the CTR value back."))
+
+    def _pdms_on(self) -> bool:
+        """True while the PDMS proposal box is ticked (False before the header block is built)."""
+        box = getattr(self, "_pdms_check", None)
+        return bool(box is not None and box.isChecked())
+
+    def _money_columns(self):
+        """(category, table, rate / price column) of the four tables."""
+        return (("manpower", self._req_manpower_tbl, _MP_RATE), ("equipment", self._req_equip_tbl, _EQ_RATE),
+                ("consumables", self._req_cons_tbl, _CS_PRICE), ("transport", self._transport_tbl, _TR_RATE))
+
+    def _cat_currency(self, key: str) -> str:
+        """A category's default currency: the box in PDMS mode, else the one its CTR is in."""
+        if self._pdms_on():
+            return self._cat_combos[key].currentText() or pdms_defaults()["category_currencies"][key]
+        return pdms_defaults()["category_currencies"][key]
+
+    def _cell_currency(self, key: str, tbl, col: int, row: int) -> str:
+        """The currency of a row's Rate / Price cell: its own choice, else its category's."""
+        it = tbl.item(row, col)
+        own = it.data(_CUR_ROLE) if it is not None else None
+        return str(own or self._cat_currency(key)).upper()
+
+    def _fx_factor(self, key: str, tbl, col: int, row: int) -> float:
+        """What a row's amounts are multiplied by to show manats: 1 outside PDMS mode (the tables
+        keep their CTR's own currency) and for AZN; the currency's CBAR rate otherwise (0 while it
+        has none — the total then shows 0.00 with a tooltip)."""
+        if not self._pdms_on():
+            return 1.0
+        code = self._cell_currency(key, tbl, col, row)
+        if code == "AZN":
+            return 1.0
+        d = self._fx.get(code)
+        rate = cbar_rates.parse_typed_rate(d["edit"].text()) if d else None
+        return rate if rate and rate > 0 else 0.0
+
+    def _total_item(self, total: float, key: str, tbl, col: int, row: int):
+        """A read-only Total cell; in PDMS mode it is in manats, and says so when a currency has no rate."""
+        item = _ro_item(f"{total:.2f}")
+        if self._pdms_on():
+            code = self._cell_currency(key, tbl, col, row)
+            if code != "AZN" and not self._fx_factor(key, tbl, col, row):
+                item.setToolTip(f"No CBAR rate for {code} yet — enter or reload it under CBAR rates.")
+        return item
+
+    def _recalc_all_totals(self) -> None:
+        """Every row's total again (a currency, a default or a rate changed), then the sums."""
+        for r in range(self._req_manpower_tbl.rowCount()):
+            self._recalc_manpower_row(r)
+        for r in range(self._req_equip_tbl.rowCount()):
+            self._recalc_equip_row(r)
+        for r in range(self._req_cons_tbl.rowCount()):
+            self._recalc_cons_row(r)
+        for r in range(self._transport_tbl.rowCount()):
+            self._recalc_transport_row(r)
+        if hasattr(self, "_markup_spin"):          # the sums exist once the Generate section is built
+            self._recalc_azn_totals()
+            self._recalc_usd_totals()
+
+    _GROUP_BASE = {"manpower": "Manpower", "equipment": "Plant & Equipment",
+                   "consumables": "Consumables", "transport": "Additional Info & Transport"}
+
+    def _update_group_titles_soon(self) -> None:
+        QTimer.singleShot(0, self._update_group_titles)
+
+    def _update_group_titles(self) -> None:
+        """"Equipment — USD, GBP": the category's currency first, then any other currency a row in
+        its table uses (outside PDMS mode just the CTR's own)."""
+        for key, tbl, col in self._money_columns():
+            main = self._cat_currency(key)
+            others = set()
+            if self._pdms_on():
+                others = {self._cell_currency(key, tbl, col, r) for r in range(tbl.rowCount())} - {main}
+            self._groups[key].setTitle(f"{self._GROUP_BASE[key]} — " + ", ".join([main, *sorted(others)]))
+
+    def _currencies_in_use(self) -> set[str]:
+        """Every currency a price may be in: the category defaults, the Hotbed's and any row's own
+        (AZN excluded: it needs no rate)."""
+        used = {self._cat_currency(k) for k in self._cat_combos}
+        _hb = self._hotbed_values()
+        if _hb and _hb["rate"]:
+            used.add(self._hotbed_cur_combo.currentText())
+        for key, tbl, col in self._money_columns():
+            for r in range(tbl.rowCount()):
+                used.add(self._cell_currency(key, tbl, col, r))
+        used.discard("AZN")
+        return used
+
+    def _fx_event(self, code: str, action: str, stamp: str | None = None) -> None:
+        """Remember what last happened to a rate and when (shown in the PDMS overview sheet)."""
+        d = self._fx[code]
+        d["action"] = action
+        d["stamp"] = _datetime.now().strftime("%Y-%m-%d %H:%M") if stamp is None else (
+            stamp.replace("T", " ")[:16] if stamp else "")
+
+    def _fx_note(self, code: str, warning: str = "") -> None:
+        d = self._fx[code]
+        if warning:
+            d["note"].setText("⚠ " + warning)
+            d["note"].setToolTip(warning)
+        elif d["date"]:
+            d["note"].setText(f"CBAR {d['date']}")
+            d["note"].setToolTip(self._FX_NOTE)
+        else:
+            d["note"].setText("typed by hand" if d["edit"].text().strip() else "no rate")
+            d["note"].setToolTip(self._FX_NOTE)
+
+    def _on_fx_typed(self, code: str) -> None:
+        """A typed rate is no longer CBAR's (and is never restricted)."""
+        self._fx[code]["date"] = None
+        self._fx_event(code, "Typed by hand")
+        self._fx_note(code)
+
+    def _fx_rates(self) -> dict[str, tuple[float | None, str | None]]:
+        """{code: (rate, CBAR day or None when typed)} for the turned-on currencies; the rate is
+        None while the field is blank / not a number. AZN is not listed (always 1)."""
+        return {c: (cbar_rates.parse_typed_rate(d["edit"].text()), d["date"]) for c, d in self._fx.items()}
+
+    def _reload_cbar(self, codes=None) -> None:
+        """Fetch the CBAR rates of the given currencies (None = every line) in the background and fill the fields.
+        A rate that looks unusual is shown to the user, who decides whether to use it (it may be right);
+        one that cannot be read keeps the old rate."""
+        if self._cbar_worker is not None and self._cbar_worker.isRunning():
+            return
+        codes = list(self._fx) if codes is None else list(codes)
+        if not codes:
+            return
+        for c in codes:
+            self._fx[c]["btn"].setEnabled(False)
+            self._fx[c]["btn"].setText("…")
+        self._fx_all_btn.setEnabled(False)
+        worker = _CbarWorker(codes, self)
+        self._cbar_worker = worker
+
+        def _restore_buttons():
+            for c in codes:
+                if c in self._fx:
+                    self._fx[c]["btn"].setEnabled(True)
+                    self._fx[c]["btn"].setText("Reload")
+            self._fx_all_btn.setEnabled(True)
+
+        def _done(results: dict):
+            _restore_buttons()
+            unusable = []
+            for code, res in results.items():
+                if code not in self._fx:
+                    continue
+                if res["error"]:                                  # nothing to approve: the entry cannot be read
+                    unusable.append(f"{code}: {res['error']}")
+                    self._fx_event(code, "Fetch could not be used — previous rate kept")
+                    self._fx_note(code, res["error"])
+                    continue
+                if res["warnings"]:
+                    # It may well be right (a real jump, a new peg): the user decides.
+                    why = "\n• ".join(res["warnings"])
+                    box = QMessageBox.question(
+                        self, f"CBAR {code} rate looks unusual",
+                        f"CBAR's {code} rate for {res['date']} is {res['rate']:.4f}, but:\n\n• {why}\n\n"
+                        f"It may still be correct. Use it? (No keeps {self._fx[code]['edit'].text() or 'the current rate'}.)",
+                        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                        QMessageBox.StandardButton.No)
+                    if box != QMessageBox.StandardButton.Yes:
+                        self._fx_event(code, f"Fetched {res['rate']:.4f} but not used (looked unusual) — previous rate kept")
+                        self._fx_note(code, "; ".join(res["warnings"]) + " — not used")
+                        continue
+                    cbar_rates.accept_snapshot(code, res["date"])    # the next start begins from it too
+                    self._fx_event(code, "Fetched from CBAR; looked unusual, approved by the user")
+                    self._fx[code]["edit"].setText(f"{res['rate']:.4f}")
+                    self._fx[code]["date"] = res["date"]
+                    self._fx_note(code)
+                    continue
+                self._fx[code]["edit"].setText(f"{res['rate']:.4f}")
+                self._fx[code]["date"] = res["date"]
+                self._fx_event(code, "Fetched from CBAR")
+                self._fx_note(code)
+            if unusable:
+                QMessageBox.warning(
+                    self, "CBAR rate unusable",
+                    "CBAR's entry could not be used — the rate that was in the field was kept:\n\n• "
+                    + "\n• ".join(unusable) + "\n\nType the rate you want.")
+
+        def _err(msg: str):
+            _restore_buttons()
+            QMessageBox.warning(self, "CBAR rate",
+                                "Could not get the CBAR rate — the rate in the field was kept; "
+                                f"type a rate if it is out of date.\n\n{msg}")
+
+        worker.finished.connect(_done)
+        worker.error.connect(_err)
+        worker.start()
+
+    @staticmethod
+    def _show_row(row: QHBoxLayout, visible: bool) -> None:
+        for i in range(row.count()):
+            w = row.itemAt(i).widget()
+            if w is not None:
+                w.setVisible(visible)
+
+    def _set_pdms_mode(self, on: bool) -> None:
+        """Swap the CTR-only header rows for the PDMS ones (the values of the hidden ones
+        are kept, so unticking brings them back)."""
+        for row in self._ctr_only_rows:
+            self._show_row(row, not on)
+        for row in self._pdms_rows:
+            self._show_row(row, on)
+        # Contract No does not exist in a proposal; the AZN / USD templates are not used
+        for edit in (self._azn_tpl_edit, self._usd_tpl_edit):
+            edit.setEnabled(not on)
+        self._pdms_tpl_edit.setEnabled(on)
+        for w in self._hotbed_widgets:
+            w.setVisible(on)
+        self._fx_group.setVisible(on)
+        self._cat_widget.setVisible(on)
+        self._switch_markup(on)
+        for tbl, key in ((self._req_manpower_tbl, "manpower"), (self._req_equip_tbl, "equipment"),
+                         (self._req_cons_tbl, "consumables"), (self._transport_tbl, "transport")):
+            for col, label in _PDMS_HEADERS[key].items():
+                hi = tbl.horizontalHeaderItem(col)
+                if hi is not None:
+                    hi.setText(label if on else self._normal_headers[key][col])
+            tbl.viewport().update()
+        self._recalc_all_totals()
+        self._update_group_titles()
+        if hasattr(self, "_stats_panel"):
+            self._refresh_price_totals()
 
     def _markup_rate(self) -> float:
         """Current markup rate as a fraction (e.g. 0.065), for build_usd()."""
@@ -3454,6 +4203,8 @@ class CTRGeneratorWidget(QWidget):
         # a second request clears the previous one's comments rather than
         # carrying them into an unrelated CTR.
         self._comments_edit.setText(data.get("comments", ""))
+        # PDMS proposal: the requester is the addressee. Written even when blank, like the comments.
+        self._attention_edit.setText(attention_from_requester(data.get("requester", "")))
         commencement = data.get("commencement_date")
         if commencement:
             try:
@@ -3558,6 +4309,40 @@ class CTRGeneratorWidget(QWidget):
         QMessageBox.critical(self, "CTR Request error", msg)
 
     # ── Matching against pricebook/SAGE ─────────────────────────────────────────
+
+    _REMATCH_WHAT = {
+        "manpower":    ("Re-match All Manpower", "the AZN pricebook", lambda s: s._rematch_all_manpower),
+        "equipment":   ("Re-match All Equipment", "the USD pricebook / Equipment Names DB", lambda s: s._rematch_all_equip),
+        "consumables": ("Re-match All Consumables", "SAGE", lambda s: s._rematch_all_cons),
+    }
+
+    def _rematch_note(self) -> QLabel:
+        """The short reminder shown under each table's Re-match button."""
+        lbl = QLabel("Re-matching re-reads each row's rate / price from its source: a rate you typed over is replaced, "
+                     "and in PDMS mode the cell's currency goes back to the category's. Editing Match By, Type, Shift, "
+                     "Shift Type or Encoding re-matches that row the same way.")
+        lbl.setWordWrap(True)
+        lbl.setStyleSheet(f"color: {MUTED}; font-size: 11px;")
+        return lbl
+
+    def _ask_rematch(self, key: str) -> None:
+        """The Re-match All buttons: say what will happen to the rows, and only go on after a Yes."""
+        title, source, runner = self._REMATCH_WHAT[key]
+        lines = [
+            f"Every row is looked up again in {source}.",
+            "• A rate / price you typed over is replaced by the one found there (or NONRECHARG when it is non-rechargeable).",
+            "• A row that finds no match keeps what it has, as ✓ Manual if it was already included.",
+            "• The matched item, the status and the total are updated to the new match.",
+        ]
+        if key == "manpower":
+            lines.append("• The quantity is worked out again from the working days × the shift length, unless you typed it.")
+        if self._pdms_on():
+            lines.append("• PDMS mode: each row's currency goes back to the category's default.")
+        answer = QMessageBox.question(
+            self, title, "\n".join(lines) + "\n\nGo on?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No)
+        if answer == QMessageBox.StandardButton.Yes:
+            runner(self)()
 
     def _rematch_all_manpower(self):
         for r in range(self._req_manpower_tbl.rowCount()):
@@ -4070,8 +4855,8 @@ class CTRGeneratorWidget(QWidget):
                 return 0.0
             item.setToolTip("")
             return v
-        total = _val(_MP_NUMEMP) * _val(_MP_QTY) * _val(_MP_RATE)
-        tbl.setItem(row, _MP_TOTAL, _ro_item(f"{total:.2f}"))
+        total = _val(_MP_NUMEMP) * _val(_MP_QTY) * _val(_MP_RATE) * self._fx_factor("manpower", tbl, _MP_RATE, row)
+        tbl.setItem(row, _MP_TOTAL, self._total_item(total, "manpower", tbl, _MP_RATE, row))
         tbl.blockSignals(False)
 
     def _rematch_manpower_row(self, row: int, learn_alias: bool = True):
@@ -4318,8 +5103,8 @@ class CTRGeneratorWidget(QWidget):
                 return 0.0
             item.setToolTip("")
             return v
-        total = _val(_EQ_QTY) * _val(_EQ_RATE) * _val(_EQ_DAYS)
-        tbl.setItem(row, _EQ_TOTAL, _ro_item(f"{total:.2f}"))
+        total = _val(_EQ_QTY) * _val(_EQ_RATE) * _val(_EQ_DAYS) * self._fx_factor("equipment", tbl, _EQ_RATE, row)
+        tbl.setItem(row, _EQ_TOTAL, self._total_item(total, "equipment", tbl, _EQ_RATE, row))
         tbl.blockSignals(False)
 
     def _rematch_equip_row(self, row: int, learn_alias: bool = True):
@@ -4538,8 +5323,8 @@ class CTRGeneratorWidget(QWidget):
                 return 0.0
             item.setToolTip("")
             return v
-        total = _val(_CS_QTY) * _val(_CS_PRICE)
-        tbl.setItem(row, _CS_TOTAL, _ro_item(f"{total:.2f}"))
+        total = _val(_CS_QTY) * _val(_CS_PRICE) * self._fx_factor("consumables", tbl, _CS_PRICE, row)
+        tbl.setItem(row, _CS_TOTAL, self._total_item(total, "consumables", tbl, _CS_PRICE, row))
         tbl.blockSignals(False)
 
     def _rematch_cons_row(self, row: int, learn_alias: bool = True):
@@ -4633,12 +5418,14 @@ class CTRGeneratorWidget(QWidget):
                 pass
 
         other_label = activities_label(self._project_type_edit.text())
-        self._azn_onshore_lbl.setText(f"Project Support:  ₼ {support_total:,.2f}")
+        self._azn_onshore_lbl.setText(f"Project Support:  ₼ {support_total:,.2f}")  # PDMS mode: all rows are in manats
         self._azn_offshore_lbl.setText(f"Total {other_label}:  ₼ {other_total:,.2f}")
         self._azn_third_party_lbl.setText(
             f"Total Third Party Activities:  ₼ {third_party_total:,.2f}")
         self._azn_total_lbl.setText(
-            f"AZN CTR Total:  ₼ {support_total + other_total + third_party_total:,.2f}")
+            f"AZN CTR Total:  ₼ {support_total + other_total + third_party_total:,.2f}"
+            + ("   (Hotbed not included — see the price totals)"
+               if self._pdms_on() and self._hotbed_complete() else ""))
 
     def _recalc_usd_totals(self):
         timer = getattr(self, "_stats_timer", None)
@@ -4670,10 +5457,12 @@ class CTRGeneratorWidget(QWidget):
         cons_with_markup = cons_raw * (1 + markup_pct / 100.0)
         ctr_total        = equip_total + cons_with_markup
 
-        self._usd_equip_lbl.setText(f"Equipment:  ${equip_total:,.2f}")
+        sign = "₼" if self._pdms_on() else "$"        # PDMS mode: the rows' totals are in manats
+        self._usd_equip_lbl.setText(f"Equipment:  {sign}{equip_total:,.2f}")
         self._usd_cons_lbl.setText(
-            f"Consumables (incl. {markup_pct:.2f}% markup):  ${cons_with_markup:,.2f}")
-        self._usd_total_lbl.setText(f"USD CTR Total:  ${ctr_total:,.2f}")
+            f"Consumables (incl. {markup_pct:.2f}% markup):  {sign}{cons_with_markup:,.2f}")
+        self._usd_total_lbl.setText(("Equipment + Consumables Total:  " if self._pdms_on()
+                                     else "USD CTR Total:  ") + f"{sign}{ctr_total:,.2f}")
 
     # ── Search filter ─────────────────────────────────────────────────────────
 
@@ -4723,6 +5512,187 @@ class CTRGeneratorWidget(QWidget):
 
     # ── Generate ──────────────────────────────────────────────────────────────
 
+    def _pdms_payload(self, pdms_tpl: str = "") -> dict:
+        """What the PDMS proposal (and the overview sheet) is made from, read from the header fields."""
+        return {
+            "template": pdms_tpl,
+            "rates":      {c: r for c, (r, _d) in self._fx_rates().items()},
+            "rates_used": {c: (r, d, "default" if (self._fx[c].get("action") or "").startswith("Default value") else None)
+                           for c, (r, d) in self._fx_rates().items() if c in self._currencies_in_use()},
+            "currencies": {k: c.currentText() for k, c in self._cat_combos.items()},
+            "hotbed":    self._hotbed_values(),
+            "header": {
+                "prp_number":     self._prp_edit.text().strip(),
+                "date":           self._letter_date_edit.text().strip(),
+                "customer_name":  self._customer_edit.text().strip(),
+                "customer_city":  self._customer_city_edit.text().strip(),
+                "attention_name": self._attention_edit.text().strip(),
+                "salutation_name": salutation_from_attention(self._attention_edit.text()),
+                "scope":          self._scope_edit.text().strip(),
+                "project_type":   self._project_type_edit.text().strip(),
+                "signer_name":    self._signer_edit.text().strip(),
+                "signer_title":   self._signer_title_edit.text().strip(),
+            },
+        }
+
+    def _pdms_overview_data(self) -> tuple[dict, dict, dict]:
+        """(figures, header, {currency: CBAR day or None}) for the "PDMS overview" sheet: the same rows
+        and the same arithmetic as the Word proposal. Raises ValueError when a figure is missing
+        (a currency without a rate, a manpower row without a shift length)."""
+        incomplete = self._incomplete_cells()
+        bad_rows = {(id(c["tbl"]), c["row"]) for c in incomplete}
+        rows = self._collect_rows(True, bad_rows)
+        job = self._pdms_payload()
+        data = compute_pdms(
+            rows["support_rows"], rows["other_rows"], rows["equip_rows"], rows["consump_rows"], job["header"],
+            job["rates"], self._markup_rate(), rows["third_party_rows"], job["hotbed"], job["currencies"])
+        info = {c: {"day": d["date"], "stamp": d.get("stamp", ""), "action": d.get("action", "")}
+                for c, d in self._fx.items()}
+        return data, job["header"], info
+
+    def _collect_rows(self, pdms_on: bool, bad_rows: set) -> dict:
+        """The rows that go into a generated document, read from the four tables: only rows with a
+        "✓" status and without a missing value (`bad_rows`). Shared by Generate and the PDMS overview."""
+        # Only rows with a "✓" status (matched against pricebook/SAGE, or
+        # manually added) are included — "✗ No match" rows are skipped so
+        # unmatched requests never silently appear in the output at rate 0.
+        support_rows, other_rows = [], []
+        mp_skipped = 0
+        incomplete_skipped = len(bad_rows)    # rows left out for a missing value
+        for r in range(self._req_manpower_tbl.rowCount()):
+            status_item = self._req_manpower_tbl.item(r, _MP_STATUS)
+            if not (status_item and status_item.text().startswith("✓")):
+                mp_skipped += 1
+                continue
+            if (id(self._req_manpower_tbl), r) in bad_rows:
+                continue
+            def _txt(c, _r=r):
+                item = self._req_manpower_tbl.item(_r, c)
+                return item.text().strip() if item else ""
+            # Every figure below was checked by _incomplete_cells: no stand-ins.
+            num_emp = float(_txt(_MP_NUMEMP))
+            qty     = float(_txt(_MP_QTY))
+            rate    = float(_txt(_MP_RATE))
+            shift      = _txt(_MP_SHIFT)
+            shift_type = _txt(_MP_SHIFTTYPE)
+            # "Normal" is the default Shift Type — worth calling out only
+            # when it's something else (Overtime/Rotational/Standby).
+            comment = f"{shift} Shift" if shift_type == "Normal" else f"{shift} Shift, {shift_type}"
+            # Shift length (hours) from the Encoding, e.g. NS-NAT-OFF-12 -> 12; the matched stock
+            # code is the fallback. The PDMS proposal needs it to show days and a day rate.
+            _dec = _decode_manpower_encoding_full(_txt(_MP_ENC))
+            _hours = _dec[3] if _dec else None
+            if not _hours:
+                _m = re.search(r"\(([^()]+)\)\s*$", _txt(_MP_MDESC))
+                _dc = _decode_azn_stock_code(_m.group(1)) if _m else None
+                _hours = _dc[3] if _dc else None
+            row_dict = {
+                # Comment is otherwise unused for a manpower row — this is
+                # the only place Shift/Shift Type end up in the generated
+                # CTR at all (they're used internally to pick the AZN
+                # pricebook rate, see _match_azn_labor, but never written
+                # to the output on their own).
+                "comment":       comment,
+                "num_employees": num_emp,
+                "description":   _txt(_MP_DESC),
+                "quantity":      qty,
+                "uom":           _txt(_MP_UOM),
+                "rate_azn":      rate,
+                "nationality":   _txt(_MP_NAT),
+                "hours_per_shift": float(_hours) if _hours else None,
+                "encoding":      _txt(_MP_ENC),
+                "currency":      self._cell_currency("manpower", self._req_manpower_tbl, _MP_RATE, r) if pdms_on else None,
+            }
+            if is_support_manpower(row_dict["description"]):
+                support_rows.append(row_dict)
+            else:
+                other_rows.append(row_dict)
+
+        equip_rows = []
+        eq_skipped = 0
+        for r in range(self._req_equip_tbl.rowCount()):
+            status_item = self._req_equip_tbl.item(r, _EQ_STATUS)
+            if not (status_item and status_item.text().startswith("✓")):
+                eq_skipped += 1
+                continue
+            if (id(self._req_equip_tbl), r) in bad_rows:
+                continue
+            def _etxt(c, _r=r):
+                item = self._req_equip_tbl.item(_r, c)
+                return item.text().strip() if item else ""
+            qty = float(_etxt(_EQ_QTY))     # checked by _incomplete_cells: no stand-ins
+            rate_txt = _etxt(_EQ_RATE)
+            try:
+                rate = float(rate_txt)
+            except ValueError:
+                # Only "NONRECHARG" gets here (checked) — passed through as-is
+                # so build_usd can print it instead of a misleading 0.00.
+                rate = rate_txt
+            days = float(_etxt(_EQ_DAYS))
+            # Always show the requested description as typed in the CTR
+            # Request, not the matched pricebook name — "Matched Item" is
+            # only an internal lookup key used to find the rate, and isn't
+            # client-facing text.
+            eq_desc_item = self._req_equip_tbl.item(r, _EQ_DESC)
+            sage_cost = self._sage_cost_of(eq_desc_item, _etxt(_EQ_MATCH) or _etxt(_EQ_CODE) or _etxt(_EQ_DESC))
+            equip_rows.append({
+                "description":  _etxt(_EQ_DESC),
+                "quantity":     qty,
+                "unit":         _etxt(_EQ_UNIT),
+                "rate_per_day": rate,
+                "days":         days,
+                "stock_code":   _etxt(_EQ_CODE),
+                "sage_cost":    sage_cost,
+                "currency":     self._cell_currency("equipment", self._req_equip_tbl, _EQ_RATE, r) if pdms_on else None,
+            })
+
+        consump_rows = []
+        cs_skipped = 0
+        for r in range(self._req_cons_tbl.rowCount()):
+            status_item = self._req_cons_tbl.item(r, _CS_STATUS)
+            if not (status_item and status_item.text().startswith("✓")):
+                cs_skipped += 1
+                continue
+            if (id(self._req_cons_tbl), r) in bad_rows:
+                continue
+            def _ctxt(c, _r=r):
+                item = self._req_cons_tbl.item(_r, c)
+                return item.text().strip() if item else ""
+            qty = float(_ctxt(_CS_QTY))     # checked by _incomplete_cells: no stand-ins
+            price_txt = _ctxt(_CS_PRICE)
+            try:
+                price = float(price_txt)
+            except ValueError:
+                # Only "NONRECHARG" gets here (checked) — passed through as-is
+                # so build_usd can print it instead of a misleading 0.00.
+                price = price_txt
+            # Same reasoning as equipment above — always show the requested
+            # description, not the internal matched-item name.
+            cs_desc_item = self._req_cons_tbl.item(r, _CS_DESC)
+            sage_cost = self._sage_cost_of(cs_desc_item, _ctxt(_CS_MATCH) or _ctxt(_CS_CODE) or _ctxt(_CS_DESC))
+            consump_rows.append({
+                "long_description":  _ctxt(_CS_DESC),
+                "local_expect_cost": price,
+                "unit_code":         _ctxt(_CS_UNIT),
+                "product":           _ctxt(_CS_CODE),
+                "quantity":          qty,
+                "sage_cost":         sage_cost,
+                "currency":          self._cell_currency("consumables", self._req_cons_tbl, _CS_PRICE, r) if pdms_on else None,
+            })
+
+        # Transport / hired services — the AZN CTR's "Third Party Activities"
+        # section. Nothing to match against a pricebook here, so every row is
+        # included — except one with a quantity, duration, unit or rate still
+        # missing (checked above), which is left out like any other.
+        third_party_rows = [
+            self._transport_row_values(r) for r in range(self._transport_tbl.rowCount())
+            if (id(self._transport_tbl), r) not in bad_rows
+        ]
+        return {"support_rows": support_rows, "other_rows": other_rows, "equip_rows": equip_rows,
+                "consump_rows": consump_rows, "third_party_rows": third_party_rows,
+                "mp_skipped": mp_skipped, "eq_skipped": eq_skipped, "cs_skipped": cs_skipped,
+                "incomplete_skipped": incomplete_skipped}
+
     def _generate(self):
         errors   = []
         warnings = []
@@ -4730,6 +5700,8 @@ class CTRGeneratorWidget(QWidget):
         azn_tpl    = self._azn_tpl_edit.text().strip()
         usd_tpl    = self._usd_tpl_edit.text().strip()
         output_dir = self._out_dir_edit.text().strip()
+        pdms_on    = self._pdms_on()
+        pdms_tpl   = self._pdms_tpl_edit.text().strip()
 
         # ── Required fields ────────────────────────────────────────────────────
         if not job_ref:
@@ -4737,15 +5709,29 @@ class CTRGeneratorWidget(QWidget):
         elif not job_ref.isdigit():
             errors.append("Job Ref must be a number (e.g. 217).")
 
-        if not azn_tpl:
-            errors.append("AZN Template not selected.")
-        elif not Path(azn_tpl).is_file():
-            errors.append(f"AZN Template not found: {azn_tpl}")
+        if pdms_on:
+            if not pdms_tpl:
+                errors.append("PDMS Template not selected.")
+            elif not Path(pdms_tpl).is_file():
+                errors.append(f"PDMS Template not found: {pdms_tpl}")
+            if not self._prp_edit.text().strip():
+                errors.append("PRP No is required for a PDMS proposal.")
+            _in_use = self._currencies_in_use()
+            for _code, (_rate, _day) in self._fx_rates().items():
+                if _code in _in_use and (_rate is None or _rate <= 0):
+                    errors.append(f"{_code}→AZN rate must be a positive number (e.g. 1.70) — prices are in {_code}.")
+            for _code in sorted(_in_use - set(self._fx)):
+                errors.append(f"{_code} is used but turned off in Settings → CBAR currencies.")
+        else:
+            if not azn_tpl:
+                errors.append("AZN Template not selected.")
+            elif not Path(azn_tpl).is_file():
+                errors.append(f"AZN Template not found: {azn_tpl}")
 
-        if not usd_tpl:
-            errors.append("USD Template not selected.")
-        elif not Path(usd_tpl).is_file():
-            errors.append(f"USD Template not found: {usd_tpl}")
+            if not usd_tpl:
+                errors.append("USD Template not selected.")
+            elif not Path(usd_tpl).is_file():
+                errors.append(f"USD Template not found: {usd_tpl}")
 
         if not output_dir:
             errors.append("Output folder not selected.")
@@ -4784,10 +5770,27 @@ class CTRGeneratorWidget(QWidget):
         if not self._client_edit.text().strip():
             warnings.append("Client is empty — the template cell will be left blank.")
 
-        if not self._contract_no_azn_edit.text().strip():
-            warnings.append("Contract No (AZN) is empty — the AZN CTR's Contract No will be left blank.")
-        if not self._contract_no_usd_edit.text().strip():
-            warnings.append("Contract No (USD) is empty — the USD CTR's Contract No will be left blank.")
+        if pdms_on:
+            if not self._attention_edit.text().strip():
+                warnings.append("Attention is empty — the proposal's \"Attention:\" and \"Dear …\" lines will be blank.")
+            warnings.append("The USD→AZN conversion of equipment and consumables is provisional "
+                            "(the colleagues' rule is not confirmed yet).")
+            for _code, (_rate, _day) in self._fx_rates().items():
+                if _code in self._currencies_in_use() and _day is None and _rate and _rate > 0:   # typed by hand: check it against the log (warn only)
+                    _hist = cbar_rates.history(_code)
+                    _ref = (_hist[-1][1], _hist[-1][0]) if _hist else None
+                    if _code == "USD":
+                        _msgs = cbar_rates.validate_typed_rate(str(_rate), _ref)
+                    else:
+                        _msgs = ([f"{_rate:g} differs by more than {cbar_rates.TYPED_WARN_PCT:g}% from CBAR's "
+                                  f"{_ref[0]:.4f} of {_ref[1]}."]
+                                 if _ref and abs(_rate - _ref[0]) / _ref[0] * 100 > cbar_rates.TYPED_WARN_PCT else [])
+                    warnings += [f"{_code}→AZN rate: {m}" for m in _msgs]
+        else:
+            if not self._contract_no_azn_edit.text().strip():
+                warnings.append("Contract No (AZN) is empty — the AZN CTR's Contract No will be left blank.")
+            if not self._contract_no_usd_edit.text().strip():
+                warnings.append("Contract No (USD) is empty — the USD CTR's Contract No will be left blank.")
 
         # Count includable rows to warn if everything is unmatched
         mp_includable = sum(
@@ -4877,128 +5880,26 @@ class CTRGeneratorWidget(QWidget):
 
         log.info("Generate clicked: job_ref=%s output_dir=%s", job_ref, output_dir)
 
-        # Only rows with a "✓" status (matched against pricebook/SAGE, or
-        # manually added) are included — "✗ No match" rows are skipped so
-        # unmatched requests never silently appear in the output at rate 0.
-        support_rows, other_rows = [], []
-        mp_skipped = 0
-        incomplete_skipped = len(bad_rows)    # rows left out for a missing value
-        for r in range(self._req_manpower_tbl.rowCount()):
-            status_item = self._req_manpower_tbl.item(r, _MP_STATUS)
-            if not (status_item and status_item.text().startswith("✓")):
-                mp_skipped += 1
-                continue
-            if (id(self._req_manpower_tbl), r) in bad_rows:
-                continue
-            def _txt(c, _r=r):
-                item = self._req_manpower_tbl.item(_r, c)
-                return item.text().strip() if item else ""
-            # Every figure below was checked by _incomplete_cells: no stand-ins.
-            num_emp = float(_txt(_MP_NUMEMP))
-            qty     = float(_txt(_MP_QTY))
-            rate    = float(_txt(_MP_RATE))
-            shift      = _txt(_MP_SHIFT)
-            shift_type = _txt(_MP_SHIFTTYPE)
-            # "Normal" is the default Shift Type — worth calling out only
-            # when it's something else (Overtime/Rotational/Standby).
-            comment = f"{shift} Shift" if shift_type == "Normal" else f"{shift} Shift, {shift_type}"
-            row_dict = {
-                # Comment is otherwise unused for a manpower row — this is
-                # the only place Shift/Shift Type end up in the generated
-                # CTR at all (they're used internally to pick the AZN
-                # pricebook rate, see _match_azn_labor, but never written
-                # to the output on their own).
-                "comment":       comment,
-                "num_employees": num_emp,
-                "description":   _txt(_MP_DESC),
-                "quantity":      qty,
-                "uom":           _txt(_MP_UOM),
-                "rate_azn":      rate,
-                "nationality":   _txt(_MP_NAT),
-            }
-            if is_support_manpower(row_dict["description"]):
-                support_rows.append(row_dict)
-            else:
-                other_rows.append(row_dict)
+        rows = self._collect_rows(pdms_on, bad_rows)
+        support_rows, other_rows = rows["support_rows"], rows["other_rows"]
+        equip_rows, consump_rows = rows["equip_rows"], rows["consump_rows"]
+        third_party_rows = rows["third_party_rows"]
+        mp_skipped, eq_skipped, cs_skipped = rows["mp_skipped"], rows["eq_skipped"], rows["cs_skipped"]
+        incomplete_skipped = rows["incomplete_skipped"]
 
-        equip_rows = []
-        eq_skipped = 0
-        for r in range(self._req_equip_tbl.rowCount()):
-            status_item = self._req_equip_tbl.item(r, _EQ_STATUS)
-            if not (status_item and status_item.text().startswith("✓")):
-                eq_skipped += 1
-                continue
-            if (id(self._req_equip_tbl), r) in bad_rows:
-                continue
-            def _etxt(c, _r=r):
-                item = self._req_equip_tbl.item(_r, c)
-                return item.text().strip() if item else ""
-            qty = float(_etxt(_EQ_QTY))     # checked by _incomplete_cells: no stand-ins
-            rate_txt = _etxt(_EQ_RATE)
-            try:
-                rate = float(rate_txt)
-            except ValueError:
-                # Only "NONRECHARG" gets here (checked) — passed through as-is
-                # so build_usd can print it instead of a misleading 0.00.
-                rate = rate_txt
-            days = float(_etxt(_EQ_DAYS))
-            # Always show the requested description as typed in the CTR
-            # Request, not the matched pricebook name — "Matched Item" is
-            # only an internal lookup key used to find the rate, and isn't
-            # client-facing text.
-            eq_desc_item = self._req_equip_tbl.item(r, _EQ_DESC)
-            sage_cost = self._sage_cost_of(eq_desc_item, _etxt(_EQ_MATCH) or _etxt(_EQ_CODE) or _etxt(_EQ_DESC))
-            equip_rows.append({
-                "description":  _etxt(_EQ_DESC),
-                "quantity":     qty,
-                "unit":         _etxt(_EQ_UNIT),
-                "rate_per_day": rate,
-                "days":         days,
-                "stock_code":   _etxt(_EQ_CODE),
-                "sage_cost":    sage_cost,
-            })
+        if pdms_on:
+            # The proposal's labour table shows days and a day rate; both come from the shift length.
+            _bad = [r_["description"] for r_ in support_rows + other_rows if not r_["hours_per_shift"]]
+            if _bad:
+                QMessageBox.critical(
+                    self, "Shift length missing",
+                    "The PDMS proposal shows days and a day rate, which need the shift length — the "
+                    "hours at the end of the Encoding (for example NS-NAT-OFF-12 = 12 hours). These "
+                    "manpower rows have none:\n\n• " + "\n• ".join(_bad[:15])
+                    + "\n\nChoose an Encoding for them (or set Match By to the exact stock code) and "
+                      "generate again.")
+                return
 
-        consump_rows = []
-        cs_skipped = 0
-        for r in range(self._req_cons_tbl.rowCount()):
-            status_item = self._req_cons_tbl.item(r, _CS_STATUS)
-            if not (status_item and status_item.text().startswith("✓")):
-                cs_skipped += 1
-                continue
-            if (id(self._req_cons_tbl), r) in bad_rows:
-                continue
-            def _ctxt(c, _r=r):
-                item = self._req_cons_tbl.item(_r, c)
-                return item.text().strip() if item else ""
-            qty = float(_ctxt(_CS_QTY))     # checked by _incomplete_cells: no stand-ins
-            price_txt = _ctxt(_CS_PRICE)
-            try:
-                price = float(price_txt)
-            except ValueError:
-                # Only "NONRECHARG" gets here (checked) — passed through as-is
-                # so build_usd can print it instead of a misleading 0.00.
-                price = price_txt
-            # Same reasoning as equipment above — always show the requested
-            # description, not the internal matched-item name.
-            cs_desc_item = self._req_cons_tbl.item(r, _CS_DESC)
-            sage_cost = self._sage_cost_of(cs_desc_item, _ctxt(_CS_MATCH) or _ctxt(_CS_CODE) or _ctxt(_CS_DESC))
-            consump_rows.append({
-                "long_description":  _ctxt(_CS_DESC),
-                "local_expect_cost": price,
-                "unit_code":         _ctxt(_CS_UNIT),
-                "product":           _ctxt(_CS_CODE),
-                "quantity":          qty,
-                "sage_cost":         sage_cost,
-            })
-
-        # Transport / hired services — the AZN CTR's "Third Party Activities"
-        # section. Nothing to match against a pricebook here, so every row is
-        # included — except one with a quantity, duration, unit or rate still
-        # missing (checked above), which is left out like any other.
-        third_party_rows = [
-            self._transport_row_values(r) for r in range(self._transport_tbl.rowCount())
-            if (id(self._transport_tbl), r) not in bad_rows
-        ]
 
         total_skipped = mp_skipped + eq_skipped + cs_skipped
         if total_skipped:
@@ -5024,6 +5925,7 @@ class CTRGeneratorWidget(QWidget):
             "required_info": list(self._required_info),
         }
         header_usd = {**_base, "contract_no": self._contract_no_usd_edit.text().strip()}
+        pdms_job = self._pdms_payload(pdms_tpl) if pdms_on else None
 
         worker = CTRWorker(
             support_rows  = support_rows,
@@ -5038,6 +5940,7 @@ class CTRGeneratorWidget(QWidget):
             header_azn    = header_azn,
             header_usd    = header_usd,
             markup_rate   = self._markup_rate(),
+            pdms          = pdms_job,
             parent        = self,
         )
         self._prune_workers()

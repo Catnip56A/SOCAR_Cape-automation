@@ -35,6 +35,7 @@ See [USER_GUIDE.md](USER_GUIDE.md) for full step-by-step usage of all three tool
 - Fills the AZN and USD CTR templates with all rows, totals, and header fields, and exports each to PDF via LibreOffice
 - A **Settings** window (gear button at the left of the tab bar) for the remembered SAGE path, folders and saved aliases / renames / presets (each list can be reset, with a backup copy)
 - Presets for recurring project field combinations (client, location, scope, revision, job ref, output folder)
+- A **PDMS proposal** mode: the same values written into a Word proposal from a tagged template (PRP number instead of a contract number), with every price (in its own currency, per category or per cell) converted to AZN at the CBAR rate; **Reload CBAR** fetches the official rate, every fetched rate is kept in a log (checked for typos) and the Inspector's CBAR tab plots it and lists the documents that used each rate
 
 ### CTR Tracker
 - Reads a generated CTR's header fields and cost-breakdown totals straight off the file (client, CTR number, date, revision, description, value, currency, Location)
@@ -158,6 +159,9 @@ SOCAR_Cape-automation/
 │   ├── window.py            # CTR Generator tab
 │   ├── builder_azn.py       # AZN CTR spreadsheet writer
 │   ├── builder_usd.py       # USD CTR spreadsheet writer
+│   ├── builder_pdms.py      # PDMS proposal (Word) writer: fills the tagged template
+│   ├── cbar_rates.py        # CBAR rates: fetch, log, validation, which documents used them
+│   ├── pdms_overview.py     # "PDMS overview" sheet of the statistics workbook (the proposal's figures with formulas)
 │   ├── parser.py            # CTR Request / Combined DB parsing
 │   ├── pdf_exporter.py      # LibreOffice-based xlsx → PDF export
 │   ├── config.py            # Loads template_config.json
@@ -165,7 +169,7 @@ SOCAR_Cape-automation/
 │   ├── tracker.py           # CTR Tracker data model + CTR-file field extraction
 │   ├── tracker_fast.py      # Raw-XML write path (normal case)
 │   ├── tracker_xlwings.py   # Excel-COM write path (row-insert fallback, Windows + Excel only)
-│   ├── inspector.py         # F12 Inspector dock (read-only: logs, data, storage, threads, variables, tasks, charts)
+│   ├── inspector.py         # F12 Inspector dock (read-only: logs, data, storage, threads, variables, tasks, charts, CBAR rates)
 │   ├── tasks.py             # Ordered background tasks + "stop after current task" (used by the Inspector)
 │   ├── stockcode_types.py   # Equipment / Consumable list (file handling); the shipped stockcode_types.json is
 │   │                        #   hidden from git for privacy purposes and bundled into the .exe when present

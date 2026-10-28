@@ -97,6 +97,13 @@ _GEN: "W.CTRGeneratorWidget | None" = None
 
 def load_request(w) -> None:
     """(Re)load the test CTR Request into `w` — clears the tables first."""
+    w._pdms_check.setChecked(False)         # a test that ticked "PDMS proposal" must not leak into the next
+    w._hotbed_days_edit.setText("")
+    w._hotbed_rate_edit.setText(f"{float(W.pdms_defaults()['hotbed_rate']):g}")
+    w._hotbed_incl_chk.setChecked(True)
+    w._hotbed_cur_combo.setCurrentText(W.pdms_defaults()["category_currencies"]["manpower"])
+    for key, combo in w._cat_combos.items():
+        combo.setCurrentText(W.pdms_defaults()["category_currencies"][key])
     for t in (w._req_manpower_tbl, w._req_equip_tbl, w._req_cons_tbl, w._transport_tbl):
         t.setRowCount(0)
     w._stats_panel._manual.clear()
