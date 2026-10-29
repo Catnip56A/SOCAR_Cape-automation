@@ -1,31 +1,33 @@
 # Handoff — 2026-10-29
 
 ## Goal
-Release 1.0.23 (VERSION and CHANGELOG [1.0.23] written): the Ctrl+F crash fix, on top of 1.0.22 (PDMS proposal, CBAR rates/currencies, PDMS overview sheet), which the user verified on Windows (nine checks passed).
+CTR Generator 1.0.24 (in progress, not released): PDMS manpower in days, formulas in number cells, Reload. VERSION is still 1.0.23; no 1.0.24 CHANGELOG section yet.
 
-## Done (full offscreen suite 241/241 on the 1.0.23 state, 2026-10-29)
-- Ctrl+F crash fixed: the Windows crash.log (access violation in `common/find_bar.py`) came from the Find bar keeping matches of a results-table model that a new Compare had replaced (the bar was installed while the table had no model, so it never attached). `FindBar._attach_model` now follows the current model and `_goto` ignores foreign matches; `tests/test_find_bar.py` has a regression test that fails on the old code.
-- Version 1.0.23: VERSION, CHANGELOG [1.0.23] (the Ctrl+F entry moved out of [1.0.22]); `setup.iss` reads VERSION (no change); README/USER_GUIDE hold no version.
-- 1.0.22 delivered (committed c82f142, 88f6e06): PDMS Word proposal, Hotbed line, per-cell currencies with totals in manats, CBAR rates (log, validation, Yes/No for unusual rates, usage log, Inspector tab), PDMS overview sheet, Re-match All question, test-suite fixes.
-- Task log: 12 rows closed at 100 % under 1.0.22 (MA197–MA200, MA204, MA206–MA212); MA202, MA203 closed earlier; MA214 (Ctrl+F) at 100 % under 1.0.23 (Windows test of the build passed); backup `..._start_of_1.0.23.xlsx` made.
+## Done (offscreen tests only: new suites + ~25 neighbouring ones pass; full suite NOT run; user checked 1-5 of the formula list and "works" for pick/reload/rename popup on the real app)
+- Part 1 (commit a15b079): PDMS mode shows Manpower as Quantity (Days) / Rate/Day / UOM "Days" (hours ÷ shift length from the Encoding, hourly rate × shift length, 2 decimals, cells keep hours); a row with no shift length stays in hours with a red "!" + reason tooltip. Formulas `=1+2` (`common/formula.py`, `common/formula_widgets.py`): every number cell of the four request tables, Hotbed, CBAR rate boxes, Markup box, statistics Unit cost/Days (reopen on the formula; a formula in a Days cell is in days; stale once the value is rewritten elsewhere); hover text per column and on Totals.
+- Part 2 (commit 6e949ac): "Re-match All" → "Reload all" (+ Transport): re-reads the CTR Request file, replaces cells the user changed after a question. Ctrl+Shift+click picks cells (blue frame, clears row selection); on release a popup reloads every cell in picked rows × picked columns. A reloaded Description is the file's text; a popup asks whether to also delete the saved Description rename (Yes/No/Cancel).
+- Tests: test_pdms_days_view, test_formulas, test_reload; test_cbar_log's Re-match test rewritten.
 
 ## In progress / not fully done
-- Committed by the user: the fix (201b0ff) and the release (8fad0a3, VERSION 1.0.23); the working tree was clean. The user pushes (never me).
-- Task log: MA214 (the one 1.0.23 row) is 100 %; the 1.0.23 build passed its Windows test. MA127 is at 20 %, MA124 at 20 %.
+- Formulas are not saved in presets (only the Markup value); Markup formula is lost on preset load.
+- No hover meaning for the Hotbed total label; README/USER_GUIDE have no text for days view, formulas or Reload.
+- Not verified: Ctrl+Shift on Windows (may clash with the keyboard-layout shortcut); transport group got a note line — window height after Maximize not re-measured on Windows.
 
 ## Decisions (with reasoning)
-- The Find bar compares the view's current model on every use (weak reference) instead of relying on signals, because the model is replaced after the bar is created.
-- Onshore schedule-of-activities text stays the same as Offshore for now (MA201); wording/capitals wait for the commercial department (MA205); parked rows are changed at the end of feature development.
-- I never commit or push; I suggest commit titles. Windows checks are not listed as open issues.
+- A formula lives beside the value (`_FORMULA_ROLE` = formula, value text, unit) and is live only while the cell still holds that value: no hooks needed in re-match/reload code, and every `float(item.text())` reader stays untouched.
+- Reload builds the row with the first-load code (`_append_source_row`) and copies only the chosen cells; unpicked columns are never touched, even if the fresh row prices differently.
+- Editor state is kept on the delegate per cell, not on the editor object (the view hands delegates a fresh Python wrapper; a test holding the editor hid this bug).
+- Reload Description ignores saved renames (they are the per-category Description renames, not Match By aliases); the user decides about deleting them.
 
 ## Next
-1. Next version: different Onshore text (MA201); wording after the commercial department's first look (MA205); then the parked rows.
+1. Ask which Phase D is: PDMS overview sheet header block (`ctr_tools/pdms_overview.py` info list: add city, signer, signer title, client, sub-client, revision, contract no, project type, comments) or the header fields in the window; then do it.
+2. Then decide: formulas in presets; release steps for 1.0.24 (ask new release vs continuation; /release; README/USER_GUIDE; CHANGELOG).
 
 ## Open questions
-- None for 1.0.23. (MA201 and MA205 wait for the commercial department.)
+- Phase D meaning (above). Nothing else unresolved.
 
 ## Parked
-- MA124, MA127–MA130, MA133, MA194 stay until feature development ends; MA164, MA193 are the user's tests; Disparities segfault (crash.log 2026-10-15) not reproduced — note the 2026-10-29 crashes were the Find bar (fixed), not this one.
+- MA201/MA205 (Onshore text, wording) wait for the commercial department; MA124, MA127–MA130, MA133, MA194 until feature development ends; Disparities segfault (2026-10-15) not reproduced.
 
 ## Windows checks
-- None open: the 1.0.23 build (Ctrl+F fix) passed its Windows test.
+- Formulas typed in each table, Hotbed, CBAR, Markup, statistics cells; days view (normal/PDMS, "!" with Encoding cleared); Ctrl+Shift picks + popup + saved-rename question; "Reload all" for each of the four tables; window still fits when maximised.
