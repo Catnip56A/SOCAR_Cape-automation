@@ -47,5 +47,6 @@
   "1.0.22|MR vs CTR Comparator": "Clearer comparison tables: the rechargeable column is named plainly, an option compares only where the CTR has fewer than the MR, and missing values are shown in grey.",
   "1.0.22|Proposals / Documents": "A Word proposal for the PDMS company is produced from the same prices as the usual CTR, with prices in other currencies converted at the central bank's rate, plus an Excel overview of the same figures; checked on Windows.",
   "1.0.22|App-wide / Infrastructure": "The automatic checks of the app were repaired so a leftover from one check no longer makes later checks wait for minutes.",
-  "1.0.22|CTR Generator": "The Re-match All buttons now say what they will change and ask before they run."
+  "1.0.22|CTR Generator": "The Re-match All buttons now say what they will change and ask before they run.",
+  "1.0.23|App-wide / Infrastructure": "Fixed a crash that could happen when searching a results table with Ctrl+F after comparing again."
 }
