@@ -24,6 +24,7 @@ from stats import cost_stats as cs
 from common.attention import AttentionDelegate, mark_attention
 from common.find_bar import install_find
 from common.hover_text import install_elided_tooltips
+from common.formula import FormulaError, evaluate as evaluate_formula, format_number, is_formula
 from ctr_tools.parser import parse_equip_names_db, parse_sage, parse_usd_pricebook
 from ctr_tools.stockcode_types import confirm_types, current_types
 from ctr_tools.tasks import TASKS
@@ -442,6 +443,23 @@ class StatsWorker(QThread):
             self.done.emit(self._token, None, str(exc))
 
 
+class _FormulaTreeDelegate(AttentionDelegate):
+    """The statistics list's editable cells (Unit cost, Days) take formulas; a cell that holds the value
+    a formula gave opens on that formula."""
+
+    def __init__(self, tree, panel):
+        super().__init__(tree)
+        self._panel = panel
+
+    def setEditorData(self, editor, index):
+        super().setEditorData(editor, index)
+        item = self._panel._tree.itemFromIndex(index)
+        f = self._panel._formulas.get((index.column(), item.data(0, _ROLE_KEY), item.data(0, _ROLE_SIDE))) if item else None
+        if f and hasattr(editor, "setText") and item.text(index.column()).strip().replace(",", ".") == f[1]:
+            editor.setText(f[0])
+            editor.selectAll()
+
+
 class StatsPanel(QWidget):
     reload_requested = Signal()
     # A row was double-clicked: (side, document, Stock Code) — the Stock Code is "" for a
@@ -476,6 +494,7 @@ class StatsPanel(QWidget):
         self._type_rows: pd.DataFrame | None = None     # rows with their type resolved (for the decisions window)
         self._mode = MODE_COST
         self._days: dict[str, float] = {}           # typed-in days by Stock Code (price view)
+        self._formulas: dict = {}                    # (column, key, side) -> (formula, the value text it gave)
         self._days_editable: set[str] = set()       # Stock Codes whose days the user may type
         self._markup_rate = 0.0                     # fraction, set by the window (Generator spinbox)
         self._price_note = ""                       # e.g. "USD Pricebook not set", shown in the price view
@@ -609,7 +628,7 @@ class StatsPanel(QWidget):
         self._tree.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self._tree.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         # Red / orange cells keep their colours when their row is selected (see common/attention.py).
-        self._tree.setItemDelegate(AttentionDelegate(self._tree))
+        self._tree.setItemDelegate(_FormulaTreeDelegate(self._tree, self))
         # Opening a cell for editing blanks its warning text ("type days", "not in SAGE"); if the editor is
         # closed without writing anything the list is rebuilt, so the warning (text, orange / red) is still there.
         self._tree.itemDelegate().closeEditor.connect(lambda *_a: QTimer.singleShot(0, self.refresh))
@@ -1184,8 +1203,8 @@ class StatsPanel(QWidget):
         if not t:
             return True, None
         try:
-            v = float(t)
-        except ValueError:
+            v = evaluate_formula(t) if is_formula(t) else float(t)      # "=2*3.5" is worked out
+        except (ValueError, FormulaError):
             return False, None
         return (v >= 0 and v == v), (v if v >= 0 and v == v else None)
 
@@ -1252,7 +1271,13 @@ class StatsPanel(QWidget):
         if self._building or col not in self._editable_cols(item):
             return
         key = item.data(0, _ROLE_KEY)
-        ok, value = self.parse_days(item.text(col)) if col == C_DAYS else self._parse_cost(item.text(col))
+        typed = item.text(col)
+        ok, value = self.parse_days(typed) if col == C_DAYS else self._parse_cost(typed)
+        fkey = (col, key, item.data(0, _ROLE_SIDE))
+        if ok and value is not None and is_formula(typed):
+            self._formulas[fkey] = (typed.strip(), format_number(value))        # shown again when the cell is opened
+        else:
+            self._formulas.pop(fkey, None)
         if col == C_DAYS:
             if ok:
                 self.edit_days(key, item.data(0, _ROLE_SIDE), value)

@@ -42,6 +42,8 @@ from pathlib import Path
 
 import pandas as pd
 from ctr_tools import __version__ as _VERSION
+from common.formula_widgets import FormulaDoubleSpinBox, install_formula_edit
+from common.formula import FormulaError, evaluate as evaluate_formula, format_number, is_formula
 from PySide6.QtCore import (
     QEvent, Qt, QItemSelectionModel, QObject, QPoint, QRunnable, QSettings, QThread, QThreadPool, QTimer, Signal,
 )
@@ -201,7 +203,7 @@ _TRANSPORT_HEADERS = [
 # What the headers say in PDMS mode: a price is in its own cell's currency (the cell shows the
 # currency's sign), so the fixed AZN / USD goes from the Rate headers; every Total is in manats.
 _PDMS_HEADERS = {
-    "manpower":    {_MP_RATE: "Rate", _MP_TOTAL: "Total AZN"},
+    "manpower":    {_MP_QTY: "Quantity (Days)", _MP_RATE: "Rate/Day", _MP_TOTAL: "Total AZN"},
     "equipment":   {_EQ_RATE: "Rate/Day", _EQ_TOTAL: "Total AZN"},
     "consumables": {_CS_PRICE: "Unit Price", _CS_TOTAL: "Total AZN"},
     "transport":   {_TR_RATE: "Rate", _TR_TOTAL: "Total AZN"},
@@ -534,6 +536,7 @@ def _group_css(color: str) -> str:
 
 _JUMP_ROLE = Qt.UserRole + 5   # True on the one cell "Go to missing value" last jumped to
 _CUR_ROLE = Qt.UserRole + 50   # a Rate / Price cell's own currency code (None = its category's); PDMS mode
+_FORMULA_ROLE = Qt.UserRole + 51   # (formula text, the value text it gave, unit); live only while the cell still holds that value
 
 
 class _JumpOverlayDelegate(QStyledItemDelegate):
@@ -547,6 +550,15 @@ class _JumpOverlayDelegate(QStyledItemDelegate):
 
     @staticmethod
     def _paint_jump(painter, option, index):
+        f = index.data(_FORMULA_ROLE)
+        if f and str(index.data(Qt.ItemDataRole.EditRole)) == f[1]:       # a formula cell: small blue corner
+            painter.save()
+            r = option.rect
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor("#1976D2"))
+            painter.drawPolygon([QPoint(r.right() - 6, r.top() + 1), QPoint(r.right() - 1, r.top() + 1),
+                                 QPoint(r.right() - 1, r.top() + 6)])
+            painter.restore()
         if index.data(_JUMP_ROLE):
             painter.save()
             r = option.rect.adjusted(1, 1, -1, -1)
@@ -556,7 +568,135 @@ class _JumpOverlayDelegate(QStyledItemDelegate):
             painter.restore()
 
 
-class _MoneyDelegate(_JumpOverlayDelegate):
+class _DaysViewMixin:
+    """Number cells that take formulas ("=25/12"), and the manpower days view.
+
+    A formula is kept beside the value (_FORMULA_ROLE) and is live only while the cell still holds the
+    value it gave, so anything else that rewrites the cell (a re-match, a reload) retires it by itself.
+    PDMS mode shows a manpower row in days and a day rate (the proposal's own figures) while the table
+    keeps hours and the hourly rate; a formula typed there is in days. The owner's _days_view(index) says
+    what to show; a row without a shift length stays in hours and gets a red "!" whose tooltip says why."""
+
+    def _item(self, index):
+        return self.parent().item(index.row(), index.column())
+
+    # What an editor was opened on, per cell. Not kept on the editor: the view hands the delegate a fresh
+    # Python wrapper of its (C++) editor each time, so an attribute set on one is gone by setModelData.
+    def _remember(self, index, text: str) -> None:
+        self.__dict__.setdefault("_opened", {})[(index.row(), index.column())] = text
+
+    def _recall(self, index) -> str | None:
+        return self.__dict__.setdefault("_opened", {}).pop((index.row(), index.column()), None)
+
+    def _live_formula(self, index):
+        """(formula, value, unit) while the cell holds the value that formula gave, else None."""
+        item = self._item(index)
+        d = item.data(_FORMULA_ROLE) if item is not None else None
+        return d if d and item.text() == d[1] else None
+
+    def _unit(self, index):
+        v = self._owner._days_view(index)
+        return "days" if v and v["ph"] and index.column() in (_MP_QTY, _MP_RATE) else None
+
+    def _paint_bang(self, painter, option, index, left: bool) -> None:
+        v = self._owner._days_view(index)
+        if not v or not v["problem"]:
+            return
+        painter.save()
+        f = painter.font()
+        f.setBold(True)
+        painter.setFont(f)
+        painter.setPen(QColor("#C62828"))
+        flag = Qt.AlignmentFlag.AlignLeft if left else Qt.AlignmentFlag.AlignRight
+        painter.drawText(option.rect.adjusted(3, 0, -3, 0), int(flag | Qt.AlignmentFlag.AlignVCenter), "!")
+        painter.restore()
+
+    def helpEvent(self, event, view, option, index):
+        if event.type() == QEvent.Type.ToolTip:
+            tip = self._owner._cell_hint(index, self._live_formula(index), self._unit(index))
+            if tip:
+                QToolTip.showText(event.globalPos(), tip, view)
+                return True
+        return super().helpEvent(event, view, option, index)
+
+    def _editor_text(self, index) -> str:
+        """What the editor opens on: the live formula (if written in the way the cell is shown now),
+        else the shown number at full precision, else the stored text."""
+        live = self._live_formula(index)
+        if live and live[2] == self._unit(index):
+            return live[0]
+        v = self._owner._days_view(index)
+        return v["edit"] if v else str(index.data(Qt.ItemDataRole.EditRole) or "")
+
+    def _commit(self, model, index, typed: str, initial: str | None) -> None:
+        """Typed text -> the cell. A formula is worked out and kept; days / a day rate go back to hours /
+        an hourly rate; nothing is written when the box was left as it was opened (no float noise)."""
+        if typed == initial:
+            return
+        tbl, row, col = self.parent(), index.row(), index.column()
+        v = self._owner._days_view(index)
+        ph = v["ph"] if v else None
+        formula = None
+        if is_formula(typed):
+            try:
+                n = evaluate_formula(typed)
+            except FormulaError as exc:
+                QToolTip.showText(QCursor.pos(), f"Formula not accepted: {exc}. The cell keeps its value.", tbl)
+                return
+            formula, text = typed.strip(), None
+        else:
+            try:
+                n = float(typed)
+            except ValueError:
+                n, text = None, typed                                # not a number: stored as typed, as before
+            else:
+                text = typed if not ph else None
+        if n is not None and text is None:
+            back = (n * ph if col == _MP_QTY else n / ph) if ph else n
+            text = format_number(back)
+        item = tbl.item(row, col)
+        if item is not None:                                         # set silently; the text change below notifies
+            was = tbl.blockSignals(True)
+            item.setData(_FORMULA_ROLE, (formula, text, "days" if ph else None) if formula else None)
+            tbl.blockSignals(was)
+        model.setData(index, text, Qt.ItemDataRole.EditRole)
+
+
+class _DaysQtyDelegate(_DaysViewMixin, _JumpOverlayDelegate):
+    """A manpower number cell: formulas, and for Quantity / UOM days and "Days" in PDMS mode."""
+
+    def __init__(self, parent, owner):
+        super().__init__(parent)
+        self._owner = owner
+
+    def paint(self, painter, option, index):
+        v = self._owner._days_view(index)
+        if v is None:
+            return super().paint(painter, option, index)
+        opt = QStyleOptionViewItem(option)
+        self.initStyleOption(opt, index)
+        opt.text = v["shown"]
+        style = opt.widget.style() if opt.widget else QApplication.style()
+        style.drawControl(QStyle.ControlElement.CE_ItemViewItem, opt, painter, opt.widget)
+        self._paint_jump(painter, option, index)
+        if index.column() == _MP_QTY:
+            self._paint_bang(painter, option, index, left=False)
+
+    def setEditorData(self, editor, index):
+        if index.column() == _MP_UOM or not hasattr(editor, "setText"):
+            return super().setEditorData(editor, index)
+        text = self._editor_text(index)
+        editor.setText(text)
+        self._remember(index, text)
+        editor.selectAll()
+
+    def setModelData(self, editor, model, index):
+        if index.column() == _MP_UOM or not hasattr(editor, "text"):
+            return super().setModelData(editor, model, index)
+        self._commit(model, index, editor.text(), self._recall(index))
+
+
+class _MoneyDelegate(_DaysViewMixin, _JumpOverlayDelegate):
     """A Rate / Price cell in PDMS mode: the number in the left half and the currency in the right
     half, drawn as the currency's sign (₼ $ £ €). The editor is a number box plus a drop-down of
     the currency codes (AZN, USD, GBP …) that are turned on. Outside PDMS mode it is an ordinary cell."""
@@ -574,6 +714,9 @@ class _MoneyDelegate(_JumpOverlayDelegate):
     def parts(self, index) -> tuple[str, str]:
         """(the number as typed, the currency's sign); no sign for a text such as NONRECHARG."""
         text = str(index.data(Qt.ItemDataRole.DisplayRole) or "")
+        v = self._owner._days_view(index) if self._key == "manpower" else None
+        if v:
+            text = v["shown"]
         try:
             float(text)
         except ValueError:
@@ -621,6 +764,8 @@ class _MoneyDelegate(_JumpOverlayDelegate):
             painter.drawText(right, int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter), sign)
         painter.restore()
         self._paint_jump(painter, option, index)
+        if self._key == "manpower":
+            self._paint_bang(painter, option, index, left=True)
 
     def editorEvent(self, event, model, option, index):
         """A click on the right half (the currency) opens the drop-down at once; a click on the left half
@@ -655,9 +800,13 @@ class _MoneyDelegate(_JumpOverlayDelegate):
         return box
 
     def setEditorData(self, editor, index):
+        text = self._editor_text(index)
+        self._remember(index, text)
         if not self._active():
-            return super().setEditorData(editor, index)
-        editor._edit.setText(str(index.data(Qt.ItemDataRole.EditRole) or ""))
+            editor.setText(text)
+            editor.selectAll()
+            return
+        editor._edit.setText(text)
         code = str(index.data(_CUR_ROLE) or self._owner._cat_currency(self._key)).upper()
         if editor._combo.findText(code) < 0:                     # one that was turned off since: keep it visible
             editor._combo.addItem(code)
@@ -666,11 +815,11 @@ class _MoneyDelegate(_JumpOverlayDelegate):
 
     def setModelData(self, editor, model, index):
         if not self._active():
-            return super().setModelData(editor, model, index)
+            return self._commit(model, index, editor.text(), self._recall(index))
         chosen = editor._combo.currentText().upper()
         own = None if chosen == self._owner._cat_currency(self._key) else chosen   # the default follows the box
         model.setData(index, own, _CUR_ROLE)
-        model.setData(index, editor._edit.text(), Qt.ItemDataRole.EditRole)
+        self._commit(model, index, editor._edit.text(), self._recall(index))
 
 
 def _make_table(headers: list[str], stretch_col: int = 0) -> QTableWidget:
@@ -2007,6 +2156,8 @@ class CTRGeneratorWidget(QWidget):
         self._hotbed_days_edit.setPlaceholderText("days")
         self._hotbed_days_edit.setToolTip("Days of hotbed. With a rate and days the total is calculated; "
                                           "without them the line is inserted without a total (see Include).")
+        for _e in (self._hotbed_rate_edit, self._hotbed_days_edit):
+            install_formula_edit(_e)
         self._hotbed_cur_combo = QComboBox()
         self._hotbed_cur_combo.setToolTip("The currency of the Hotbed rate.")
         self._hotbed_total_lbl = QLabel("")
@@ -3305,6 +3456,11 @@ class CTRGeneratorWidget(QWidget):
         self.cbar_currencies_changed.connect(self._rebuild_fx_rows)
         # A Rate / Price cell holds the number in its left half and its currency (a drop-down, shown
         # as the currency's sign) in its right half; the currency is kept on the cell, not in a column.
+        for _tbl, _cols in ((self._req_manpower_tbl, (_MP_NUMEMP, _MP_QTY, _MP_UOM)),   # + days and "Days" in PDMS mode
+                            (self._req_equip_tbl, (_EQ_QTY, _EQ_DAYS)), (self._req_cons_tbl, (_CS_QTY,)),
+                            (self._transport_tbl, (_TR_QTY, _TR_DUR, _TR_MARKUP))):
+            for _c in _cols:                           # number cells that take a formula
+                _tbl.setItemDelegateForColumn(_c, _DaysQtyDelegate(_tbl, self))
         for _key, _tbl, _col in self._money_columns():
             _tbl.setItemDelegateForColumn(_col, _MoneyDelegate(_tbl, self, _key))
             _tbl.cellChanged.connect(lambda r, c, cc=_col: c == cc and self._update_group_titles_soon())
@@ -3339,7 +3495,7 @@ class CTRGeneratorWidget(QWidget):
         markup_row = QHBoxLayout()
         markup_lbl = QLabel("Markup Rate:")
         markup_lbl.setFixedWidth(70)
-        self._markup_spin = QDoubleSpinBox()
+        self._markup_spin = FormulaDoubleSpinBox()
         self._markup_spin.setFixedWidth(120)
         self._markup_spin.setRange(0.0, 100.0)
         self._markup_spin.setDecimals(2)
@@ -3645,6 +3801,8 @@ class CTRGeneratorWidget(QWidget):
             name.setFixedWidth(95 - 16 + 16)
             name.setStyleSheet(f"color: {MUTED}; font-size: 11px;")
             edit = QLineEdit()
+            edit.setToolTip(f"AZN per 1 {code} (CBAR). A formula such as =1.7*1.02 is allowed.")
+            install_formula_edit(edit)
             edit.setStyleSheet("background: #FFF3E0;")           # orange = provisional
             btn = QPushButton("Reload")
             btn.setFixedWidth(70)
@@ -3719,6 +3877,110 @@ class CTRGeneratorWidget(QWidget):
              "Mark-up added to the consumables (after the conversion to AZN) in the PDMS proposal. "
              "Usually 10 %; change it when the job differs. Unticking PDMS puts the CTR value back."))
 
+    def _row_shift_hours(self, row: int) -> float | None:
+        """A manpower row's shift length in hours: the end of its Encoding (NS-NAT-OFF-12 -> 12), else
+        the matched stock code's; None when neither gives one."""
+        tbl = self._req_manpower_tbl
+
+        def txt(c):
+            item = tbl.item(row, c)
+            return item.text().strip() if item else ""
+        dec = _decode_manpower_encoding_full(txt(_MP_ENC))
+        hours = dec[3] if dec else None
+        if not hours:
+            m = re.search(r"\(([^()]+)\)\s*$", txt(_MP_MDESC))
+            dc = _decode_azn_stock_code(m.group(1)) if m else None
+            hours = dc[3] if dc else None
+        return float(hours) if hours and float(hours) > 0 else None
+
+    _NUMBER_HINTS = {
+        ("equipment", _EQ_QTY):   "Number of units of this equipment.",
+        ("equipment", _EQ_RATE):  "Rate <b>per day</b> of the matched item (or the one typed over it); in PDMS mode in the cell's currency.",
+        ("equipment", _EQ_DAYS):  "Days the equipment is on the job. Total = Quantity × Rate × Days.",
+        ("consumables", _CS_QTY): "Number of units of this consumable.",
+        ("consumables", _CS_PRICE): "<b>Unit</b> price of the matched item (or the one typed over it); in PDMS mode in the cell's currency.",
+        ("transport", _TR_QTY):   "Number of units (vehicles, trips …).",
+        ("transport", _TR_DUR):   "Duration, counted in the UOM column (days, trips …). Total = Quantity × Rate × Duration × (1 + Mark Up).",
+        ("transport", _TR_MARKUP): "This line's mark-up in %, added on top of its cost.",
+    }
+
+    def _table_key(self, index) -> str | None:
+        m = index.model()
+        for key, tbl in (("manpower", self._req_manpower_tbl), ("equipment", self._req_equip_tbl),
+                         ("consumables", self._req_cons_tbl), ("transport", self._transport_tbl)):
+            if m is tbl.model():
+                return key
+        return None
+
+    def _cell_hint(self, index, live, unit) -> str | None:
+        """The tooltip (rich text) of a number cell: what the number means, with the formula behind it
+        when there is one. None = no tooltip of ours (the cell's own, if any)."""
+        lines = []
+        mp = index.model() is self._req_manpower_tbl.model()
+        v = self._days_view(index) if mp else None
+        if mp:
+            col = index.column()
+            ph = v["ph"] if v else None
+            if col == _MP_NUMEMP:
+                lines.append("Number of employees on this line.")
+            elif col == _MP_QTY and ph:
+                lines.append(f"Quantity in <b>days</b> = {index.data(Qt.ItemDataRole.EditRole)} h ÷ {ph:g} h per shift "
+                             f"(the shift length at the end of the Encoding) = {v['shown']}. The cell keeps the hours.")
+            elif col == _MP_QTY:
+                lines.append("Quantity in <b>hours</b> = working days × hours per shift (from the Encoding).")
+            elif col == _MP_RATE and ph:
+                lines.append(f"Rate <b>per day</b> = hourly rate {index.data(Qt.ItemDataRole.EditRole)} × {ph:g} h per shift "
+                             f"= {v['shown']}. The cell keeps the hourly rate.")
+            elif col == _MP_RATE:
+                lines.append("<b>Hourly</b> rate of the matched item (or the one typed over it).")
+            if v and v["problem"]:
+                lines.append(f"<span style='color:#C62828'><b>!</b> {v['problem']}</span>")
+        if not mp:
+            hint = self._NUMBER_HINTS.get((self._table_key(index), index.column()))
+            if hint:
+                lines.append(hint)
+        if live:
+            f = live[0]
+            note = "" if live[2] == unit else " (written in days; shown here as the value only)"
+            lines.append(f"<b>Formula:</b> {f} → {live[1]}{note}")
+        return "<br>".join(lines) if lines else None
+
+    def _days_view(self, index) -> dict | None:
+        """PDMS mode, manpower Quantity / UOM / Rate cell: what to show in days and a day rate
+        (hours / shift length, hourly rate x shift length, 2 decimals; the cell itself stays in hours).
+        {"shown", "edit" (full precision), "ph" (shift length or None), "problem" (reason or None)};
+        None when the cell is shown as it is."""
+        if (not self._pdms_on() or index.column() not in (_MP_QTY, _MP_UOM, _MP_RATE)
+                or index.model() is not self._req_manpower_tbl.model()):
+            return None
+        row, col = index.row(), index.column()
+        qty_item = self._req_manpower_tbl.item(row, _MP_QTY)
+        qty = (qty_item.text() if qty_item else "").strip()
+        try:
+            float(qty)
+        except ValueError:
+            return None                                    # nothing to convert yet
+        ph = self._row_shift_hours(row)
+        if col == _MP_UOM:
+            return {"shown": "Days" if ph else "Hours", "edit": "Days", "ph": ph, "problem": None}
+        text = str(index.data(Qt.ItemDataRole.EditRole) or "").strip()
+        try:
+            n = float(text)
+        except ValueError:
+            return None
+        if not ph:
+            enc = self._req_manpower_tbl.item(row, _MP_ENC)
+            enc = (enc.text().strip() if enc else "")
+            why = ("The row has no Encoding, so its shift length (hours per day) is unknown" if not enc else
+                   f"The Encoding {enc} has no shift length (hours per day) at its end")
+            return {"shown": text, "edit": text, "ph": None,
+                    "problem": f"{why}, and the matched stock code gives none, so the days and the day rate "
+                               "cannot be worked out. The cell shows the hours / the hourly rate. Choose an "
+                               "Encoding like NS-NAT-OFF-12 (the proposal cannot be generated for this row "
+                               "without it)."}
+        new = n / ph if col == _MP_QTY else n * ph
+        return {"shown": f"{new:.2f}", "edit": f"{new:.10g}", "ph": ph, "problem": None}
+
     def _pdms_on(self) -> bool:
         """True while the PDMS proposal box is ticked (False before the header block is built)."""
         box = getattr(self, "_pdms_check", None)
@@ -3757,10 +4019,18 @@ class CTRGeneratorWidget(QWidget):
     def _total_item(self, total: float, key: str, tbl, col: int, row: int):
         """A read-only Total cell; in PDMS mode it is in manats, and says so when a currency has no rate."""
         item = _ro_item(f"{total:.2f}")
+        recipe = {"manpower": "Num Employees × Quantity (hours) × Rate",
+                  "equipment": "Quantity × Rate/Day × Days",
+                  "consumables": "Quantity × Unit Price",
+                  "transport": "Quantity × Rate × Duration × (1 + Mark Up)"}[key]
         if self._pdms_on():
             code = self._cell_currency(key, tbl, col, row)
+            item.setToolTip(f"Total in manats = {recipe}"
+                            + ("" if code == "AZN" else f", converted from {code} with its CBAR rate") + ".")
             if code != "AZN" and not self._fx_factor(key, tbl, col, row):
                 item.setToolTip(f"No CBAR rate for {code} yet — enter or reload it under CBAR rates.")
+        else:
+            item.setToolTip(f"Total = {recipe}.")
         return item
 
     def _recalc_all_totals(self) -> None:
@@ -4789,6 +5059,7 @@ class CTRGeneratorWidget(QWidget):
             self._recalc_manpower_row(row)
         if col in (_MP_TYPE, _MP_SHIFT, _MP_SHIFTTYPE, _MP_ENC, _MP_MATCH, _MP_NUMEMP, _MP_QTY, _MP_RATE):
             self._recalc_azn_totals()
+        self._req_manpower_tbl.viewport().update()      # the days view follows the Encoding
 
     def _apply_desc_alias_manpower(self, row: int):
         """
@@ -5580,12 +5851,7 @@ class CTRGeneratorWidget(QWidget):
             comment = f"{shift} Shift" if shift_type == "Normal" else f"{shift} Shift, {shift_type}"
             # Shift length (hours) from the Encoding, e.g. NS-NAT-OFF-12 -> 12; the matched stock
             # code is the fallback. The PDMS proposal needs it to show days and a day rate.
-            _dec = _decode_manpower_encoding_full(_txt(_MP_ENC))
-            _hours = _dec[3] if _dec else None
-            if not _hours:
-                _m = re.search(r"\(([^()]+)\)\s*$", _txt(_MP_MDESC))
-                _dc = _decode_azn_stock_code(_m.group(1)) if _m else None
-                _hours = _dc[3] if _dc else None
+            _hours = self._row_shift_hours(r)
             row_dict = {
                 # Comment is otherwise unused for a manpower row — this is
                 # the only place Shift/Shift Type end up in the generated
