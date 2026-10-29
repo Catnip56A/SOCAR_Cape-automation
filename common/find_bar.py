@@ -13,6 +13,8 @@ around). While it moves, no cell editor is opened.
 
 from __future__ import annotations
 
+import weakref
+
 from PySide6.QtCore import QEvent, QItemSelectionModel, QModelIndex, QObject, Qt, QTimer
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
@@ -71,10 +73,8 @@ class FindBar(QFrame):
         self._timer.setInterval(250)
         self._timer.timeout.connect(self._text_changed)
         self._edit.textChanged.connect(lambda _t: self._timer.start())
-        m = view.model()
-        if m is not None:                                 # table content changed: forget the matches
-            for sig in (m.modelReset, m.layoutChanged, m.rowsInserted, m.rowsRemoved, m.dataChanged):
-                sig.connect(self._invalidate)
+        self._model_wr = None                             # the model the cache belongs to (weak)
+        self._attach_model()
         view.installEventFilter(self)                     # keep the bar in the corner on resize
         self.hide()
 
@@ -107,7 +107,24 @@ class FindBar(QFrame):
     def _invalidate(self, *_a) -> None:
         self._cache = None
 
+    def _attach_model(self) -> None:
+        """Follow the view's CURRENT model. A results table gets a brand-new model on every Compare (and
+        the bar is installed while the table still has none), so the matches found in an old model must
+        never be used again: they are references into a model that no longer exists, and using one
+        crashes the app (access violation). When the model has changed, the cache is dropped and the
+        "table content changed" signals are connected to the new model."""
+        m = self._view.model()
+        old = self._model_wr() if self._model_wr is not None else None
+        if m is old and (m is not None or self._model_wr is not None):
+            return
+        self._cache = None
+        self._model_wr = weakref.ref(m) if m is not None else None
+        if m is not None:
+            for sig in (m.modelReset, m.layoutChanged, m.rowsInserted, m.rowsRemoved, m.dataChanged):
+                sig.connect(self._invalidate)
+
     def _matches(self) -> list[QModelIndex]:
+        self._attach_model()
         text = self._edit.text().strip().lower()
         if self._cache is not None and self._cache_text == text:
             return self._cache
@@ -192,6 +209,8 @@ class FindBar(QFrame):
 
     def _goto(self, idx: QModelIndex) -> None:
         view = self._view
+        if not idx.isValid() or idx.model() is not view.model():      # a match from a model that is gone
+            return
         if isinstance(view, QTreeView):
             p = idx.parent()
             while p.isValid():

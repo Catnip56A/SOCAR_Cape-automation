@@ -114,3 +114,49 @@ def test_the_apps_own_tables_have_it():
     w = H.generator()
     for t in (w._req_manpower_tbl, w._req_equip_tbl, w._req_cons_tbl, w._transport_tbl, w._stats_panel._tree):
         assert hasattr(t, "_find_bar")
+
+
+def test_matches_from_a_replaced_model_are_never_used_again():
+    """The results tables get a new model on every Compare, and the bar is installed before the first one
+    exists. A cached match pointed into the old model; F3 / Ctrl+F then crashed the app (access violation)."""
+    import gc
+    view = QTableView()
+    view.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+    bar = install_find(view)                                   # installed while the table has no model, as in the app
+
+    def model(rows):
+        m = QStandardItemModel()
+        for row in rows:
+            m.appendRow([QStandardItem(v) for v in row])
+        return m
+    view.setModel(model([["apple", "x"], ["banana", "y"], ["bandana", "z"]]))
+    view.resize(500, 200)
+    view.show()
+    H.pump()
+    _search(bar, "an")
+    assert len(bar._matches()) == 2                            # banana, bandana: cached now
+    old_cache = bar._cache
+    assert old_cache is not None
+    view.setModel(model([["angle", "1"], ["anchor", "2"], ["other", "3"], ["grand", "4"]]))   # a new Compare
+    gc.collect()
+    H.pump()
+    found = bar._matches()                                     # the bar notices the new model when it is used next
+    assert found is not old_cache and bar._cache is found     # the old matches are dropped, not reused
+    assert [str(m.data()) for m in found] == ["angle", "anchor", "grand"]     # from the NEW model
+    assert all(m.model() is view.model() for m in found)
+    bar.step(1)                                                # F3 / Enter on the new content: no crash
+    assert view.currentIndex().model() is view.model() and view.currentIndex().data() in ("angle", "anchor", "grand")
+    bar.open_bar()                                             # and Ctrl+F
+    assert "of 3" in bar._count.text() or "3 matches" in bar._count.text()
+    # the new model's changes are noticed (the signals are connected to it)
+    view.model().appendRow([QStandardItem("bang"), QStandardItem("5")])
+    assert len(bar._matches()) == 4
+    # a stale match handed straight to _goto is ignored
+    stale_model = model([["anything"]])
+    stale = stale_model.index(0, 0)
+    before = view.currentIndex()
+    bar._goto(stale)
+    assert view.currentIndex() == before
+    # the model removed altogether
+    view.setModel(None)
+    assert bar._matches() == [] and bar._cache is not None
