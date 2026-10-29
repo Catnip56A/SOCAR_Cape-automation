@@ -536,6 +536,9 @@ def _group_css(color: str) -> str:
 
 _JUMP_ROLE = Qt.UserRole + 5   # True on the one cell "Go to missing value" last jumped to
 _CUR_ROLE = Qt.UserRole + 50   # a Rate / Price cell's own currency code (None = its category's); PDMS mode
+_SRC_ROLE = Qt.UserRole + 52      # on every cell of a row built from the CTR Request: (table, which request item)
+_LOADED_ROLE = Qt.UserRole + 53   # the text a cell had right after it was loaded (to tell what the user changed)
+_PICK_ROLE = Qt.UserRole + 54     # True on a cell picked with Ctrl+Shift+click for a reload
 _FORMULA_ROLE = Qt.UserRole + 51   # (formula text, the value text it gave, unit); live only while the cell still holds that value
 
 
@@ -558,6 +561,13 @@ class _JumpOverlayDelegate(QStyledItemDelegate):
             painter.setBrush(QColor("#1976D2"))
             painter.drawPolygon([QPoint(r.right() - 6, r.top() + 1), QPoint(r.right() - 1, r.top() + 1),
                                  QPoint(r.right() - 1, r.top() + 6)])
+            painter.restore()
+        if index.data(_PICK_ROLE):                                            # picked for a reload: blue frame
+            painter.save()
+            r = option.rect.adjusted(1, 1, -1, -1)
+            painter.fillRect(r, QColor(25, 118, 210, 70))
+            painter.setPen(QPen(QColor("#1976D2"), 2))
+            painter.drawRect(r)
             painter.restore()
         if index.data(_JUMP_ROLE):
             painter.save()
@@ -820,6 +830,43 @@ class _MoneyDelegate(_DaysViewMixin, _JumpOverlayDelegate):
         own = None if chosen == self._owner._cat_currency(self._key) else chosen   # the default follows the box
         model.setData(index, own, _CUR_ROLE)
         self._commit(model, index, editor._edit.text(), self._recall(index))
+
+
+class _PickFilter(QObject):
+    """Ctrl+Shift+click toggles a cell of a request table into the set picked for a reload (marked with a
+    blue frame, nothing is selected or edited); letting go of Ctrl and Shift asks whether to reload them.
+    Escape drops the picks."""
+
+    def __init__(self, owner, cat: str, tbl):
+        super().__init__(tbl)
+        self._owner, self._cat, self._tbl, self._viewport = owner, cat, tbl, tbl.viewport()
+
+    def eventFilter(self, obj, event):
+        try:
+            return self._filter(obj, event)
+        except RuntimeError:                                 # the table is already gone (the window is closing)
+            return False
+
+    def _filter(self, obj, event):
+        t = event.type()
+        mods = Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier
+        if obj is self._viewport and t in (QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonRelease,
+                                           QEvent.Type.MouseButtonDblClick):
+            if event.button() == Qt.MouseButton.LeftButton and event.modifiers() & mods == mods:
+                if t == QEvent.Type.MouseButtonPress:
+                    idx = self._tbl.indexAt(event.position().toPoint())
+                    if idx.isValid():
+                        self._tbl.clearSelection()                # the row picked by a plain click is let go of
+                        self._owner._toggle_pick(self._cat, idx.row(), idx.column())
+                return True                                  # no selection, no editor
+        elif obj is self._tbl and t == QEvent.Type.KeyRelease and event.key() in (Qt.Key.Key_Control, Qt.Key.Key_Shift):
+            if not (QApplication.keyboardModifiers() & mods) and self._owner._picks(self._cat):
+                QTimer.singleShot(0, lambda: self._owner._ask_reload_picked(self._cat))
+        elif obj is self._tbl and t == QEvent.Type.KeyPress and event.key() == Qt.Key.Key_Escape:
+            if self._owner._picks(self._cat):
+                self._owner._clear_picks(self._cat)
+                return True
+        return False
 
 
 def _make_table(headers: list[str], stretch_col: int = 0) -> QTableWidget:
@@ -2062,14 +2109,15 @@ class CTRGeneratorWidget(QWidget):
         gl.addWidget(info)
 
         top_btn_row = QHBoxLayout()
-        rematch_btn = QPushButton("Re-match All Manpower")
+        rematch_btn = QPushButton("Reload all Manpower")
         rematch_btn.setToolTip(
-            "Re-run matching for every Manpower row against the currently "
-            "loaded AZN pricebook. Use this if you load the CTR Request "
-            "before loading the Pricebook-Based files."
+            "Read every manpower row again from the CTR Request file (as it is now) and price it again. "
+            "Cells you changed are replaced after a question. To reload only some cells, hold "
+            "Ctrl+Shift and click them: on letting go you are asked, and every cell in the picked "
+            "rows and columns is reloaded."
         )
         rematch_btn.setStyleSheet(_btn_style(MR_COLOR, MR_LIGHT))
-        rematch_btn.clicked.connect(lambda: self._ask_rematch("manpower"))
+        rematch_btn.clicked.connect(lambda: self._ask_reload_all("manpower"))
         top_btn_row.addWidget(rematch_btn)
 
         manage_btn = QPushButton("Manage Manpower Renames…")
@@ -2208,14 +2256,15 @@ class CTRGeneratorWidget(QWidget):
         gl.setSpacing(6)
 
         top_btn_row = QHBoxLayout()
-        rematch_btn = QPushButton("Re-match All Equipment")
+        rematch_btn = QPushButton("Reload all Equipment")
         rematch_btn.setToolTip(
-            "Re-run matching for every Equipment row against the currently "
-            "loaded USD pricebook / Equipment Names DB. Use this if you "
-            "load the CTR Request before loading the Pricebook-Based files."
+            "Read every equipment row again from the CTR Request file (as it is now) and price it again. "
+            "Cells you changed are replaced after a question. To reload only some cells, hold "
+            "Ctrl+Shift and click them: on letting go you are asked, and every cell in the picked "
+            "rows and columns is reloaded."
         )
         rematch_btn.setStyleSheet(_btn_style(CTR_COLOR, CTR_LIGHT))
-        rematch_btn.clicked.connect(lambda: self._ask_rematch("equipment"))
+        rematch_btn.clicked.connect(lambda: self._ask_reload_all("equipment"))
         top_btn_row.addWidget(rematch_btn)
 
         manage_btn = QPushButton("Manage Equipment Renames…")
@@ -2292,14 +2341,15 @@ class CTRGeneratorWidget(QWidget):
         gl.setSpacing(4)
 
         top_btn_row = QHBoxLayout()
-        rematch_btn = QPushButton("Re-match All Consumables")
+        rematch_btn = QPushButton("Reload all Consumables")
         rematch_btn.setToolTip(
-            "Re-run matching for every Consumables row against the currently "
-            "loaded SAGE export. Use this if you load the CTR Request before "
-            "loading the Pricebook-Based files."
+            "Read every consumables row again from the CTR Request file (as it is now) and price it again. "
+            "Cells you changed are replaced after a question. To reload only some cells, hold "
+            "Ctrl+Shift and click them: on letting go you are asked, and every cell in the picked "
+            "rows and columns is reloaded."
         )
         rematch_btn.setStyleSheet(_btn_style(MUTED, "#F5F5F5"))
-        rematch_btn.clicked.connect(lambda: self._ask_rematch("consumables"))
+        rematch_btn.clicked.connect(lambda: self._ask_reload_all("consumables"))
         top_btn_row.addWidget(rematch_btn)
 
         manage_btn = QPushButton("Manage Consumables Renames…")
@@ -2417,10 +2467,19 @@ class CTRGeneratorWidget(QWidget):
         del_btn = QPushButton("Remove Selected Row")
         del_btn.setStyleSheet(_btn_style(MUTED, "#F5F5F5"))
         del_btn.clicked.connect(self._del_transport_row)
+        reload_btn = QPushButton("Reload all Transport")
+        reload_btn.setToolTip(
+            "Read every transport line again from the CTR Request file (as it is now) and the transport rates. "
+            "Cells you changed are replaced after a question. To reload only some cells, hold Ctrl+Shift "
+            "and click them.")
+        reload_btn.setStyleSheet(_btn_style(MUTED, "#F5F5F5"))
+        reload_btn.clicked.connect(lambda: self._ask_reload_all("transport"))
         btn_row.addWidget(add_btn)
         btn_row.addWidget(del_btn)
+        btn_row.addWidget(reload_btn)
         btn_row.addStretch()
         gl.addLayout(btn_row)
+        gl.addWidget(self._rematch_note())
 
         self._azn_third_party_lbl = QLabel("Total Third Party Activities:  ₼ 0.00")
         self._azn_third_party_lbl.setStyleSheet(
@@ -3452,6 +3511,7 @@ class CTRGeneratorWidget(QWidget):
                                    ("equipment", self._req_equip_tbl, _PDMS_HEADERS["equipment"]),
                                    ("consumables", self._req_cons_tbl, _PDMS_HEADERS["consumables"]),
                                    ("transport", self._transport_tbl, _PDMS_HEADERS["transport"]))}
+        self._install_reload_picking()
         self._rebuild_fx_rows()
         self.cbar_currencies_changed.connect(self._rebuild_fx_rows)
         # A Rate / Price cell holds the number in its left half and its currency (a drop-down, shown
@@ -4482,50 +4542,21 @@ class CTRGeneratorWidget(QWidget):
             except AttributeError:
                 self._date_edit.setText(str(commencement))
 
-        self._req_manpower_tbl.setRowCount(0)
-        for mp in data.get("manpower_rows", []):
-            self._append_manpower_row_from_request(mp)
-
-        self._req_equip_tbl.setRowCount(0)
-        for eq in data.get("equipment_rows", []):
-            self._append_equip_row_from_request(eq)
-
-        self._req_cons_tbl.setRowCount(0)
-        for cs in data.get("consumable_rows", []):
-            self._append_cons_row_from_request(cs)
-
-        # A requested scaffold tonnage is one more Plant & Equipment line.
-        # It carries no rate, so the pricebook lookup can't match it and it
-        # would be dropped from the output as an unmatched row — but the
-        # request did ask for scaffold, and the line has to appear whether
-        # or not anyone gets round to pricing it. Marked includable up
-        # front so it's written with its name, tonnage and TON; setting a
-        # rate later is what turns it into a non-zero cost.
+        self._clear_picks()
+        for tbl in self._reload_tables().values():
+            tbl.setRowCount(0)
+        for i in range(len(data.get("manpower_rows", []))):
+            self._append_source_row("manpower", i, data)
+        for i in range(len(data.get("equipment_rows", []))):
+            self._append_source_row("equipment", i, data)
+        for i in range(len(data.get("consumable_rows", []))):
+            self._append_source_row("consumables", i, data)
         scaffold = data.get("scaffold")
         if scaffold:
-            self._append_equip_row_from_request(_scaffold_request_item(scaffold))
-            row = self._req_equip_tbl.rowCount() - 1
-            # Scaffold is equipment but has no SAGE cost; the statistics box skips it.
-            self._req_equip_tbl.item(row, _EQ_DESC).setData(_SCAFFOLD_ROLE, True)
-            self._req_equip_tbl.blockSignals(True)
-            # Days is left empty rather than taking the usual 30-day default:
-            # the request block states no duration for scaffold, and a number
-            # nobody chose is worse than a blank cell asking to be filled in.
-            self._req_equip_tbl.setItem(row, _EQ_DAYS, QTableWidgetItem(""))
-            status = self._req_equip_tbl.item(row, _EQ_STATUS)
-            if status and not status.text().startswith("✓"):
-                self._req_equip_tbl.setItem(
-                    row, _EQ_STATUS, _ro_item("✓ Manual — set Rate/Day and Days to price it"))
-            self._req_equip_tbl.blockSignals(False)
-            _highlight_row(self._req_equip_tbl, row, True)
-            self._recalc_equip_row(row)
-
-        self._transport_tbl.setRowCount(0)
-        for tr in data.get("transport_rows", []):
-            for line in _transport_lines(
-                tr.get("transport_type", ""), tr.get("quantity", ""), tr.get("duration", "")
-            ):
-                self._append_transport_row(line)
+            self._append_source_row("equipment", "scaffold", data)
+        for i, tr in enumerate(data.get("transport_rows", [])):
+            for j in range(len(self._transport_lines_of(tr))):
+                self._append_source_row("transport", (i, j), data)
 
         self._required_info = [
             item["label"] for item in data.get("additional_info", []) if item.get("required")
@@ -4566,7 +4597,7 @@ class CTRGeneratorWidget(QWidget):
             f"or description fill in the rate automatically and mark the "
             f"row \"✓ Matched\". Edit \"Match By\" to fix a row marked "
             f"\"✗ No match\", or load the Pricebook-Based files and click "
-            f"\"Re-match All\". CTR Header Info fields in the Generate "
+            f"\"Reload all\". CTR Header Info fields in the Generate "
             f"section are pre-filled."
             + (("  Also read: " + "; ".join(extras) + ".") if extras else "")
         )
@@ -4580,39 +4611,365 @@ class CTRGeneratorWidget(QWidget):
 
     # ── Matching against pricebook/SAGE ─────────────────────────────────────────
 
-    _REMATCH_WHAT = {
-        "manpower":    ("Re-match All Manpower", "the AZN pricebook", lambda s: s._rematch_all_manpower),
-        "equipment":   ("Re-match All Equipment", "the USD pricebook / Equipment Names DB", lambda s: s._rematch_all_equip),
-        "consumables": ("Re-match All Consumables", "SAGE", lambda s: s._rematch_all_cons),
+    # ── Reload: read the CTR Request again ──────────────────────────────────────
+
+    _RELOAD_WHAT = {
+        "manpower":    ("Reload all Manpower", "the AZN pricebook"),
+        "equipment":   ("Reload all Equipment", "the USD pricebook / Equipment Names DB"),
+        "consumables": ("Reload all Consumables", "SAGE"),
+        "transport":   ("Reload all Transport", "the transport rates in template_config.json"),
     }
 
     def _rematch_note(self) -> QLabel:
-        """The short reminder shown under each table's Re-match button."""
-        lbl = QLabel("Re-matching re-reads each row's rate / price from its source: a rate you typed over is replaced, "
-                     "and in PDMS mode the cell's currency goes back to the category's. Editing Match By, Type, Shift, "
-                     "Shift Type or Encoding re-matches that row the same way.")
+        """The short reminder shown under each table's Reload all button."""
+        lbl = QLabel("Reload all reads each row again from the CTR Request file and prices it again: a cell you typed over "
+                     "or gave a formula is replaced (you are asked first), and in PDMS mode a rate's currency goes back "
+                     "to the category's. To reload only some cells, hold Ctrl+Shift and click them; on letting go you are "
+                     "asked, and every cell in the picked rows and columns is reloaded. Editing Match By, Type, Shift, "
+                     "Shift Type or Encoding re-matches that row.")
         lbl.setWordWrap(True)
         lbl.setStyleSheet(f"color: {MUTED}; font-size: 11px;")
         return lbl
 
-    def _ask_rematch(self, key: str) -> None:
-        """The Re-match All buttons: say what will happen to the rows, and only go on after a Yes."""
-        title, source, runner = self._REMATCH_WHAT[key]
-        lines = [
-            f"Every row is looked up again in {source}.",
-            "• A rate / price you typed over is replaced by the one found there (or NONRECHARG when it is non-rechargeable).",
-            "• A row that finds no match keeps what it has, as ✓ Manual if it was already included.",
-            "• The matched item, the status and the total are updated to the new match.",
-        ]
-        if key == "manpower":
-            lines.append("• The quantity is worked out again from the working days × the shift length, unless you typed it.")
+    def _reload_tables(self) -> dict:
+        return {"manpower": self._req_manpower_tbl, "equipment": self._req_equip_tbl,
+                "consumables": self._req_cons_tbl, "transport": self._transport_tbl}
+
+    @staticmethod
+    def _transport_lines_of(tr: dict) -> list[dict]:
+        return _transport_lines(tr.get("transport_type", ""), tr.get("quantity", ""), tr.get("duration", ""))
+
+    def _append_source_row(self, cat: str, seq, data: dict) -> int | None:
+        """Add the row for one item of a parsed CTR Request exactly as the first load does (this is what
+        a reload builds, too) and tag it with where it came from. Returns its row, or None when the
+        request has no such item (any more)."""
+        tbl = self._reload_tables()[cat]
+        try:
+            if cat == "manpower":
+                self._append_manpower_row_from_request(data["manpower_rows"][seq])
+            elif cat == "consumables":
+                self._append_cons_row_from_request(data["consumable_rows"][seq])
+            elif cat == "equipment" and seq == "scaffold":
+                if not data.get("scaffold"):
+                    return None
+                self._append_scaffold_row(data["scaffold"])
+            elif cat == "equipment":
+                self._append_equip_row_from_request(data["equipment_rows"][seq])
+            else:
+                i, j = seq
+                self._append_transport_row(self._transport_lines_of(data["transport_rows"][i])[j])
+        except (IndexError, KeyError, TypeError):
+            return None
+        r = tbl.rowCount() - 1
+        was = tbl.blockSignals(True)
+        for c in range(tbl.columnCount()):
+            it = tbl.item(r, c)
+            if it is not None:
+                it.setData(_SRC_ROLE, (cat, seq))
+                it.setData(_LOADED_ROLE, it.text())
+        tbl.blockSignals(was)
+        return r
+
+    def _append_scaffold_row(self, scaffold) -> None:
+        """A requested scaffold tonnage is one more Plant & Equipment line.
+        It carries no rate, so the pricebook lookup can't match it and it
+        would be dropped from the output as an unmatched row — but the
+        request did ask for scaffold, and the line has to appear whether
+        or not anyone gets round to pricing it. Marked includable up
+        front so it's written with its name, tonnage and TON; setting a
+        rate later is what turns it into a non-zero cost."""
+        self._append_equip_row_from_request(_scaffold_request_item(scaffold))
+        row = self._req_equip_tbl.rowCount() - 1
+        # Scaffold is equipment but has no SAGE cost; the statistics box skips it.
+        self._req_equip_tbl.item(row, _EQ_DESC).setData(_SCAFFOLD_ROLE, True)
+        self._req_equip_tbl.blockSignals(True)
+        # Days is left empty rather than taking the usual 30-day default:
+        # the request block states no duration for scaffold, and a number
+        # nobody chose is worse than a blank cell asking to be filled in.
+        self._req_equip_tbl.setItem(row, _EQ_DAYS, QTableWidgetItem(""))
+        status = self._req_equip_tbl.item(row, _EQ_STATUS)
+        if status and not status.text().startswith("✓"):
+            self._req_equip_tbl.setItem(
+                row, _EQ_STATUS, _ro_item("✓ Manual — set Rate/Day and Days to price it"))
+        self._req_equip_tbl.blockSignals(False)
+        _highlight_row(self._req_equip_tbl, row, True)
+        self._recalc_equip_row(row)
+
+    @staticmethod
+    def _row_source(tbl, row: int):
+        """(table, request item) a row was built from; None for a row added by hand."""
+        for c in range(tbl.columnCount()):
+            it = tbl.item(row, c)
+            src = it.data(_SRC_ROLE) if it is not None else None
+            if src:
+                return src
+        return None
+
+    @staticmethod
+    def _cell_changed_by_user(item) -> bool:
+        """The cell no longer holds what the load gave it, or holds a formula."""
+        if item is None:
+            return False
+        f = item.data(_FORMULA_ROLE)
+        if f and item.text() == f[1]:
+            return True
+        snap = item.data(_LOADED_ROLE)
+        return snap is not None and item.text() != snap
+
+    def _reload_counts(self, cat: str, rows, cols) -> dict:
+        """What a reload of rows x cols would touch, for the question that comes first."""
+        tbl = self._reload_tables()[cat]
+        n = {"cells": 0, "changed": 0, "rows": len(rows), "cols": len(cols), "manual": 0}
+        for r in rows:
+            if self._row_source(tbl, r) is None:
+                n["manual"] += 1
+                continue
+            for c in cols:
+                n["cells"] += 1
+                n["changed"] += self._cell_changed_by_user(tbl.item(r, c))
+        return n
+
+    _DESC_COL = {"manpower": _MP_DESC, "equipment": _EQ_DESC, "consumables": _CS_DESC}
+    _RENAME_CAT = {"manpower": "manpower", "equipment": "equipment", "consumables": "consumable"}
+
+    def _saved_rename_for_row(self, cat: str, row: int):
+        """(file's Description, saved rename) of a loaded row when the rename store has one for it, else None."""
+        tbl = self._reload_tables()[cat]
+        col = self._DESC_COL.get(cat)
+        item = tbl.item(row, col) if col is not None else None
+        raw = str(item.data(_DESC_ANCHOR_ROLE) or "").strip() if item is not None else ""
+        if not raw or self._row_source(tbl, row) is None:
+            return None
+        if cat == "manpower":
+            renamed = get_desc_rename(self._desc_renames, "manpower", raw)
+        else:
+            code_item = tbl.item(row, _EQ_CODE if cat == "equipment" else _CS_CODE)
+            renamed = _get_desc_rename_by_stock(self._desc_renames, self._RENAME_CAT[cat], raw,
+                                                code_item.text() if code_item else "")
+        return (raw, renamed) if renamed else None
+
+    def _renames_in_play(self, cat: str, rows, cols) -> list[tuple[str, str]]:
+        """The saved renames a reload of rows x cols would show the file's Description instead of."""
+        if self._DESC_COL.get(cat) not in set(cols):
+            return []
+        found = [self._saved_rename_for_row(cat, r) for r in sorted(rows)]
+        return sorted({f for f in found if f})
+
+    def _forget_rename(self, cat: str, raw: str, code: str) -> None:
+        store = self._RENAME_CAT[cat]
+        delete_desc_rename(self._desc_renames, store, raw)
+        if cat != "manpower":
+            delete_desc_rename(self._desc_renames, store, _stock_rename_key(raw, code))
+
+    def _reload_from_data(self, cat: str, rows, cols, data: dict, everything: bool = False,
+                          drop_renames: bool = False) -> dict:
+        """Read `rows` x `cols` of one table again from a parsed CTR Request. Each row is built fresh the way the
+        first load builds it and only the chosen cells are taken over, so a cell that is not chosen is left
+        as it is (even if the new row would price it differently). `everything` (Reload all) also adds the
+        request's items that have no row yet and prices the rows added by hand again. A reloaded Description is the
+        file's own text, not a saved rename of it; `drop_renames` also deletes that rename (the user is asked)."""
+        tbl = self._reload_tables()[cat]
+        dcol = self._DESC_COL.get(cat)
+        dropped = 0
+        status_col = {"manpower": _MP_STATUS, "equipment": _EQ_STATUS, "consumables": _CS_STATUS}.get(cat)
+        done = {"cells": 0, "changed": 0, "gone": 0, "added": 0, "manual": 0}
+        for r in sorted(rows):
+            src = self._row_source(tbl, r)
+            if src is None:                                    # added by hand: nothing in the file to read
+                if everything:
+                    rematch = {"manpower": self._rematch_manpower_row, "equipment": self._rematch_equip_row,
+                               "consumables": self._rematch_cons_row}.get(cat)
+                    if rematch:
+                        rematch(r)
+                        done["manual"] += 1
+                continue
+            tmp = self._append_source_row(cat, src[1], data)
+            if tmp is None:                                    # no longer in the file: left as it is
+                done["gone"] += 1
+                continue
+            was = tbl.blockSignals(True)
+            for c in cols:
+                done["changed"] += self._cell_changed_by_user(tbl.item(r, c))
+                new = tbl.takeItem(tmp, c)
+                if new is not None:
+                    if c == dcol:                                  # the file's own Description, not its saved rename
+                        raw = str(new.data(_DESC_ANCHOR_ROLE) or "")
+                        if raw:
+                            if drop_renames:
+                                code_item = tbl.item(r, _EQ_CODE if cat == "equipment" else _CS_CODE) if cat != "manpower" else None
+                                if self._saved_rename_for_row(cat, r):
+                                    self._forget_rename(cat, raw, code_item.text() if code_item else "")
+                                    dropped += 1
+                            new.setText(raw)
+                            new.setData(_LOADED_ROLE, raw)
+                    tbl.setItem(r, c, new)
+                    done["cells"] += 1
+            tbl.blockSignals(was)
+            tbl.removeRow(tmp)
+            status = tbl.item(r, status_col) if status_col is not None else None
+            if status is not None:
+                _highlight_row(tbl, r, status.text().startswith("✓"))
+        if everything:
+            have = {self._row_source(tbl, r)[1] for r in range(tbl.rowCount()) if self._row_source(tbl, r)}
+            for seq in self._request_seqs(cat, data):
+                if seq not in have and self._append_source_row(cat, seq, data) is not None:
+                    done["added"] += 1
+        if dropped:
+            save_desc_renames(self._desc_renames)
+        done["renames_dropped"] = dropped
+        self._recalc_all_totals()
+        if hasattr(self, "_stats_panel"):
+            self._refresh_stats()
+        tbl.viewport().update()
+        return done
+
+    @classmethod
+    def _request_seqs(cls, cat: str, data: dict) -> list:
+        if cat == "manpower":
+            return list(range(len(data.get("manpower_rows", []))))
+        if cat == "consumables":
+            return list(range(len(data.get("consumable_rows", []))))
+        if cat == "equipment":
+            return list(range(len(data.get("equipment_rows", [])))) + (["scaffold"] if data.get("scaffold") else [])
+        return [(i, j) for i, tr in enumerate(data.get("transport_rows", []))
+                for j in range(len(cls._transport_lines_of(tr)))]
+
+    def _start_reload(self, cat: str, rows, cols, everything: bool) -> None:
+        """Parse the CTR Request file again (it may have changed) and read rows x cols from it."""
+        path = self._combined_db_edit.text().strip()
+        if not path:
+            QMessageBox.warning(self, "Missing file", "Select the Combined DB file first (Source Files section above).")
+            return
+        rows, cols = sorted(rows), sorted(cols)
+        drop = False
+        renames = self._renames_in_play(cat, rows, cols)
+        if renames:                                              # a reloaded Description is the file's, not its rename
+            shown = "\n".join(f"   “{raw}”  →  “{new}”" for raw, new in renames[:6])
+            more = f"\n   … and {len(renames) - 6} more" if len(renames) > 6 else ""
+            Std = QMessageBox.StandardButton
+            answer = QMessageBox.question(
+                self, "Saved Description renames",
+                f"The reloaded Descriptions are the file's own text. {len(renames)} of them have a saved rename:\n\n"
+                f"{shown}{more}\n\n"
+                "Yes: also delete these saved renames (the next load shows the file's text too).\n"
+                "No: keep them (the next load renames these descriptions again).\n"
+                "Cancel: do not reload.",
+                Std.Yes | Std.No | Std.Cancel, Std.Cancel)
+            if answer == Std.Cancel:
+                return
+            drop = answer == Std.Yes
+        self._ctr_req_status.setText("Reloading from the CTR Request…")
+        worker = _CTRRequestWorker(path, parent=self)
+        self._prune_workers()
+        self._workers.append(worker)
+
+        def _done(data, cat=cat, rows=rows, cols=cols, everything=everything, drop=drop):
+            res = self._reload_from_data(cat, rows, cols, data, everything, drop)
+            self._clear_picks(cat)
+            bits = [f"{res['cells']} cell(s) read again"]
+            if res["changed"]:
+                bits.append(f"{res['changed']} of them were yours and are replaced")
+            if res["added"]:
+                bits.append(f"{res['added']} new row(s) added")
+            if res.get("renames_dropped"):
+                bits.append(f"{res['renames_dropped']} saved rename(s) deleted")
+            if res["manual"]:
+                bits.append(f"{res['manual']} row(s) added by hand priced again")
+            if res["gone"]:
+                bits.append(f"{res['gone']} row(s) are no longer in the file and stay as they are")
+            self._ctr_req_status.setText(f"{self._RELOAD_WHAT[cat][0]}: " + "; ".join(bits) + ".")
+
+        worker.finished.connect(_done)
+        worker.error.connect(self._on_ctr_error)
+        worker.start()
+
+    def _reload_note_lines(self, cat: str, counts: dict) -> list[str]:
+        lines = []
+        if counts["changed"]:
+            lines.append(f"• {counts['changed']} cell(s) you typed over or gave a formula will be replaced by what the file gives.")
+        else:
+            lines.append("• None of these cells has been changed by you.")
+        if cat == "manpower":
+            lines.append("• The quantity is worked out again from the working days × the shift length.")
         if self._pdms_on():
-            lines.append("• PDMS mode: each row's currency goes back to the category's default.")
+            lines.append("• PDMS mode: a reloaded rate / price goes back to the category's default currency.")
+        return lines
+
+    def _ask_reload_all(self, cat: str) -> None:
+        """The Reload all buttons: every row and column again from the CTR Request file."""
+        tbl = self._reload_tables()[cat]
+        title, source = self._RELOAD_WHAT[cat]
+        rows, cols = range(tbl.rowCount()), range(tbl.columnCount())
+        counts = self._reload_counts(cat, rows, cols)
+        text = "\n".join([
+            f"Every row is read again from the CTR Request file (as it is now) and priced again from {source}.",
+            *self._reload_note_lines(cat, counts),
+            "• Rows you added by hand are only priced again; rows new in the file are added; "
+            "rows no longer in the file stay as they are.",
+        ]) + "\n\nGo on?"
         answer = QMessageBox.question(
-            self, title, "\n".join(lines) + "\n\nGo on?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No)
+            self, title, text, QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No)
         if answer == QMessageBox.StandardButton.Yes:
-            runner(self)()
+            self._start_reload(cat, rows, cols, everything=True)
+
+    # ── Reload: pick cells with Ctrl+Shift+click ──────────────────────────────────
+
+    def _picks(self, cat: str) -> set[tuple[int, int]]:
+        tbl = self._reload_tables()[cat]
+        return {(r, c) for r in range(tbl.rowCount()) for c in range(tbl.columnCount())
+                if tbl.item(r, c) is not None and tbl.item(r, c).data(_PICK_ROLE)}
+
+    def _toggle_pick(self, cat: str, row: int, col: int) -> None:
+        tbl = self._reload_tables()[cat]
+        it = tbl.item(row, col)
+        if it is None:
+            return
+        was = tbl.blockSignals(True)
+        it.setData(_PICK_ROLE, None if it.data(_PICK_ROLE) else True)
+        tbl.blockSignals(was)
+        tbl.viewport().update()
+
+    def _clear_picks(self, cat: str | None = None) -> None:
+        for key, tbl in self._reload_tables().items():
+            if cat not in (None, key):
+                continue
+            was = tbl.blockSignals(True)
+            for r in range(tbl.rowCount()):
+                for c in range(tbl.columnCount()):
+                    it = tbl.item(r, c)
+                    if it is not None and it.data(_PICK_ROLE):
+                        it.setData(_PICK_ROLE, None)
+            tbl.blockSignals(was)
+            tbl.viewport().update()
+
+    def _ask_reload_picked(self, cat: str) -> None:
+        """Ctrl+Shift were let go with cells picked: reload every cell in the picked rows x picked columns?"""
+        picks = self._picks(cat)
+        if not picks:
+            return
+        rows, cols = {r for r, _c in picks}, {c for _r, c in picks}
+        counts = self._reload_counts(cat, rows, cols)
+        title = self._RELOAD_WHAT[cat][0].replace("Reload all", "Reload picked cells of")
+        text = "\n".join([
+            f"{len(picks)} cell(s) picked: {len(rows)} row(s) × {len(cols)} column(s).",
+            f"All {counts['cells']} cell(s) in those rows and columns are read again from the CTR Request file.",
+            *self._reload_note_lines(cat, counts),
+            *([f"• {counts['manual']} picked row(s) were added by hand: there is nothing in the file for them, "
+               "so they are left as they are."] if counts["manual"] else []),
+        ]) + "\n\nReload them?"
+        answer = QMessageBox.question(
+            self, title, text, QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No)
+        if answer == QMessageBox.StandardButton.Yes:
+            self._start_reload(cat, rows, cols, everything=False)
+
+    def _install_reload_picking(self) -> None:
+        for cat, tbl in self._reload_tables().items():
+            flt = _PickFilter(self, cat, tbl)
+            tbl.viewport().installEventFilter(flt)
+            tbl.installEventFilter(flt)
+            tbl._pick_filter = flt
 
     def _rematch_all_manpower(self):
         for r in range(self._req_manpower_tbl.rowCount()):

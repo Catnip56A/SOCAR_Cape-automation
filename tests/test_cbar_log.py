@@ -535,34 +535,34 @@ def test_markup_is_ten_percent_in_pdms_mode_and_the_ctr_value_otherwise():
     w._markup_spin.setValue(normal)
 
 
-def test_the_rematch_buttons_explain_the_consequences_and_only_go_on_after_a_yes():
+def test_the_reload_all_buttons_explain_the_consequences_and_only_go_on_after_a_yes():
     from PySide6.QtWidgets import QMessageBox
     from ctr_tools import window as W
     w = H.generator()
     w.show()
     w._pdms_check.setChecked(True)
     calls = []
-    w._rematch_all_equip = lambda: calls.append("equipment")          # what the Yes would run
+    w._start_reload = lambda cat, rows, cols, everything: calls.append((cat, everything))   # what the Yes would run
     real = QMessageBox.question
     asked = []
     try:
         QMessageBox.question = staticmethod(lambda parent, title, text, *a, **k: (asked.append((title, text)),
                                                                                   QMessageBox.StandardButton.No)[1])
-        w._ask_rematch("equipment")
-        assert calls == [] and len(asked) == 1                        # No: nothing is re-matched
+        w._ask_reload_all("equipment")
+        assert calls == [] and len(asked) == 1                        # No: nothing is reloaded
         title, text = asked[0]
-        assert title == "Re-match All Equipment" and "typed over is replaced" in text and "currency goes back" in text
+        assert title == "Reload all Equipment" and "CTR Request file" in text and "currency" in text
         QMessageBox.question = staticmethod(lambda parent, title, text, *a, **k: QMessageBox.StandardButton.Yes)
-        w._ask_rematch("equipment")
-        assert calls == ["equipment"]                                 # Yes: it runs
+        w._ask_reload_all("equipment")
+        assert calls == [("equipment", True)]                         # Yes: it runs, for everything
         asked.clear()
         QMessageBox.question = staticmethod(lambda parent, title, text, *a, **k: (asked.append(text), QMessageBox.StandardButton.No)[1])
         w._pdms_check.setChecked(False)
-        w._ask_rematch("manpower")
-        assert "currency goes back" not in asked[0] and "shift length" in asked[0]    # the PDMS line only in PDMS mode
+        w._ask_reload_all("manpower")
+        assert "currency" not in asked[0] and "shift length" in asked[0]    # the PDMS line only in PDMS mode
     finally:
         QMessageBox.question = real
-    assert w._rematch_note().text().startswith("Re-matching re-reads")
+    assert w._rematch_note().text().startswith("Reload all reads")
 
 
 def test_the_storage_list_and_the_snapshot_know_the_pdms_template_and_the_cbar_files():
