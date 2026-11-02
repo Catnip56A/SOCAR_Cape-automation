@@ -1,34 +1,33 @@
-# Handoff — 2026-10-29
+# Handoff — 2026-11-02
 
 ## Goal
-CTR Generator 1.0.24 (in progress, not released): PDMS manpower in days, formulas in number cells, Reload. VERSION is still 1.0.23; no 1.0.24 CHANGELOG section yet.
+CTR Generator / PDMS / MR vs CTR Comparator 1.0.24 — built and committed as the release (parts 1–3, last commit 45c0a91); VERSION is 1.0.24; the .exe has not been rebuilt.
 
-## Done (offscreen tests only: new suites + ~25 neighbouring ones pass; full suite NOT run; user checked 1-5 of the formula list and "works" for pick/reload/rename popup on the real app)
-- Part 1 (commit a15b079): PDMS mode shows Manpower as Quantity (Days) / Rate/Day / UOM "Days" (hours ÷ shift length from the Encoding, hourly rate × shift length, 2 decimals, cells keep hours); a row with no shift length stays in hours with a red "!" + reason tooltip. Formulas `=1+2` (`common/formula.py`, `common/formula_widgets.py`): every number cell of the four request tables, Hotbed, CBAR rate boxes, Markup box, statistics Unit cost/Days (reopen on the formula; a formula in a Days cell is in days; stale once the value is rewritten elsewhere); hover text per column and on Totals.
-- Part 2 (commit 6e949ac): "Re-match All" → "Reload all" (+ Transport): re-reads the CTR Request file, replaces cells the user changed after a question. Ctrl+Shift+click picks cells (blue frame, clears row selection); on release a popup reloads every cell in picked rows × picked columns. A reloaded Description is the file's text; a popup asks whether to also delete the saved Description rename (Yes/No/Cancel).
-- Tests: test_pdms_days_view, test_formulas, test_reload; test_cbar_log's Re-match test rewritten.
+## Done (full offscreen suite 304/304 on the committed state; no real-Windows run yet)
+- PDMS: Manpower shown in days / day rate (cells keep hours); rows with no shift length skipped after a Yes/Cancel warning; overview sheet header lists the Word letter + CTR header fields; CTR header rows stay visible in PDMS mode; Hotbed "Reload standard" button (re-reads `template_config.json` pdms block; days untouched).
+- CTR Generator: `=` formulas in every number cell/box (also written as Excel formulas into the AZN/USD CTRs, the PDMS overview and statistics Price Items); hover meanings; "Reload all" + Ctrl+Shift picks (rows × columns) + saved-rename question; Manpower list in the Cost statistics box. The user checked formulas, days view, reload/picks/rename popup in the real app (WSL).
+- MR vs CTR: CTR parser finds a Stock Code column without a header, never drops a line silently (Parse Notes in Step 2 / status / report sheet), tolerant header rows ("Tot", "CTR total"), warnings for unrecognised header / duplicate column / missing Quantity or Description (names the unrecognised headers), "No tables found" and "Problems found in the files" dialogs + red ⚠ file entry, `NaT` column fixed.
+- Settings › Column keywords (`comparator/column_keywords.py`, `common/keywords_view.py`): editable header words and MR / CTR equipment / CTR consumables header rows; Edit, Merge shipped, Undo my entries, Reset, Restore, Import/Export, Test on a file (grid of found tables), checks before saving; Stock Code types got Undo my entries + the same More ▾ menu. Verified by tests only.
+- Task log updated 2026-11-02 (MA215–MA231 added, MA124/127/205 raised); `.claude/task_log/short_summaries.json` has the new summaries but is NOT committed.
 
 ## In progress / not fully done
-- Formulas are not saved in presets (only the Markup value); Markup formula is lost on preset load.
-- No hover meaning for the Hotbed total label; README/USER_GUIDE have no text for days view, formulas or Reload.
-- Not verified: Ctrl+Shift on Windows (may clash with the keyboard-layout shortcut); transport group got a note line — window height after Maximize not re-measured on Windows.
+- Column keywords (MA227, 90 %): not confirmed on the real app. The user's test failed only because the word was `=Descript` while the file header is `Descrip` (checked 2026-11-02); after the spelling is fixed and the file reloaded it should work.
+- Saved Column keywords do not re-read files that are already loaded (user must reload; "Reload changed files" only watches the file on disk) — MA228.
 
 ## Decisions (with reasoning)
-- A formula lives beside the value (`_FORMULA_ROLE` = formula, value text, unit) and is live only while the cell still holds that value: no hooks needed in re-match/reload code, and every `float(item.text())` reader stays untouched.
-- Reload builds the row with the first-load code (`_append_source_row`) and copies only the chosen cells; unpicked columns are never touched, even if the fresh row prices differently.
-- Editor state is kept on the delegate per cell, not on the editor object (the view hands delegates a fresh Python wrapper; a test holding the editor hid this bug).
-- Reload Description ignores saved renames (they are the per-category Description renames, not Match By aliases); the user decides about deleting them.
+- Keywords: a full copy in the user data folder seeded from the shipped lists (like Stock Code types), not additions-only, so the user can delete shipped words; one list for naming columns AND finding header rows; `=word` = exact header, otherwise starts-at-a-word match, case/punctuation ignored, most specific word wins.
+- Excel formulas are stored in a role beside the cell value and live only while the cell still holds that value (no hooks in re-match / reload code).
+- The installed .exe reads the `template_config.json` bundled in it (edits apply to dev runs only) — user wants an editable copy later (MA231).
 
 ## Next
-1. Ask which Phase D is: PDMS overview sheet header block (`ctr_tools/pdms_overview.py` info list: add city, signer, signer title, client, sub-client, revision, contract no, project type, comments) or the header fields in the window; then do it.
-2. Then decide: formulas in presets; release steps for 1.0.24 (ask new release vs continuation; /release; README/USER_GUIDE; CHANGELOG).
-3. DONE 2026-11-02: Hotbed "Reload standard" button (see CHANGELOG 1.0.24).
+0. REMINDER (user asked 2026-11-02): after the evening items are done, run `/tasklog` to add them — MA228–MA231 are logged as planned (0 %); raise them and add any new work; remind the user at the end of the session.
+1. Commit `.claude/task_log/short_summaries.json` (and this file). 2. The evening items the user planned (task log rows MA228–MA231): re-read loaded files after saving Column keywords; MR-page-refers-to-another-CTR warning; faster CTR load (Pricing sheet declares 16,379 columns); editable `template_config.json` for the .exe.
 
 ## Open questions
-- Phase D meaning (above). Nothing else unresolved.
+- None unresolved.
 
 ## Parked
-- MA201/MA205 (Onshore text, wording) wait for the commercial department; MA124, MA127–MA130, MA133, MA194 until feature development ends; Disparities segfault (2026-10-15) not reproduced.
+- MA124, MA127–MA130, MA133, MA194 stay until feature development ends; MA205 waits for the commercial department; Disparities segfault (crash.log 2026-10-15) not reproduced.
 
 ## Windows checks
-- Formulas typed in each table, Hotbed, CBAR, Markup, statistics cells; days view (normal/PDMS, "!" with Encoding cleared); Ctrl+Shift picks + popup + saved-rename question; "Reload all" for each of the four tables; window still fits when maximised.
+- None open (they happen at build time). After the .exe is built: formulas, days view, Reload all + Ctrl+Shift picks, Column keywords editor + Test on a file, the "Problems found" dialog with CTR-26-319, Hotbed Reload standard, window still fits when maximised.
