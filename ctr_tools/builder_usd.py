@@ -122,6 +122,7 @@ from openpyxl.worksheet.properties import PageSetupProperties
 
 from ctr_tools.config import CFG
 from ctr_tools.naming import ctr_output_filename
+from ctr_tools.xl_formula import pick as _pick
 
 log = logging.getLogger(__name__)
 
@@ -743,11 +744,11 @@ def build_usd(
 
         _set_cell(ws_p, r, 1,  item_no)
         _set_cell(ws_p, r, 2,  desc)
-        _set_cell(ws_p, r, 3,  qty)
+        _set_cell(ws_p, r, 3,  _pick(er, "quantity", qty))
         _set_cell(ws_p, r, 4,  unit)
-        _set_cell(ws_p, r, 5,  rate)
+        _set_cell(ws_p, r, 5,  _pick(er, "rate_per_day", rate))
         _apply_reference_style(ws_p, r, 5, equip_rate_ref)
-        _set_cell(ws_p, r, 6,  days if days != "" else None)
+        _set_cell(ws_p, r, 6,  _pick(er, "days", days if days != "" else None))
         # Guarded so a "NONRECHARG" rate totals 0 instead of erroring (#VALUE!).
         _set_cell(ws_p, r, 7,  f"=IF(ISNUMBER(E{r}),C{r}*E{r}*F{r},0)")
         _set_cell(ws_p, r, 8,  f"=A{r}")
@@ -812,9 +813,9 @@ def build_usd(
 
         _set_cell(ws_p, r, 1,  item_no)
         _set_cell(ws_p, r, 2,  desc)
-        _set_cell(ws_p, r, 3,  qty)
+        _set_cell(ws_p, r, 3,  _pick(cr, "quantity", qty))
         _set_cell(ws_p, r, 4,  unit)
-        _set_cell(ws_p, r, 5,  price)
+        _set_cell(ws_p, r, 5,  _pick(cr, "local_expect_cost", price))
         _apply_reference_style(ws_p, r, 5, cons_price_ref)
         # Guarded so a "NONRECHARG" price totals 0 instead of erroring (#VALUE!).
         _set_cell(ws_p, r, 6,  f"=IF(ISNUMBER(E{r}),C{r}*E{r},0)")

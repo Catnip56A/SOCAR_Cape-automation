@@ -372,6 +372,8 @@ def collect_storage(win) -> list[dict]:
     add("App data", "Match aliases", _aliases._ALIASES_PATH, loaded="yes (alias table)")
     add("App data", "Description renames", _renames._DESC_RENAMES_PATH, loaded="yes (rename table)")
     add("App data", "CTR presets", _presets._PRESETS_PATH, loaded="yes (preset list)")
+    from comparator import column_keywords as _kw
+    add("App data", "Column keywords", _kw._KEYWORDS_PATH, loaded="yes (MR / CTR parsers)")
     add("App data", "Saved comparisons folder", _socar_data_root() / "Comparisons", "dir")
     from ctr_tools import cbar_rates as _cbar
     add("App data", "CBAR rates (saved, what the app starts from)", _cbar._RATES_PATH, loaded="yes (CBAR rates)")

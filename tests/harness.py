@@ -42,6 +42,10 @@ import ctr_tools.stockcode_types as _ST   # noqa: E402
 _ST._TYPES_PATH = SANDBOX / "stockcode_types.json"                  # the user's list: a fixture per test
 _ST._BUNDLED_DEFAULT_PATH = SANDBOX / "no_such_shipped_types.json"  # never the real shipped (private) list
 
+import comparator.column_keywords as _CK   # noqa: E402
+
+_CK._KEYWORDS_PATH = SANDBOX / "column_keywords.json"                # the user's keywords: a fixture per test
+
 from PySide6.QtWidgets import QApplication, QMessageBox   # noqa: E402
 
 app = QApplication.instance() or QApplication([])

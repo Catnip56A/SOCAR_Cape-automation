@@ -29,9 +29,10 @@ import pandas as pd
 from pathlib import Path
 from io import BytesIO
 import openpyxl
+from comparator import column_keywords as CK
 
 log = logging.getLogger(__name__)
-from openpyxl.utils import column_index_from_string
+from openpyxl.utils import column_index_from_string, get_column_letter
 
 
 # ---------------------------------------------------------------------------
@@ -51,8 +52,11 @@ def is_cover_sheet(sheet_name: str) -> bool:
 def _norm(v) -> str:
     if v is None:
         return ""
-    if isinstance(v, float) and pd.isna(v):
-        return ""
+    try:
+        if pd.isna(v):                       # NaN, and NaT (pandas' empty cell in a date-formatted column)
+            return ""
+    except (TypeError, ValueError):          # a list-like is never "missing"
+        pass
     return str(v).strip()
 
 
@@ -71,36 +75,18 @@ def _is_blank(v) -> bool:
 # MR column mapping
 # ---------------------------------------------------------------------------
 
-_MR_HEADER_ROW = 8
 _MR_PLACEHOLDER = {"STOCKCODE", "STOCKCODE *", "-", "0", "AA", "", "NAN"}
 
 
 def _clean_mr_col(name: str) -> str | None:
+    """An MR header -> its standard column name (the words are the user's, see column_keywords.py); a header that
+    means nothing known keeps its own text."""
     s = re.sub(r"\*", "", str(name)).strip()
     s = re.sub(r"\s+", " ", s)
-    sl = s.lower()
-
     if s.startswith("Unnamed") or s == "":
         return None
-    if "stockcode" in sl:
-        return "Stock Code"
-    if sl == "№":
-        return "No"
-    if sl.startswith("qty"):
-        return "Qty"
-    if sl.startswith("unit"):
-        return "Unit"
-    if "item specification" in sl or "item spec" in sl:
-        return "Description"
-    if "required delivery date" in sl or "delivery date" in sl:
-        return "Delivery Date"
-    if "planned return date" in sl or "return date" in sl:
-        return "Return Date"
-    if "rechargeable" in sl:
-        return "Rechargeable"
-    if "allocation" in sl:
-        return "Allocation"
-    return s
+    concept, _word = CK.match(CK.current(), "mr", s)
+    return concept or s
 
 
 def _deduplicate(names: list) -> list:
@@ -120,31 +106,19 @@ def _deduplicate(names: list) -> list:
 # CTR Pricing column mapping
 # ---------------------------------------------------------------------------
 
-_PRICING_HEADER_KW = ["quantity", "qty", "unit", "rate", "total", "days"]
+_CORE_CONCEPTS = ("Quantity", "Unit", "Rate", "Total", "Days")      # a header row shows several of these
 
 
 def _clean_pricing_col(name: str) -> str | None:
+    """A CTR header -> its standard column name (the words are the user's, see column_keywords.py); a header that
+    means nothing known keeps its own text; the generator's internal cost columns are dropped."""
     s = _norm(name)
     if not s or s.lower().startswith("unnamed"):
         return None
-    sl = s.lower()
-    if sl in ("general equipment", "description"):
-        return "Description"
-    if sl in ("quantity", "qty"):
-        return "Quantity"
-    if sl == "unit":
-        return "Unit"
-    if "rate" in sl or "unit price" in sl:
-        return "Rate"
-    if sl == "days":
-        return "Days"
-    if sl == "total" and "sc" not in sl:
-        return "Total"
-    if "equipmentcode" in sl.replace(" ", "") or "productcode" in sl.replace(" ", ""):
-        return "Stock Code"
-    if "total sc" in sl:
+    concept, _word = CK.match(CK.current(), "ctr", s)
+    if concept == CK.IGNORE:
         return None
-    return s
+    return concept or s
 
 
 # ---------------------------------------------------------------------------
@@ -175,6 +149,120 @@ def _filter_mr_stock_codes(df: pd.DataFrame) -> pd.DataFrame:
     df = df[~df["Stock Code"].str.match(r"^\d{1,3}$")]
     df = df[~df["Stock Code"].str.contains(":", na=False)]
     return df.reset_index(drop=True)
+
+
+# A Stock Code looks like SP2300006500 / EQ0900000000 / PP8201000009: letters, then mostly digits, no spaces.
+_CODE_RE = re.compile(r"^(?=.*[A-Za-z])(?=(?:.*\d){6,})[A-Za-z0-9][A-Za-z0-9\-_.]{5,}$")
+
+
+def _looks_like_code(v) -> bool:
+    s = _norm(v)
+    return bool(s) and s.lower() not in _BAD_CODES and bool(_CODE_RE.match(s))
+
+
+def _note(level: str, text: str) -> dict:
+    """A message about a parsed table: level "warn" (something may have been missed — look at it)
+    or "info" (expected, for the record)."""
+    return {"level": level, "text": text}
+
+
+def _infer_code_col(data: list, col_names: list, known_col: int | None):
+    """The index of an unnamed column whose cells look like Stock Codes (a CTR whose header row has no label
+    above them), or None. `known_col` = where another table of the same sheet keeps its codes: preferred."""
+    lines = [r for r in data if any(not _is_blank(v) for v in r)]
+    if not lines:
+        return None
+    best, best_ratio = None, 0.0
+    for k, name in enumerate(col_names):
+        if name is not None:
+            continue
+        n = sum(1 for r in lines if k < len(r) and _looks_like_code(r[k]))
+        ratio = n / len(lines)
+        if k == known_col and n >= 1 and ratio >= 0.3:
+            return k
+        if n >= 1 and ratio >= 0.5 and ratio > best_ratio:
+            best, best_ratio = k, ratio
+    return best
+
+
+def _pricing_block(rows: list, section: str, known_col: int | None = None,
+                   drop_if_no_col: bool = False) -> tuple[pd.DataFrame, list, int | None]:
+    """One CTR pricing table (rows[0] = its header row) -> (the lines that can be compared, notes, the column the
+    Stock Codes were found in). A Stock Code column without a header is found by what its cells look like; a line
+    that cannot be compared is never dropped silently: it is named in a note."""
+    notes: list = []
+    col_names = [_clean_pricing_col(_norm(h)) for h in rows[0]]
+    cfg = CK.current()
+    for k, h in enumerate(rows[0]):
+        concept, word = CK.match(cfg, "ctr", _norm(h))
+        if concept and concept != CK.IGNORE and CK.is_variant("ctr", concept, word):
+            own = "" if CK.is_shipped_word("ctr", concept, word) else f" (your word “{word.lstrip('=')}”)"
+            notes.append(_note("info", f"{section}: the header “{_norm(h)}” (column {get_column_letter(k + 1)}) "
+                                       f"was read as {concept}{own}."))
+    seen_concepts: dict[str, int] = {}
+    for k, name in enumerate(col_names):
+        if name in ("Description", "Quantity", "Unit", "Rate", "Days", "Total", "Stock Code"):
+            if name in seen_concepts:
+                notes.append(_note("warn", f"{section}: columns {get_column_letter(seen_concepts[name] + 1)} and "
+                                           f"{get_column_letter(k + 1)} are both read as {name}; only the first "
+                                           f"({get_column_letter(seen_concepts[name] + 1)}) is used."))
+            else:
+                seen_concepts[name] = k
+    data = [list(r) for r in rows[1:] if not all(_is_blank(v) for v in r)]
+    code_idx = col_names.index("Stock Code") if "Stock Code" in col_names else None
+    if code_idx is None and data:
+        k = _infer_code_col(data, col_names, known_col)
+        if k is not None:
+            col_names[k] = "Stock Code"
+            code_idx = k
+            found = [r[k] for r in data if k < len(r) and _looks_like_code(r[k])]
+            notes.append(_note("warn", f"{section}: the Stock Code column has no header — read from column "
+                                       f"{get_column_letter(k + 1)} ({len(found)} code(s) found, e.g. {_norm(found[0])})."))
+    unknown = [_norm(h) for h, name in zip(rows[0], col_names) if _norm(h) and name == _norm(h)]   # kept as typed: not a standard column
+    for need in ("Quantity", "Description"):
+        if need not in col_names and data:
+            guess = (f" The headers not read as any standard column: {', '.join('“' + u + '”' for u in unknown[:6])} — "
+                     f"if one of them is the {need} column, add its exact spelling (for example “={unknown[0].lower()}”)"
+                     f" under {need}." if unknown else "")
+            notes.append(_note("warn", f"{section}: no {need} column was recognised in the header row "
+                                       f"({', '.join(_norm(h) for h in rows[0] if _norm(h))[:120]}).{guess} "
+                                       "See Settings › Column keywords."))
+    records = []
+    for r in data:
+        d = {"_Section": section}
+        for col, val in zip(col_names, r):
+            if col is not None and col not in d:
+                d[col] = val
+        records.append(d)
+    if not records:
+        return pd.DataFrame(), notes, code_idx
+    df = pd.DataFrame(records)
+    if "Stock Code" not in df.columns and not drop_if_no_col:
+        return df, notes, code_idx                       # no codes anywhere in this sheet: nothing to filter by
+    ok = (df["Stock Code"].apply(lambda x: _norm(x).lower() not in _BAD_CODES and bool(_norm(x)))
+          if "Stock Code" in df.columns else pd.Series(False, index=df.index))
+    dropped = [i for i in df.index if not ok[i]]
+    if dropped:
+        plain, odd = [], []
+        for i in dropped:
+            desc = _norm(df.at[i, "Description"]) if "Description" in df.columns else ""
+            desc = desc or next((_norm(v) for v in data[i] if _norm(v) and not _is_blank(v)), f"line {i + 1}")
+            hit = next(((k2, v) for k2, v in enumerate(data[i]) if k2 != code_idx and _looks_like_code(v)), None)
+            if hit:
+                odd.append(f"{desc} (looks like a code in column {get_column_letter(hit[0] + 1)}: {_norm(hit[1])})")
+            else:
+                plain.append(desc)
+        if odd:
+            notes.append(_note("warn", f"{section}: {len(odd)} line(s) NOT compared — a value that looks like a Stock Code "
+                                       f"is in a column that is not read as one: " + "; ".join(odd[:8])))
+        if plain:
+            more = f" … and {len(plain) - 8} more" if len(plain) > 8 else ""
+            notes.append(_note("info", f"{section}: {len(plain)} line(s) without a Stock Code are not compared: "
+                                       + "; ".join(plain[:8]) + more))
+    kept = df[ok].reset_index(drop=True)
+    if notes:
+        notes.insert(0, _note("info", f"{section}: {len(df)} line(s) found, {len(kept)} compared."))
+    return kept, notes, code_idx
 
 
 # ---------------------------------------------------------------------------
@@ -277,8 +365,7 @@ def _parse_named_ranges(wb, display_name: str, include_cover: bool = False) -> l
             sr, sc = ranges["equip_start"]
             er, ec = ranges["equip_end"]
             rows = _extract_ws_range(ws, sr, sc, er, ec)
-            df = _rows_to_df(rows, _clean_pricing_col, "Plant & Equipment")
-            df = _filter_stock_codes(df)
+            df, notes, _ = _pricing_block(rows, "Plant & Equipment") if len(rows) >= 2 else (pd.DataFrame(), [], None)
             if not df.empty:
                 df["_SourceSheet"] = sheet_name
                 df["_SourceFile"] = display_name
@@ -287,6 +374,7 @@ def _parse_named_ranges(wb, display_name: str, include_cover: bool = False) -> l
                     "source_sheet": sheet_name,
                     "table_name":   "Plant & Equipment",
                     "data":         df,
+                    "notes":        notes,
                 })
 
         # MR or CTR: Consumables section
@@ -299,14 +387,15 @@ def _parse_named_ranges(wb, display_name: str, include_cover: bool = False) -> l
                     _norm(h).lower().replace(" ", "") for h in rows[0] if _norm(h)
                 )
                 is_mr = "stockcode" in header_text
+                notes: list = []
 
                 if is_mr:
                     df = _rows_to_df(rows, _clean_mr_col, sheet_name)
                     df = _filter_mr_stock_codes(df)
                     table_name = sheet_name
                 else:
-                    df = _rows_to_df(rows, _clean_pricing_col, "Consumables & Materials")
-                    df = _filter_stock_codes(df)
+                    df, notes, _ = (_pricing_block(rows, "Consumables & Materials") if len(rows) >= 2
+                                    else (pd.DataFrame(), [], None))
                     table_name = "Consumables & Materials"
 
                 if not df.empty:
@@ -317,6 +406,7 @@ def _parse_named_ranges(wb, display_name: str, include_cover: bool = False) -> l
                         "source_sheet": sheet_name,
                         "table_name":   table_name,
                         "data":         df,
+                        "notes":        notes,
                     })
 
     return results
@@ -326,30 +416,95 @@ def _parse_named_ranges(wb, display_name: str, include_cover: bool = False) -> l
 # Fallback: sheet-based detection (for files without named ranges)
 # ---------------------------------------------------------------------------
 
-def _is_pricing_header(vals: list) -> bool:
-    """Row has no counter in col 0 and contains 3+ pricing keywords."""
+def _row_concepts(vals: list) -> set:
+    cfg = CK.current()
+    return {c for c in (CK.match(cfg, "ctr", _norm(v))[0] for v in vals if _norm(v)) if c}
+
+
+def _is_pricing_header(vals: list, relaxed: bool = False) -> bool:
+    """Row has no counter in col 0 and shows 3+ of the pricing columns (Quantity, Unit, Rate, Total, Days) by the
+    words in Settings. `relaxed` (the row sits right under a section title such as "Consumables & Materials")
+    accepts 2 plus "Description": a header with one column renamed is still a header."""
     if _norm(vals[0] if vals else ""):
         return False
-    text = " ".join(_norm(v).lower() for v in vals if _norm(v))
-    return sum(1 for kw in _PRICING_HEADER_KW if kw in text) >= 3
+    found = _row_concepts(vals)
+    hits = len(found & set(_CORE_CONCEPTS))
+    if hits >= 3:
+        return True
+    return relaxed and hits >= 2 and "Description" in found
 
 
-def _parse_ctr_pricing_sheet(file, sheet_name: str, source_file: str) -> pd.DataFrame:
-    """Fallback CTR parser: keyword-based header detection."""
+def _is_title_row(vals: list) -> bool:
+    """A section title: nothing in column A, text in column B, (almost) nothing else — "Consumables & Materials"."""
+    if len(vals) < 2 or _norm(vals[0]) or not _norm(vals[1]):
+        return False
+    return sum(1 for v in vals[2:] if _norm(v) and _norm(v).lower() != "aa") <= 1
+
+
+def _parse_ctr_pricing_sheet(file, sheet_name: str, source_file: str) -> tuple[pd.DataFrame, list]:
+    """Fallback CTR parser: keyword-based header detection. Returns (the lines that can be compared, notes about
+    what could not be: see _pricing_block)."""
     raw = pd.read_excel(file, sheet_name=sheet_name, header=None)
 
-    header_rows = [i for i in range(len(raw)) if _is_pricing_header(list(raw.iloc[i]))]
-    if not header_rows:
-        return pd.DataFrame()
+    def _under_title(i: int) -> bool:
+        return any(_is_title_row(list(raw.iloc[j])) for j in range(max(i - 2, 0), i))
 
-    all_parts = []
+    header_rows = [i for i in range(len(raw))
+                   if _is_pricing_header(list(raw.iloc[i]), relaxed=_under_title(i))]
+
+    # Header rows set in Settings (Excel row numbers) replace the search for that table; the other table is still found.
+    cfg = CK.current()
+    forced: dict[int, str] = {}
+    pre_notes: list = []
+    for key, name in (("ctr_equipment", "Plant & Equipment"), ("ctr_consumables", "Consumables & Materials")):
+        row = CK.header_row(cfg, key)
+        if not row:
+            continue
+        if row > len(raw):
+            pre_notes.append(_note("warn", f"The {name} header row set in Settings ({row}) is below the end of the "
+                                           f"sheet ({len(raw)} rows) — it was not used."))
+            continue
+        forced[row - 1] = name
+        found = _row_concepts(list(raw.iloc[row - 1]))
+        if len(found & set(_CORE_CONCEPTS)) < 2:
+            texts = [_norm(v) for v in list(raw.iloc[row - 1]) if _norm(v)]
+            pre_notes.append(_note("warn", f"Row {row} (the {name} header row set in Settings) has no recognisable "
+                                           f"column names ({', '.join(texts[:8]) or 'it is empty'}) — check the row number."))
+    if forced:
+        eq = next((r for r, n in forced.items() if n.startswith("Plant")), None)
+        co = next((r for r, n in forced.items() if n.startswith("Consum")), None)
+        if eq is not None and co is not None:
+            header_rows = sorted(forced)
+        elif eq is not None:
+            header_rows = [eq] + [h for h in header_rows if h > eq]
+        else:
+            header_rows = [h for h in header_rows if h < co] + [co]
+    if not header_rows:
+        return pd.DataFrame(), pre_notes
+
+    # A row that looks like a table header (text in several columns, directly above numbered lines) but was not
+    # recognised: those lines would be read with the columns of the table above. Said, never silent.
+    suspects = []
+    for i in range(len(raw) - 1):
+        if i in header_rows or _norm(raw.iat[i, 0]):
+            continue
+        texts = [_norm(v) for v in list(raw.iloc[i])[1:12] if _norm(v) and not isinstance(v, (int, float))]
+        nxt = list(raw.iloc[i + 1])
+        try:
+            numbered = not pd.isna(float(nxt[0]))
+        except (TypeError, ValueError):
+            numbered = False
+        if len(texts) >= 3 and numbered and len(texts) == sum(1 for v in list(raw.iloc[i])[1:12] if _norm(v)):
+            suspects.append((i, texts))
+
     _skip_label_kw = ["total", "rechargeable", "mark up", "gm (", "client:", "location:", "scope:"]
 
+    blocks = []                                       # (section, [header row, line, line …])
     for idx, h in enumerate(header_rows):
         end = header_rows[idx + 1] if idx + 1 < len(header_rows) else len(raw)
 
-        section = sheet_name
-        for lb in range(h - 1, max(h - 6, -1), -1):
+        section = forced.get(h, sheet_name)
+        for lb in (range(h - 1, max(h - 6, -1), -1) if h not in forced else ()):
             above = list(raw.iloc[lb])
             col0 = _norm(above[0]) if above else ""
             col1 = _norm(above[1]) if len(above) > 1 else ""
@@ -358,9 +513,7 @@ def _parse_ctr_pricing_sheet(file, sheet_name: str, source_file: str) -> pd.Data
                     section = col1
                     break
 
-        col_names = [_clean_pricing_col(_norm(v)) for v in raw.iloc[h]]
-
-        rows = []
+        lines = [list(raw.iloc[h])]
         for i in range(h + 1, end):
             row_vals = list(raw.iloc[i])
             try:
@@ -372,27 +525,48 @@ def _parse_ctr_pricing_sheet(file, sheet_name: str, source_file: str) -> pd.Data
             col1 = _norm(row_vals[1]) if len(row_vals) > 1 else ""
             if not col1 or col1 == "0":
                 continue
-            row_dict = {"_Section": section}
-            for col, val in zip(col_names, row_vals):
-                if col is not None and col not in row_dict:
-                    row_dict[col] = val
-            rows.append(row_dict)
+            lines.append(row_vals)
+        blocks.append((section, lines))
 
-        if rows:
-            all_parts.append(pd.DataFrame(rows))
+    # The column the codes sit in at the table that does label it: where to look in a table that does not.
+    labelled = [[_clean_pricing_col(_norm(v)) for v in lines[0]] for _s, lines in blocks]
+    known = next((n.index("Stock Code") for n in labelled if "Stock Code" in n), None)
+    any_code_col = known is not None or any(
+        _infer_code_col([list(r) for r in lines[1:]], names, None) is not None
+        for (_s, lines), names in zip(blocks, labelled) if len(lines) > 1)
 
-    if not all_parts:
-        return pd.DataFrame()
+    parts, notes = [], list(pre_notes)
+    first_h = header_rows[0]
+    for i, texts in suspects:
+        if i > first_h:
+            notes.append(_note("warn", f"Row {i + 1} ({', '.join(texts[:6])}) looks like a table header but was not "
+                                       "recognised — the lines under it were read with the columns of the table "
+                                       "above, so their figures may be in the wrong columns. Use the standard header "
+                                       "names (Description, Quantity, Unit, Unit Price / Rate, Total)."))
+    for section, lines in blocks:
+        if len(lines) < 2:
+            continue
+        df, n, _k = _pricing_block(lines, section, known, drop_if_no_col=any_code_col)
+        notes += n
+        if not df.empty:
+            parts.append(df)
+    if not parts:
+        return pd.DataFrame(), notes
 
-    result = pd.concat(all_parts, ignore_index=True, sort=False)
+    result = pd.concat(parts, ignore_index=True, sort=False)
     result["_SourceSheet"] = sheet_name
     result["_SourceFile"] = source_file
-    return _filter_stock_codes(result)
+    return result, notes
+
+
+def _mr_header_row0() -> int:
+    """The MR header row as pandas wants it (0-based): the one set in Settings, else Excel row 9."""
+    return (CK.header_row(CK.current(), "mr") or CK.SHIPPED_ROWS["mr"]) - 1
 
 
 def _parse_mr_sheet(file, sheet_name: str, source_file: str) -> pd.DataFrame:
-    """Fallback MR parser: header always at row index 8."""
-    df = pd.read_excel(file, sheet_name=sheet_name, header=_MR_HEADER_ROW)
+    """Fallback MR parser: the header is at the row set in Settings (Excel row 9 unless changed)."""
+    df = pd.read_excel(file, sheet_name=sheet_name, header=_mr_header_row0())
 
     keep_idx, keep_names = [], []
     for i, c in enumerate(df.columns):
@@ -415,8 +589,8 @@ def _parse_mr_sheet(file, sheet_name: str, source_file: str) -> pd.DataFrame:
 
 def _detect_format(file, sheet_name: str) -> str | None:
     try:
-        probe = pd.read_excel(file, sheet_name=sheet_name, header=_MR_HEADER_ROW, nrows=0)
-        if any("STOCKCODE" in str(c).upper() for c in probe.columns):
+        probe = pd.read_excel(file, sheet_name=sheet_name, header=_mr_header_row0(), nrows=0)
+        if any(CK.match(CK.current(), "mr", str(c))[0] == "Stock Code" for c in probe.columns):
             return "mr"
     except Exception:
         log.debug("MR-format probe failed for sheet %r", sheet_name, exc_info=True)
@@ -524,10 +698,11 @@ def parse_workbook(path, sheet_names=None, filename=None, include_cover=False) -
             continue
 
         try:
+            notes = []
             if fmt == "mr":
                 df = _parse_mr_sheet(_make_file(), sn, display_name)
             else:
-                df = _parse_ctr_pricing_sheet(_make_file(), sn, display_name)
+                df, notes = _parse_ctr_pricing_sheet(_make_file(), sn, display_name)
         except Exception:
             # Unlike the format-detection probes above, this drops a sheet
             # that *did* look parseable — worth a real warning, since it's
@@ -546,6 +721,7 @@ def parse_workbook(path, sheet_names=None, filename=None, include_cover=False) -
             "source_sheet": sn,
             "table_name":   sn,
             "data":         df,
+            "notes":        notes,
         })
 
 

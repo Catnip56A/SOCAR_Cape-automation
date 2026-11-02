@@ -1002,6 +1002,11 @@ class MainWindow(QMainWindow):
         self._restored_days: dict[str, float] = {}      # days saved with a reopened comparison
         # (side, file name) -> (full path, fingerprint when it was read): to notice a file edited after it was added
         self._file_origin: dict[tuple[str, str], tuple[str, tuple | None]] = {}
+        # (side, file name) -> why a listed file contributed no tables (nothing found in it, or it could not be read)
+        self._unread_files: dict[tuple[str, str], str] = {}
+        # (side, file name) -> the parse warnings of a file that WAS read but is faulty (a column not found, a header not
+        # recognised …): marked in Step 1 and told in a dialog when it is loaded
+        self._file_problems: dict[tuple[str, str], list[str]] = {}
         self._pending_stats: pd.DataFrame | None = None   # handed from _run_compare to the present step
         self._pending_saved_stats: dict | None = None     # same, from a loaded comparison
         # (side, key, doc, sheet) of every row, for the document filter — the
@@ -1885,6 +1890,7 @@ class MainWindow(QMainWindow):
         reload: the old tables of a file are swapped for the new ones only when the new version produced tables;
         `on_done(reloaded names, failed names)` is called when finished."""
         n_files = len(payloads)     # the closures below must not capture `payloads` (the raw file bytes)
+        names = [n for n, _data in payloads]
         worker = ParseWorker(payloads, parent=self, include_cover=(side == "mr"))
         self._prune_workers()
         self._workers.append(worker)
@@ -1913,8 +1919,45 @@ class MainWindow(QMainWindow):
             else:
                 self._ctr_tables.extend(tables)
                 self._fill_table_list(self._ctr_table_list, self._ctr_tables, "ctr")
+            # A file that was read but gave no tables is told to the user — never just listed as if it were loaded.
+            got_files = {t["source_file"] for t in tables}
+            parsed = names if worker.stopped_after is None else names[:worker.stopped_after]
+            empty = [n for n in parsed if n not in got_files and n not in (replace or {})]
+            for n in names:
+                self._unread_files.pop((side, n), None)
+            for n in empty:
+                self._unread_files[(side, n)] = self._no_tables_text(side)
+            faulty: dict[str, list[str]] = {}
+            for t in tables:
+                bad = [n["text"] for n in t.get("notes", []) if n["level"] == "warn"]
+                if bad:
+                    faulty.setdefault(t["source_file"], []).extend(bad)
+            for n in names:
+                self._file_problems.pop((side, n), None)
+            for n, bad in faulty.items():
+                self._file_problems[(side, n)] = bad
             self._on_table_sel_changed()
             self._refresh_file_warnings(side)
+            if faulty:
+                lines = []
+                for fname, bad in list(faulty.items())[:6]:
+                    lines.append(f"{side.upper()}: {fname}")
+                    lines += [f"    – {b}" for b in bad[:8]]
+                    if len(bad) > 8:
+                        lines.append(f"    – … and {len(bad) - 8} more (hover the file in Step 1)")
+                QMessageBox.warning(self, "Problems found in the files",
+                                    "These files were read, but they are not as expected — parts of them may not be "
+                                    "compared:\n\n" + "\n".join(lines) + "\n\nFix the file, or add the header's "
+                                    "spelling under Settings › Column keywords, then reload the file.")
+            if empty:
+                self._set_status(f"⚠ No tables could be read from: {', '.join(empty)}")
+                QMessageBox.warning(self, "No tables found",
+                                    f"No {side.upper()} tables could be read from:\n\n"
+                                    + "\n".join(f"  • {n}" for n in empty) + "\n\n" + self._no_tables_text(side))
+            skipped = sum(1 for t in tables for n in t.get("notes", []) if n["level"] == "warn")
+            if skipped:
+                self._set_status(f"⚠ {skipped} parse note(s) in the {side.upper()} tables need a look: lines may "
+                                 "not be compared — see the yellow rows in Step 2 (hover for details).")
             if worker.stopped_after is not None:
                 self._set_status(
                     f"Stopped on request — parsed {worker.stopped_after} of "
@@ -1925,6 +1968,10 @@ class MainWindow(QMainWindow):
         def _err(msg: str):
             dlg.close()
             dlg.deleteLater()
+            for n in names:                              # the files stay listed: say that they were not read
+                if n not in (replace or {}):
+                    self._unread_files[(side, n)] = f"This file could not be read, so it contributes no tables.\n{msg}"
+            self._refresh_file_warnings(side)
             if on_done:                                 # a reload reports it with the others; the old tables stay
                 on_done([], [f"{n} — {msg}" for n in (replace or {})])
                 return
@@ -1976,6 +2023,17 @@ class MainWindow(QMainWindow):
                 if highlight:
                     label += "  ⚠ no CH/NCH sheets"
                     tip += "\n\nNo CH-*/NCH-* sheets with data were found in this MR."
+
+            notes = (t or {}).get("notes") or []
+            if notes:                      # what the parser could not compare — never silent
+                tip += "\n\nParse notes:\n" + "\n".join(
+                    ("⚠ " if n["level"] == "warn" else "• ") + n["text"] for n in notes)
+                n_warn = sum(1 for n in notes if n["level"] == "warn")
+                if n_warn:
+                    label += f"  ⚠ {n_warn} note(s)"
+                    highlight = True
+                else:
+                    label += "  ⓘ lines skipped"
 
             item = QListWidgetItem()
             item.setFlags(Qt.ItemFlag.ItemIsEnabled)
@@ -2073,6 +2131,15 @@ class MainWindow(QMainWindow):
         self._paint_file_warnings(side)
         self._mark_changed_files()
 
+    @staticmethod
+    def _no_tables_text(side: str) -> str:
+        if side == "mr":
+            return ("An MR is read from its CH-* / NCH-* pages (visible ones) and the Socar-Cape sheet, with the "
+                    "STOCKCODE header in row 9. None was found in this file — check it is the right file.")
+        return ("A CTR is read from a sheet with a “Pricing Schedule” title and tables with Quantity / Unit / Rate "
+                "columns and a Stock Code column, or from the named ranges equip_start / equip_end / cons_start / "
+                "cons_end. None was found in this file — check it is the right file.")
+
     def _paint_file_warnings(self, side: str):
         """Marks a Step 1 file entry in red, with an explanatory tooltip,
         once every table it contributed has been individually removed from
@@ -2081,18 +2148,34 @@ class MainWindow(QMainWindow):
         lw     = self._mr_file_list if side == "mr" else self._ctr_file_list
         tables = self._mr_tables    if side == "mr" else self._ctr_tables
         remaining_files = {t["source_file"] for t in tables}
+        listed = {lw.item(i).data(Qt.ItemDataRole.UserRole) for i in range(lw.count())}
+        for store in (self._unread_files, self._file_problems):
+            for key in [k for k in store if k[0] == side and k[1] not in listed]:
+                del store[key]                                       # the file was removed from the list
         for i in range(lw.count()):
             item  = lw.item(i)
             name  = item.data(Qt.ItemDataRole.UserRole)
             label = lw.itemWidget(item)._label
             if name in remaining_files:
-                label.setPalette(QPalette())
-                label.setToolTip("")
+                bad = self._file_problems.get((side, name))
+                if bad:
+                    pal = label.palette()
+                    pal.setColor(label.foregroundRole(), _MISMATCH_FG)
+                    label.setPalette(pal)
+                    label.setToolTip(f'"{name}" was read, but it is not as expected:\n• ' + "\n• ".join(bad[:12])
+                                     + "\n\nParts of it may not be compared. Fix the file or add the header's spelling "
+                                       "under Settings › Column keywords, then reload it.")
+                else:
+                    label.setPalette(QPalette())
+                    label.setToolTip("")
             else:
                 pal = label.palette()
                 pal.setColor(label.foregroundRole(), _MISMATCH_FG)
                 label.setPalette(pal)
+                why = self._unread_files.get((side, name))
                 label.setToolTip(
+                    f'No tables were read from "{name}" — none of its data will be included in Compare.\n{why}'
+                    if why else
                     f'All tables from "{name}" have been removed — '
                     "none of its data will be included in Compare.\n"
                     "Browse for it again to re-add it."
@@ -2206,7 +2289,7 @@ class MainWindow(QMainWindow):
                 item = lw.item(i)
                 name = item.data(Qt.ItemDataRole.UserRole)
                 label = lw.itemWidget(item)._label
-                label.setText(name)
+                label.setText(("⚠ " if (side, name) in self._file_problems or (side, name) in self._unread_files else "") + name)
                 if (side, name) not in self._file_origin and not label.toolTip():
                     label.setToolTip(f"{name} came from a saved comparison (or its location is unknown): there is no "
                                      "file on disk to check or reload. Browse for it to add it again.")
@@ -4308,6 +4391,13 @@ class MainWindow(QMainWindow):
                     self._missing_qty_df.rename(columns={
                         "side": "Side", "doc": "Document", "sheet": "Sheet", "key": "Stock Code",
                     }).to_excel(writer, index=False, sheet_name="No Quantity")
+                # What the parser could not compare (a line without a Stock Code, a code column without a header …)
+                parse_notes = [{"Side": side, "Document": t["source_file"], "Sheet": t["source_sheet"],
+                                "Level": "Check" if n["level"] == "warn" else "Info", "Note": n["text"]}
+                               for side, tabs in (("MR", self._mr_tables), ("CTR", self._ctr_tables))
+                               for t in tabs for n in t.get("notes", [])]
+                if parse_notes:
+                    pd.DataFrame(parse_notes).to_excel(writer, index=False, sheet_name="Parse Notes")
             Path(path).write_bytes(buf.getvalue())
             log.info("Report saved: %s", path)
             QMessageBox.information(self, "Saved", f"Report saved:\n{path}")

@@ -22,6 +22,7 @@ CTR Generator 1.0.24 (in progress, not released): PDMS manpower in days, formula
 ## Next
 1. Ask which Phase D is: PDMS overview sheet header block (`ctr_tools/pdms_overview.py` info list: add city, signer, signer title, client, sub-client, revision, contract no, project type, comments) or the header fields in the window; then do it.
 2. Then decide: formulas in presets; release steps for 1.0.24 (ask new release vs continuation; /release; README/USER_GUIDE; CHANGELOG).
+3. DONE 2026-11-02: Hotbed "Reload standard" button (see CHANGELOG 1.0.24).
 
 ## Open questions
 - Phase D meaning (above). Nothing else unresolved.

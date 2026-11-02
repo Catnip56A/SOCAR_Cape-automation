@@ -105,6 +105,28 @@ class FormulaDoubleSpinBox(QDoubleSpinBox):
         f = self._live()
         super().setToolTip(_hint(self._base_tip, f[0] if f else None, format_number(f[1]) if f else None))
 
+    def formula_text(self) -> str | None:
+        """The formula behind the current value (None when the value was typed as a plain number)."""
+        f = self._live()
+        return f[0] if f else None
+
+    def clear_formula(self) -> None:
+        self._formula = None
+        self._show_tip()
+
+    def set_formula(self, text: str) -> bool:
+        """Show `text` as the formula of the current value (a saved preset restoring it). Refused, and False
+        returned, when it does not give the value the box holds."""
+        try:
+            v = min(max(evaluate(text), self.minimum()), self.maximum())
+        except FormulaError:
+            return False
+        if abs(v - self.value()) > 1e-9:
+            return False
+        self._formula = (text.strip(), v)
+        self._show_tip()
+        return True
+
     def _strip(self, text: str) -> str:
         t = text.strip()
         for tail in (self.suffix().strip(), self.prefix().strip()):

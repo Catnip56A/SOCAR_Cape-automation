@@ -76,6 +76,7 @@ from openpyxl.worksheet.properties import PageSetupProperties
 
 from ctr_tools.config import CFG
 from ctr_tools.naming import ctr_output_filename
+from ctr_tools.xl_formula import pick as _pick
 
 log = logging.getLogger(__name__)
 
@@ -625,7 +626,7 @@ def _write_third_party_section(
         uom      = str(tp.get("uom", "") or "").strip()
 
         ws.cell(row=r, column=1).value = str(tp.get("comment", "") or "")
-        ws.cell(row=r, column=2).value = qty
+        ws.cell(row=r, column=2).value = _pick(tp, "quantity", qty)
         ws.cell(row=r, column=3).value = str(tp.get("description", "") or "")
         # A line that carries no mark-up is left blank rather than showing
         # "0.0%", the way the hand-priced CTR this section is modelled on
@@ -635,7 +636,7 @@ def _write_third_party_section(
         markup_cell.value = markup or None
         markup_cell.number_format = _azn.get("third_party_markup_format", "0.0%")
         ws.cell(row=r, column=5).value = f"{duration:g} {uom}".strip()
-        ws.cell(row=r, column=6).value = rate
+        ws.cell(row=r, column=6).value = _pick(tp, "rate_azn", rate)
         ws.cell(row=r, column=7).value = (
             f"=B{r}*F{r}*{_DURATION_NUMBER.format(cell=f'E{r}')}*(1+D{r})"
         )
@@ -830,11 +831,11 @@ def build_azn(
             rate    = _require_float(lr, "rate_azn", _what)
 
             ws.cell(row=r, column=1).value = strip_support_keyword(str(lr.get("comment", "")))
-            ws.cell(row=r, column=2).value = num_emp
+            ws.cell(row=r, column=2).value = _pick(lr, "num_employees", num_emp)
             ws.cell(row=r, column=3).value = strip_support_keyword(str(lr.get("description", "")))
-            ws.cell(row=r, column=4).value = qty
+            ws.cell(row=r, column=4).value = _pick(lr, "quantity", qty)
             ws.cell(row=r, column=5).value = str(lr.get("uom", "Hours"))
-            ws.cell(row=r, column=6).value = rate
+            ws.cell(row=r, column=6).value = _pick(lr, "rate_azn", rate)
             ws.cell(row=r, column=7).value = f"=B{r}*D{r}*F{r}"
             ws.cell(row=r, column=8).value = f"=G{r}"
             ws.cell(row=r, column=9).value = str(lr.get("nationality", "NAT"))

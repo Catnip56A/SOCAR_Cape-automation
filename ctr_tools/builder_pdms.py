@@ -40,6 +40,7 @@ from docx.table import Table, _Row
 from docx.text.paragraph import Paragraph
 
 from ctr_tools.config import CFG
+from ctr_tools.xl_formula import pick as _pick, pick_days as _pick_days
 from ctr_tools.naming import pdms_output_filename
 
 log = logging.getLogger(__name__)
@@ -157,7 +158,9 @@ def _unit_prices(equip_rows, consump_rows, rates: dict, markup_rate: float, defa
         unit = rate * fx
         equipment.append({"description": r["description"], "qty": qty, "days": days,
                           "uom": r.get("unit", ""), "unit": unit, "total": _cents(qty * days * unit),
-                          "native": rate, "cur": cur, "fx": fx, "code": str(r.get("stock_code") or "")})
+                          "native": rate, "cur": cur, "fx": fx, "code": str(r.get("stock_code") or ""),
+                          "f": {"qty": _pick(r, "quantity", None), "days": _pick(r, "days", None),
+                                "native": _pick(r, "rate_per_day", None)}})
     consumables = []
     for r in consump_rows:
         cost = _num(r.get("local_expect_cost"))
@@ -170,7 +173,8 @@ def _unit_prices(equip_rows, consump_rows, rates: dict, markup_rate: float, defa
         consumables.append({"description": r["long_description"], "uom": r.get("unit_code", ""),
                             "qty": qty, "unit": unit, "total": _cents(qty * unit),
                             "native": cost, "cur": cur, "fx": fx, "markup": markup_rate,
-                            "code": str(r.get("product") or "")})
+                            "code": str(r.get("product") or ""),
+                            "f": {"qty": _pick(r, "quantity", None), "native": _pick(r, "local_expect_cost", None)}})
     return equipment, consumables
 
 
@@ -194,7 +198,8 @@ def _transport_lines(third_party_rows, rates: dict, defaults: dict) -> list[dict
         out.append({"description": str(what),
                     "total": _cents(qty * rate_azn * duration * (1 + markup)),
                     "qty": qty, "duration": duration, "uom": str(tp.get("uom") or ""), "native": rate,
-                    "cur": cur, "fx": fx, "markup": markup})
+                    "cur": cur, "fx": fx, "markup": markup,
+                    "f": {"qty": _pick(tp, "quantity", None), "native": _pick(tp, "rate_azn", None)}})
     return out
 
 
@@ -342,7 +347,10 @@ def compute_pdms(
                        "days": qty_hours / hours, "men": men, "rate": hourly * hours,
                        "total": _cents(men * qty_hours * hourly),
                        "native": float(r["rate_azn"]) * hours, "cur": cur, "fx": fx,
-                       "encoding": str(r.get("encoding") or "")})
+                       "encoding": str(r.get("encoding") or ""),
+                       # Excel formulas for the overview sheet (days and a day rate), where a cell was typed as one
+                       "f": {"days": _pick_days(r, "quantity", None), "men": _pick(r, "num_employees", None),
+                             "native": _pick_days(r, "rate_azn", None)}})
     equipment, consumables = _unit_prices(equip_rows, consump_rows, rates, markup_rate, defaults)
     transport = _transport_lines(third_party_rows, rates, defaults)
     hotbed_total = 0.0

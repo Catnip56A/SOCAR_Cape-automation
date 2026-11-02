@@ -130,7 +130,7 @@ def test_window_pdms_mode_swaps_rows_and_writes_only_the_proposal():
     # normal mode: Contract No visible, PDMS rows hidden
     assert w._contract_no_azn_edit.isVisibleTo(w) and not w._prp_edit.isVisibleTo(w)
     w._pdms_check.setChecked(True)
-    assert w._prp_edit.isVisibleTo(w) and not w._contract_no_azn_edit.isVisibleTo(w)
+    assert w._prp_edit.isVisibleTo(w) and w._contract_no_azn_edit.isVisibleTo(w)   # the CTR header fields stay (the overview lists them)
     assert w._attention_edit.text()                     # filled from the request's requester
     # Generate refuses without a PRP No
     out = H.SANDBOX / "out" / "pdms_ui"

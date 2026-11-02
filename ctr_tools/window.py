@@ -43,7 +43,7 @@ from pathlib import Path
 import pandas as pd
 from ctr_tools import __version__ as _VERSION
 from common.formula_widgets import FormulaDoubleSpinBox, install_formula_edit
-from common.formula import FormulaError, evaluate as evaluate_formula, format_number, is_formula
+from common.formula import FormulaError, evaluate as evaluate_formula, format_number, is_formula, to_excel
 from PySide6.QtCore import (
     QEvent, Qt, QItemSelectionModel, QObject, QPoint, QRunnable, QSettings, QThread, QThreadPool, QTimer, Signal,
 )
@@ -63,7 +63,7 @@ from ctr_tools.desc_renames import (
     load_desc_renames, get_desc_rename, set_desc_rename, delete_desc_rename,
     save_desc_renames,
 )
-from ctr_tools.config import CFG
+from ctr_tools.config import CFG, reload_pdms_config
 from stats import cost_stats
 from common.find_bar import install_find
 from common.hover_text import install_elided_tooltips
@@ -2209,10 +2209,17 @@ class CTRGeneratorWidget(QWidget):
         self._hotbed_cur_combo = QComboBox()
         self._hotbed_cur_combo.setToolTip("The currency of the Hotbed rate.")
         self._hotbed_total_lbl = QLabel("")
+        self._hotbed_total_lbl.setToolTip("Total of the Hotbed line in manats = Rate × Days × the CBAR rate of the "
+                                          "rate's currency (1 for AZN).")
         self._hotbed_total_lbl.setStyleSheet(f"color: {MUTED}; font-size: 11px;")
+        self._hotbed_reload_btn = QPushButton("Reload standard")
+        self._hotbed_reload_btn.setToolTip(
+            "Put back the standard Hotbed rate and currency from template_config.json (the file is read again now, so "
+            "an edit of it applies without restarting). The days are not touched.")
+        self._hotbed_reload_btn.clicked.connect(self._reload_hotbed_standard)
         for _w in (_hb_lbl, self._hotbed_incl_chk, QLabel("Rate"), self._hotbed_rate_edit, self._hotbed_cur_combo,
                    QLabel("× Days"),
-                   self._hotbed_days_edit, self._hotbed_total_lbl):
+                   self._hotbed_days_edit, self._hotbed_total_lbl, self._hotbed_reload_btn):
             hotbed_row.addWidget(_w)
             self._hotbed_widgets.append(_w)
         hotbed_row.addStretch()
@@ -2562,6 +2569,25 @@ class CTRGeneratorWidget(QWidget):
         self._price_totals_lbl.setWordWrap(True)
         self._price_totals_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         gl.addWidget(self._price_totals_lbl)
+
+        # Manpower: listed here too, but not costed like the SAGE lines above (no rechargeable / non-rechargeable
+        # split, no SAGE cost): the matched lines of the Manpower table with the figures its own Total column holds.
+        self._mp_stats_lbl = QLabel("")
+        self._mp_stats_lbl.setWordWrap(True)
+        self._mp_stats_lbl.setStyleSheet(f"color: {MUTED}; font-size: 11px; font-weight: bold;")
+        self._mp_stats_tbl = QTableWidget(0, 7)
+        self._mp_stats_tbl.setHorizontalHeaderLabels(["Description", "Encoding", "Men", "Quantity", "UOM", "Rate", "Total AZN"])
+        self._mp_stats_tbl.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self._mp_stats_tbl.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        self._mp_stats_tbl.verticalHeader().setVisible(False)
+        self._mp_stats_tbl.setAlternatingRowColors(True)
+        self._mp_stats_tbl.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        self._mp_stats_tbl.setMaximumHeight(170)
+        self._mp_stats_tbl.setToolTip("The matched lines of the Manpower table (what goes into the CTR). Manpower has no SAGE "
+                                      "cost, so it is not part of the figures above.")
+        install_elided_tooltips(self._mp_stats_tbl)
+        gl.addWidget(self._mp_stats_lbl)
+        gl.addWidget(self._mp_stats_tbl)
 
         self._stats_note_lbl = QLabel("")
         self._stats_note_lbl.setStyleSheet(f"color: {MUTED}; font-size: 11px;")
@@ -2980,8 +3006,43 @@ class CTRGeneratorWidget(QWidget):
                 "equipment": equipment, "scaffold": scaffold, "scaffold_included": with_scaffold,
                 "consumables": consumables, "markup": markup, "usd_total": usd_total, "left_out": left}
 
+    def _refresh_manpower_stats(self) -> None:
+        """The Manpower list under the statistics: the matched lines, in days and a day rate in PDMS mode."""
+        tbl, src = getattr(self, "_mp_stats_tbl", None), self._req_manpower_tbl
+        if tbl is None:
+            return
+        rows = [r for r in range(src.rowCount())
+                if src.item(r, _MP_STATUS) is not None and src.item(r, _MP_STATUS).text().startswith("✓")]
+        tbl.setRowCount(len(rows))
+        total = 0.0
+        for i, r in enumerate(rows):
+            def txt(c, _r=r):
+                it = src.item(_r, c)
+                return it.text().strip() if it else ""
+
+            def shown(c, _r=r):
+                v = self._days_view(src.model().index(_r, c))
+                return v["shown"] if v else txt(c)
+            try:
+                total += float(txt(_MP_TOTAL))
+            except ValueError:
+                pass
+            for c, text in enumerate((txt(_MP_DESC), txt(_MP_ENC), txt(_MP_NUMEMP), shown(_MP_QTY), shown(_MP_UOM),
+                                      shown(_MP_RATE), txt(_MP_TOTAL))):
+                item = QTableWidgetItem(text)
+                item.setFlags(Qt.ItemFlag.ItemIsEnabled)
+                if c >= 2:
+                    item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                tbl.setItem(i, c, item)
+        tbl.setVisible(bool(rows))
+        self._mp_stats_lbl.setVisible(bool(rows))
+        sign = "₼" if self._pdms_on() else "AZN"
+        self._mp_stats_lbl.setText(f"Manpower — {len(rows)} matched line(s), {sign} {total:,.2f}. Not costed from SAGE, so "
+                                   "it is not part of the rechargeable / non-rechargeable figures above.")
+
     def _refresh_price_totals(self) -> None:
         """Show price_totals() under the statistics: one block per currency."""
+        self._refresh_manpower_stats()
         t = self.price_totals()
         left = t["left_out"]
         waiting = sum(1 for tbl, c in ((self._req_manpower_tbl, _MP_STATUS), (self._req_equip_tbl, _EQ_STATUS),
@@ -3247,6 +3308,53 @@ class CTRGeneratorWidget(QWidget):
 
     _STATS_DIR_KEY = "stats_save_dir"
 
+    def _formulas_into_price_items(self, ws) -> int:
+        """In the statistics workbook's "Price Items" sheet, a Qty / Rate / Days that was typed as a formula in the
+        tables is written as that formula. The sheet's rows come out of the statistics (sorted, filtered), so a line
+        is matched by its Stock Code and only when the sheet's number equals the formula's value — anything else
+        stays a plain number. Returns how many cells became formulas."""
+        want: dict[str, list[dict]] = {}
+        for tbl, code_col, cols, status_col in (
+                (self._req_equip_tbl, _EQ_CODE, {"Qty": _EQ_QTY, "Rate": _EQ_RATE, "Days": _EQ_DAYS}, _EQ_STATUS),
+                (self._req_cons_tbl, _CS_CODE, {"Qty": _CS_QTY, "Rate": _CS_PRICE}, _CS_STATUS)):
+            for r in range(tbl.rowCount()):
+                st, code = tbl.item(r, status_col), tbl.item(r, code_col)
+                if st is None or not st.text().startswith("✓") or code is None or not code.text().strip():
+                    continue
+                f_ctr, _alt = self._row_formulas(tbl, r, {c: (name, "plain") for name, c in cols.items()})
+                if not f_ctr:
+                    continue
+                vals = {}
+                for name, c in cols.items():
+                    if name in f_ctr:
+                        try:
+                            vals[name] = (f_ctr[name], float(tbl.item(r, c).text()))
+                        except (TypeError, ValueError):
+                            pass
+                if vals:
+                    want.setdefault(code.text().strip().upper(), []).append(vals)
+        if not want:
+            return 0
+        head = {str(c.value): c.column for c in ws[1] if c.value is not None}
+        if "Stock Code" not in head:
+            return 0
+        n = 0
+        for r in range(2, ws.max_row + 1):
+            code = str(ws.cell(r, head["Stock Code"]).value or "").strip().upper()
+            for cand in want.get(code, []):
+                hit = False
+                for name, (formula, value) in list(cand.items()):
+                    col = head.get(name)
+                    cell = ws.cell(r, col) if col else None
+                    if cell is not None and isinstance(cell.value, (int, float)) and abs(cell.value - value) < 1e-9:
+                        cell.value = formula
+                        del cand[name]
+                        n += 1
+                        hit = True
+                if hit:
+                    break
+        return n
+
     def _save_stats_excel(self):
         """Save the statistics box as an Excel file (Statistics, Statistics
         Items, Info). The folder is asked for, remembered, and shown again
@@ -3310,6 +3418,8 @@ class CTRGeneratorWidget(QWidget):
                 for df, name in (*sheets, (info, "Info")):
                     df.to_excel(writer, index=False, sheet_name=name)
                     ws = writer.sheets[name]
+                    if name == "Price Items":
+                        self._formulas_into_price_items(ws)
                     for i, col in enumerate(df.columns, start=1):
                         longest = max([len(str(col))] + [len(str(v)) for v in df[col].head(200)])
                         ws.column_dimensions[ws.cell(row=1, column=i).column_letter].width = min(70, longest + 2)
@@ -3319,6 +3429,9 @@ class CTRGeneratorWidget(QWidget):
                         figures, hdr, days = self._pdms_overview_data()
                         add_overview_sheet(writer.book, figures, hdr, days, index=0)
                         writer.book.active = 0
+                        if getattr(self, "_overview_no_shift", None):
+                            overview_note = ("\n\nLeft out of the PDMS overview (no shift length, so no days / day rate): "
+                                             + "; ".join(self._overview_no_shift[:10]))
                     except Exception as exc:       # a missing rate / shift length must not lose the other sheets
                         log.warning("PDMS overview sheet skipped: %s", exc)
                         overview_note = f"\n\nThe PDMS overview sheet was NOT added: {exc}"
@@ -3345,7 +3458,7 @@ class CTRGeneratorWidget(QWidget):
                 return None
             return v if v == v else None
 
-        return {
+        vals = {
             "comment":     "",
             "transport_type": _txt(_TR_TYPE),
             "description": _txt(_TR_DESC) or _txt(_TR_TYPE),
@@ -3358,6 +3471,11 @@ class CTRGeneratorWidget(QWidget):
             "markup":      (_num(_TR_MARKUP) or 0.0) / 100.0,
             "currency":    self._cell_currency("transport", self._transport_tbl, _TR_RATE, row),
         }
+        f_ctr, _alt = self._row_formulas(self._transport_tbl, row, {
+            _TR_QTY: ("quantity", "plain"), _TR_RATE: ("rate_azn", "plain")})
+        if f_ctr:
+            vals["formulas"] = f_ctr
+        return vals
 
     def _append_transport_row(self, line: dict):
         tbl = self._transport_tbl
@@ -3457,10 +3575,8 @@ class CTRGeneratorWidget(QWidget):
         )
 
         # PDMS proposal mode: a Word proposal instead of the AZN / USD CTRs. The same rows
-        # and values; only the header differs (no Contract No / Sub-Client / Revision /
-        # Comments — a PRP number, the addressee and the signer instead). The two sets of
-        # rows share the same place in the layout: ticking the box swaps them, so the
-        # window does not grow.
+        # and values; the header gets a PRP number, the addressee and the signer on top of
+        # the CTR fields (those the letter does not use are listed in the overview sheet).
         dflt = pdms_defaults()
         self._pdms_check = QCheckBox("PDMS proposal (Word) instead of AZN / USD CTR")
         self._pdms_check.setToolTip(
@@ -3529,7 +3645,6 @@ class CTRGeneratorWidget(QWidget):
         for _c in self._cat_combos.values():
             _c.currentTextChanged.connect(lambda _t: (self._recalc_all_totals(), self._update_group_titles()))
         self._pdms_rows = [row_prp, row_cu, row_ci, row_at, row_ld, row_sg, row_st]
-        self._ctr_only_rows = [row_sc, row_cna, row_cnu, row_rv, row_cm]
         for row in (row_c, row_sc, row_l, row_s, row_d, row_cna, row_cnu, row_rv, row_pt, row_cm):
             gl.addLayout(row)
         for row in self._pdms_rows:
@@ -3807,7 +3922,56 @@ class CTRGeneratorWidget(QWidget):
         # ticked, otherwise left out (None).
         if (rate is None or days is None) and not self._hotbed_incl_chk.isChecked():
             return None
-        return {"rate": rate, "days": days, "currency": self._hotbed_cur_combo.currentText() or "AZN"}
+        out = {"rate": rate, "days": days, "currency": self._hotbed_cur_combo.currentText() or "AZN"}
+        fr, fd = self._edit_formula(self._hotbed_rate_edit), self._edit_formula(self._hotbed_days_edit)
+        if fr or fd:                                    # cells typed as formulas stay formulas in the overview sheet
+            out["formulas"] = {k: v for k, v in (("rate", fr), ("days", fd)) if v}
+        return out
+
+    @staticmethod
+    def _edit_formula(edit) -> str | None:
+        """The Excel formula behind a box (Hotbed rate / days) while it still holds the value it gave, else None."""
+        helper = getattr(edit, "_formula_helper", None)
+        f = helper.formula if helper is not None else None
+        if not f or edit.text() != f[1]:
+            return None
+        try:
+            return to_excel(f[0])
+        except FormulaError:
+            return None
+
+    def _reload_hotbed_standard(self) -> None:
+        """The Hotbed's "Reload standard" button: the standard rate and currency from template_config.json (read again
+        now) go back in; the days are never touched. Asks first when that overwrites something you typed."""
+        try:
+            reload_pdms_config()
+        except ValueError as exc:
+            QMessageBox.warning(self, "Reload standard", f"{exc}.\n\nThe Hotbed values were not changed.")
+            return
+        d = pdms_defaults()
+        rate = f"{float(d['hotbed_rate']):g}"
+        cur = d["category_currencies"].get("hotbed", "AZN")
+        if self._hotbed_cur_combo.findText(cur) < 0:                    # a currency that is not turned on: AZN is always there
+            cur = "AZN"
+        now_rate, now_cur = self._hotbed_rate_edit.text().strip(), self._hotbed_cur_combo.currentText()
+        if now_rate == rate and now_cur == cur:
+            self._ctr_req_status.setText(f"Hotbed: already the standard ({rate} {cur} per day).")
+            return
+        if QMessageBox.question(
+                self, "Reload standard Hotbed",
+                f"Put back the standard Hotbed values from template_config.json?\n\n"
+                f"   Rate:      {now_rate or '(empty)'}  →  {rate}\n   Currency:  {now_cur}  →  {cur}\n\n"
+                "The days are not touched.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No) != QMessageBox.StandardButton.Yes:
+            return
+        helper = getattr(self._hotbed_rate_edit, "_formula_helper", None)
+        if helper is not None:
+            helper.formula = None                                       # a formula typed there is replaced, not kept
+        self._hotbed_rate_edit.setText(rate)
+        self._hotbed_cur_combo.setCurrentText(cur)
+        self._update_hotbed_total()
+        self._ctr_req_status.setText(f"Hotbed reset to the standard: {rate} {cur} per day (days unchanged).")
 
     def _update_hotbed_total(self) -> None:
         hb = self._hotbed_values()
@@ -4247,13 +4411,11 @@ class CTRGeneratorWidget(QWidget):
                 w.setVisible(visible)
 
     def _set_pdms_mode(self, on: bool) -> None:
-        """Swap the CTR-only header rows for the PDMS ones (the values of the hidden ones
-        are kept, so unticking brings them back)."""
-        for row in self._ctr_only_rows:
-            self._show_row(row, not on)
+        """Show the PDMS header rows (PRP No, customer, addressee, signer …) next to the CTR ones. The CTR
+        header fields (Sub-Client, Contract No, Revision, Comments) stay: the letter does not use them, but the
+        PDMS overview sheet lists them. The AZN / USD templates are not used in PDMS mode."""
         for row in self._pdms_rows:
             self._show_row(row, on)
-        # Contract No does not exist in a proposal; the AZN / USD templates are not used
         for edit in (self._azn_tpl_edit, self._usd_tpl_edit):
             edit.setEnabled(not on)
         self._pdms_tpl_edit.setEnabled(on)
@@ -4292,6 +4454,7 @@ class CTRGeneratorWidget(QWidget):
             "job_ref":         self._job_ref_edit.text(),
             "output_dir":      self._out_dir_edit.text(),
             "markup_rate_pct": self._markup_spin.value(),
+            **({"markup_formula": f} if (f := self._markup_spin.formula_text()) else {}),   # only while the value came from one
         }
 
     def _apply_preset_data(self, data: dict) -> None:
@@ -4304,10 +4467,13 @@ class CTRGeneratorWidget(QWidget):
         self._job_ref_edit.setText(data.get("job_ref", ""))
         if data.get("output_dir"):
             self._out_dir_edit.setText(data["output_dir"])
+        self._markup_spin.clear_formula()                    # a preset brings its own (or none)
         try:
             self._markup_spin.setValue(float(data.get("markup_rate_pct", _DEFAULT_MARKUP_PCT)))
         except (TypeError, ValueError):
             self._markup_spin.setValue(_DEFAULT_MARKUP_PCT)
+        if data.get("markup_formula"):                       # the formula the saved value came from
+            self._markup_spin.set_formula(str(data["markup_formula"]))
 
     def _refresh_preset_combo(self) -> None:
         self._preset_combo.clear()
@@ -6160,6 +6326,14 @@ class CTRGeneratorWidget(QWidget):
                 "project_type":   self._project_type_edit.text().strip(),
                 "signer_name":    self._signer_edit.text().strip(),
                 "signer_title":   self._signer_title_edit.text().strip(),
+                # the CTR header fields, for the overview sheet (the Word letter does not use them)
+                "client":          self._client_edit.text().strip(),
+                "sub_client":      self._sub_client_edit.text().strip(),
+                "job_ref":         self._job_ref_edit.text().strip(),
+                "revision":        self._revision_edit.text().strip(),
+                "contract_no_azn": self._contract_no_azn_edit.text().strip(),
+                "contract_no_usd": self._contract_no_usd_edit.text().strip(),
+                "comments":        self._comments_edit.text().strip(),
             },
         }
 
@@ -6170,6 +6344,7 @@ class CTRGeneratorWidget(QWidget):
         incomplete = self._incomplete_cells()
         bad_rows = {(id(c["tbl"]), c["row"]) for c in incomplete}
         rows = self._collect_rows(True, bad_rows)
+        self._overview_no_shift = rows["no_shift"]          # left out (no shift length); the export says so
         job = self._pdms_payload()
         data = compute_pdms(
             rows["support_rows"], rows["other_rows"], rows["equip_rows"], rows["consump_rows"], job["header"],
@@ -6177,6 +6352,33 @@ class CTRGeneratorWidget(QWidget):
         info = {c: {"day": d["date"], "stamp": d.get("stamp", ""), "action": d.get("action", "")}
                 for c, d in self._fx.items()}
         return data, job["header"], info
+
+    def _row_formulas(self, tbl, r: int, cols: dict, ph: float | None = None) -> tuple[dict, dict]:
+        """({field: "=expr"} in the units the CTR holds, the same in the overview sheet's units) for the cells of
+        row `r` whose number came from a formula. `cols` maps a column to (field, kind), kind "qty" / "rate" for
+        the manpower cells that are days and a day rate in PDMS mode (`ph` = the shift length), else "plain"."""
+        ctr, alt = {}, {}
+        for col, (field, kind) in cols.items():
+            it = tbl.item(r, col)
+            d = it.data(_FORMULA_ROLE) if it is not None else None
+            if not d or it.text() != d[1]:
+                continue
+            try:
+                expr = to_excel(d[0])[1:]
+            except FormulaError:
+                continue
+            if kind == "plain":
+                ctr[field] = alt[field] = "=" + expr
+            elif ph:
+                hours_unit = d[2] != "days"            # written in the units the cell holds (hours / hourly), or in days
+                a, b = ("=" + expr, "=(" + expr + ")" + ("/" if kind == "qty" else "*") + f"{ph:g}")
+                if hours_unit:
+                    ctr[field], alt[field] = a, b
+                else:
+                    alt[field], ctr[field] = a, "=(" + expr + ")" + ("*" if kind == "qty" else "/") + f"{ph:g}"
+            elif d[2] != "days":
+                ctr[field] = alt[field] = "=" + expr
+        return ctr, alt
 
     def _collect_rows(self, pdms_on: bool, bad_rows: set) -> dict:
         """The rows that go into a generated document, read from the four tables: only rows with a
@@ -6186,6 +6388,7 @@ class CTRGeneratorWidget(QWidget):
         # unmatched requests never silently appear in the output at rate 0.
         support_rows, other_rows = [], []
         mp_skipped = 0
+        no_shift = []                         # PDMS: manpower rows left out because days / a day rate cannot be worked out
         incomplete_skipped = len(bad_rows)    # rows left out for a missing value
         for r in range(self._req_manpower_tbl.rowCount()):
             status_item = self._req_manpower_tbl.item(r, _MP_STATUS)
@@ -6209,6 +6412,9 @@ class CTRGeneratorWidget(QWidget):
             # Shift length (hours) from the Encoding, e.g. NS-NAT-OFF-12 -> 12; the matched stock
             # code is the fallback. The PDMS proposal needs it to show days and a day rate.
             _hours = self._row_shift_hours(r)
+            if pdms_on and not _hours:                    # the proposal shows days and a day rate: leave the row out
+                no_shift.append(_txt(_MP_DESC))
+                continue
             row_dict = {
                 # Comment is otherwise unused for a manpower row — this is
                 # the only place Shift/Shift Type end up in the generated
@@ -6226,6 +6432,11 @@ class CTRGeneratorWidget(QWidget):
                 "encoding":      _txt(_MP_ENC),
                 "currency":      self._cell_currency("manpower", self._req_manpower_tbl, _MP_RATE, r) if pdms_on else None,
             }
+            f_ctr, f_days = self._row_formulas(
+                self._req_manpower_tbl, r,
+                {_MP_NUMEMP: ("num_employees", "plain"), _MP_QTY: ("quantity", "qty"), _MP_RATE: ("rate_azn", "rate")}, _hours)
+            if f_ctr:
+                row_dict["formulas"], row_dict["formulas_days"] = f_ctr, f_days
             if is_support_manpower(row_dict["description"]):
                 support_rows.append(row_dict)
             else:
@@ -6268,6 +6479,10 @@ class CTRGeneratorWidget(QWidget):
                 "sage_cost":    sage_cost,
                 "currency":     self._cell_currency("equipment", self._req_equip_tbl, _EQ_RATE, r) if pdms_on else None,
             })
+            f_ctr, _alt = self._row_formulas(self._req_equip_tbl, r, {
+                _EQ_QTY: ("quantity", "plain"), _EQ_RATE: ("rate_per_day", "plain"), _EQ_DAYS: ("days", "plain")})
+            if f_ctr:
+                equip_rows[-1]["formulas"] = f_ctr
 
         consump_rows = []
         cs_skipped = 0
@@ -6302,6 +6517,10 @@ class CTRGeneratorWidget(QWidget):
                 "sage_cost":         sage_cost,
                 "currency":          self._cell_currency("consumables", self._req_cons_tbl, _CS_PRICE, r) if pdms_on else None,
             })
+            f_ctr, _alt = self._row_formulas(self._req_cons_tbl, r, {
+                _CS_QTY: ("quantity", "plain"), _CS_PRICE: ("local_expect_cost", "plain")})
+            if f_ctr:
+                consump_rows[-1]["formulas"] = f_ctr
 
         # Transport / hired services — the AZN CTR's "Third Party Activities"
         # section. Nothing to match against a pricebook here, so every row is
@@ -6314,7 +6533,7 @@ class CTRGeneratorWidget(QWidget):
         return {"support_rows": support_rows, "other_rows": other_rows, "equip_rows": equip_rows,
                 "consump_rows": consump_rows, "third_party_rows": third_party_rows,
                 "mp_skipped": mp_skipped, "eq_skipped": eq_skipped, "cs_skipped": cs_skipped,
-                "incomplete_skipped": incomplete_skipped}
+                "incomplete_skipped": incomplete_skipped, "no_shift": no_shift}
 
     def _generate(self):
         errors   = []
@@ -6510,19 +6729,20 @@ class CTRGeneratorWidget(QWidget):
         mp_skipped, eq_skipped, cs_skipped = rows["mp_skipped"], rows["eq_skipped"], rows["cs_skipped"]
         incomplete_skipped = rows["incomplete_skipped"]
 
-        if pdms_on:
+        if pdms_on and rows["no_shift"]:
             # The proposal's labour table shows days and a day rate; both come from the shift length.
-            _bad = [r_["description"] for r_ in support_rows + other_rows if not r_["hours_per_shift"]]
-            if _bad:
-                QMessageBox.critical(
-                    self, "Shift length missing",
-                    "The PDMS proposal shows days and a day rate, which need the shift length — the "
-                    "hours at the end of the Encoding (for example NS-NAT-OFF-12 = 12 hours). These "
-                    "manpower rows have none:\n\n• " + "\n• ".join(_bad[:15])
-                    + "\n\nChoose an Encoding for them (or set Match By to the exact stock code) and "
-                      "generate again.")
+            _bad = rows["no_shift"]
+            answer = QMessageBox.question(
+                self, "Shift length missing — rows will be skipped",
+                "The PDMS proposal shows days and a day rate, which need the shift length — the hours at the "
+                "end of the Encoding (for example NS-NAT-OFF-12 = 12 hours). These manpower rows have none and "
+                "will be SKIPPED (left out of the proposal):\n\n• " + "\n• ".join(_bad[:15])
+                + (f"\n• … and {len(_bad) - 15} more" if len(_bad) > 15 else "")
+                + "\n\nChoose an Encoding for them (or set Match By to the exact stock code) to include them.\n\n"
+                  "Generate without them?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel, QMessageBox.StandardButton.Cancel)
+            if answer != QMessageBox.StandardButton.Yes:
                 return
-
 
         total_skipped = mp_skipped + eq_skipped + cs_skipped
         if total_skipped:

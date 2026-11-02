@@ -181,3 +181,30 @@ def reset_to_shipped() -> None:
     global _cache
     _cache = None
     load_types()
+
+
+def my_entries_count(mine: dict, ship: dict) -> int:
+    """How many things in the user's list are the user's own: codes the shipped list does not have, codes the user moved
+    to the other list, and decisions that differ from the shipped ones."""
+    known = ship["equipment"] | ship["consumable"]
+    added = (mine["equipment"] | mine["consumable"]) - known
+    moved = {c for c in known & (mine["equipment"] | mine["consumable"])
+             if (c in mine["equipment"]) != (c in ship["equipment"]) or (c in mine["consumable"]) != (c in ship["consumable"])}
+    decisions = {c for c, k in mine.get("confirmed", {}).items() if ship.get("confirmed", {}).get(c) != k} - added - moved
+    return len(added) + len(moved) + len(decisions)
+
+
+def undo_my_entries() -> int:
+    """Remove what the user added or decided: codes the shipped list does not have go, codes the user moved go back to
+    where they shipped, the user's own decisions are dropped. Shipped codes the user deleted stay deleted (Merge
+    shipped brings them back). Returns how many things were undone."""
+    mine, ship = _copy(read_types(_TYPES_PATH) or empty_types()), shipped_types()
+    n = my_entries_count(mine, ship)
+    known = ship["equipment"] | ship["consumable"]
+    have = (mine["equipment"] | mine["consumable"]) & known
+    result = {"equipment": {c for c in have if c in ship["equipment"]},
+              "consumable": {c for c in have if c in ship["consumable"]},
+              "confirmed": {c: k for c, k in mine.get("confirmed", {}).items()
+                            if c in have and ship.get("confirmed", {}).get(c) == k}}
+    save_types(result)
+    return n

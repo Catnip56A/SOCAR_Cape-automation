@@ -130,19 +130,35 @@ def add_overview_sheet(wb, data: dict, header: dict, rate_days: dict | None = No
     ws.cell(row=2, column=2).alignment = Alignment(wrap_text=True, vertical="top")
     ws.row_dimensions[2].height = 30
 
-    # ── the job ──
+    # ── the job: every row the Word letter is filled with, and the header fields the CTRs carry ──
     info = [
         ("PRP No", header.get("prp_number", "")),
         ("Date", letter_date(header.get("date", ""))),
+        ("Client", header.get("client", "")),
+        ("Sub-Client", header.get("sub_client", "")),
         ("Customer", header.get("customer_name") or cfg["customer_name"]),
+        ("Customer city", header.get("customer_city") or cfg["customer_city"]),
         ("Attention", header.get("attention_name", "")),
         ("Job", header.get("scope", "")),
         ("Location", data["location"]),
+        ("Project type", header.get("project_type", "")),
+        ("Job Ref", header.get("job_ref", "")),
+        ("Revision", header.get("revision", "")),
+        ("Contract No (AZN)", header.get("contract_no_azn", "")),
+        ("Contract No (USD)", header.get("contract_no_usd", "")),
+        ("Signer", header.get("signer_name") or cfg["signer_name"]),
+        ("Signer title", header.get("signer_title") or cfg["signer_title"]),
+        ("Comments", header.get("comments", "")),
     ]
     for i, (k, v) in enumerate(info):
         sh.put(4 + i, 2, k, bold=True, fill="F2F2F2")
         sh.put(4 + i, 3, v)
+        for c in (4, 5, 6):
+            sh.put(4 + i, c, None)                                  # the merged cell keeps its frame
         ws.merge_cells(start_row=4 + i, start_column=3, end_row=4 + i, end_column=6)
+    info_last = 3 + len(info)
+    ws.cell(row=info_last, column=3).alignment = Alignment(wrap_text=True, vertical="top")   # Comments can be long
+    ws.row_dimensions[info_last].height = 30
 
     # ── CBAR rates (AZN is always 1): the rate, where it is from, when it was last checked or changed, by what ──
     sh.put(3, 8, "CBAR rates", bold=True, size=11, border=False)
@@ -178,7 +194,7 @@ def add_overview_sheet(wb, data: dict, header: dict, rate_days: dict | None = No
     def fx(table: _Table, row: int, cur_key: str) -> str:
         return f'=IFERROR(VLOOKUP({table.at(cur_key, row)},{rates_rng},2,FALSE),0)'
 
-    row = max(11, rate_last + 2)
+    row = max(11, rate_last + 2, info_last + 2)
     out: dict = {"rates": rates_rng}
 
     # ── Table 1: labour (with the Encoding of each line) ──
@@ -197,9 +213,10 @@ def add_overview_sheet(wb, data: dict, header: dict, rate_days: dict | None = No
         t.put(row, "enc", ln.get("encoding") or None, fill=fill, align="center")
         t.put(row, "nat", ln["nationality"], fill=fill, align="center")
         t.put(row, "loc", data["location"], fill=fill, align="center")
-        t.put(row, "days", ln["days"], fill=fill, align="center", fmt="General")
-        t.put(row, "men", ln["men"], fill=fill, align="center", fmt="General")
-        t.put(row, "native", ln["native"], fill=fill, fmt=_NUM)
+        f = ln.get("f") or {}                                       # a cell typed as a formula stays one
+        t.put(row, "days", f.get("days") or ln["days"], fill=fill, align="center", fmt="General")
+        t.put(row, "men", f.get("men") or ln["men"], fill=fill, align="center", fmt="General")
+        t.put(row, "native", f.get("native") or ln["native"], fill=fill, fmt=_NUM)
         t.put(row, "cur", ln["cur"], fill=fill, align="center")
         t.put(row, "fx", fx(t, row, "cur"), fill=fill, fmt=_FX)
         t.put(row, "rate", t.f("={native}*{fx}", row), fill=_ROW2, fmt=_AZN)
@@ -210,8 +227,9 @@ def add_overview_sheet(wb, data: dict, header: dict, rate_days: dict | None = No
         for key in ("enc", "nat", "loc", "men"):
             t.put(row, key, None, fill=_ROW)
         t.put(row, "desc", cfg["hotbed_label"], fill=_ROW)
-        t.put(row, "days", hb.get("days"), fill=_ROW, align="center", fmt="General")
-        t.put(row, "native", hb.get("native"), fill=_ROW, fmt=_NUM)
+        hf = hb.get("formulas") or {}
+        t.put(row, "days", hf.get("days") or hb.get("days"), fill=_ROW, align="center", fmt="General")
+        t.put(row, "native", hf.get("rate") or hb.get("native"), fill=_ROW, fmt=_NUM)
         t.put(row, "cur", hb.get("cur", "AZN") if hb.get("rate") else None, fill=_ROW, align="center")
         t.put(row, "fx", fx(t, row, "cur") if hb.get("rate") else None, fill=_ROW, fmt=_FX)
         t.put(row, "rate", t.f("={native}*{fx}", row) if hb.get("rate") else None, fill=_ROW, fmt=_AZN)
@@ -241,10 +259,11 @@ def add_overview_sheet(wb, data: dict, header: dict, rate_days: dict | None = No
         for ln in data["equipment"]:
             t.put(row, "desc", ln["description"], fill=_ROW2)
             t.put(row, "code", ln.get("code") or None, fill=_ROW2, align="center")
-            t.put(row, "qty", ln["qty"], fill=_ROW2, align="center", fmt="General")
-            t.put(row, "days", ln["days"], fill=_ROW2, align="center", fmt="General")
+            f = ln.get("f") or {}
+            t.put(row, "qty", f.get("qty") or ln["qty"], fill=_ROW2, align="center", fmt="General")
+            t.put(row, "days", f.get("days") or ln["days"], fill=_ROW2, align="center", fmt="General")
             t.put(row, "uom", ln["uom"], fill=_ROW2, align="center")
-            t.put(row, "native", ln["native"], fill=_ROW2, fmt=_NUM)
+            t.put(row, "native", f.get("native") or ln["native"], fill=_ROW2, fmt=_NUM)
             t.put(row, "cur", ln["cur"], fill=_ROW2, align="center")
             t.put(row, "fx", fx(t, row, "cur"), fill=_ROW2, fmt=_FX)
             t.put(row, "unit", t.f("={native}*{fx}", row), fill=_ROW2, fmt=_AZN)
@@ -272,8 +291,9 @@ def add_overview_sheet(wb, data: dict, header: dict, rate_days: dict | None = No
             t.put(row, "desc", ln["description"], fill=_ROW2)
             t.put(row, "code", ln.get("code") or None, fill=_ROW2, align="center")
             t.put(row, "uom", ln["uom"], fill=_ROW2, align="center")
-            t.put(row, "qty", ln["qty"], fill=_ROW2, align="center", fmt="General")
-            t.put(row, "native", ln["native"], fill=_ROW2, fmt=_NUM)
+            f = ln.get("f") or {}
+            t.put(row, "qty", f.get("qty") or ln["qty"], fill=_ROW2, align="center", fmt="General")
+            t.put(row, "native", f.get("native") or ln["native"], fill=_ROW2, fmt=_NUM)
             t.put(row, "cur", ln["cur"], fill=_ROW2, align="center")
             t.put(row, "fx", fx(t, row, "cur"), fill=_ROW2, fmt=_FX)
             t.put(row, "markup", ln["markup"], fill=_ROW2, fmt="0.0%")
@@ -296,10 +316,11 @@ def add_overview_sheet(wb, data: dict, header: dict, rate_days: dict | None = No
         for ln in data["transport"]:
             t.put(row, "desc", ln["description"], fill=_ROW2)
             t.put(row, "code", None, fill=_ROW2)                       # transport has no stock code
-            t.put(row, "qty", ln["qty"], fill=_ROW2, align="center", fmt="General")
+            f = ln.get("f") or {}
+            t.put(row, "qty", f.get("qty") or ln["qty"], fill=_ROW2, align="center", fmt="General")
             t.put(row, "dur", ln["duration"], fill=_ROW2, align="center", fmt="General")
             t.put(row, "uom", ln["uom"], fill=_ROW2, align="center")
-            t.put(row, "native", ln["native"], fill=_ROW2, fmt=_NUM)
+            t.put(row, "native", f.get("native") or ln["native"], fill=_ROW2, fmt=_NUM)
             t.put(row, "cur", ln["cur"], fill=_ROW2, align="center")
             t.put(row, "fx", fx(t, row, "cur"), fill=_ROW2, fmt=_FX)
             t.put(row, "markup", ln["markup"], fill=_ROW2, fmt="0.0%")

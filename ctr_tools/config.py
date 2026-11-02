@@ -527,3 +527,18 @@ def load_config() -> dict:
 
 # Module-level singleton — import as `from ctr_tools.config import CFG`
 CFG: dict = load_config()
+
+
+def reload_pdms_config() -> dict:
+    """Re-read the "pdms" block of template_config.json into CFG (an edit of the file applies without restarting).
+    Only that block changes; the template positions stay as loaded. Raises ValueError when the file cannot be read,
+    and CFG is then left exactly as it was."""
+    try:
+        with _CONFIG_PATH.open("r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except Exception as exc:
+        raise ValueError(f"{_CONFIG_PATH.name} could not be read ({exc})") from exc
+    if not isinstance(data, dict) or not isinstance(data.get("pdms", {}), dict):
+        raise ValueError(f"{_CONFIG_PATH.name} has no usable “pdms” section")
+    CFG["pdms"] = {**_DEFAULTS.get("pdms", {}), **data.get("pdms", {})}
+    return CFG["pdms"]

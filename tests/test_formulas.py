@@ -250,3 +250,148 @@ def test_the_statistics_cells_work_out_a_formula_and_totals_say_how_they_are_mad
         add()
         hint = w._cell_hint(tbl.model().index(tbl.rowCount() - 1, col), None, None)
         assert hint and word in hint, (col, hint)
+
+
+def test_a_markup_formula_is_saved_in_a_preset_and_comes_back():
+    w = H.generator()
+    w.show()
+    w.activateWindow()
+    spin = w._markup_spin
+    _type_into(spin.lineEdit(), "=5+1.5")
+    data = w._current_preset_data()
+    assert data["markup_rate_pct"] == 6.5 and data["markup_formula"] == "=5+1.5"
+    spin.setValue(3.0)                                                   # a plain value: nothing to save
+    assert "markup_formula" not in w._current_preset_data()
+    w._apply_preset_data(data)                                           # loading the preset brings the formula back
+    assert spin.value() == 6.5 and spin.formula_text() == "=5+1.5" and "Formula: =5+1.5" in spin.toolTip()
+    w._apply_preset_data({**data, "markup_formula": "=1+1"})              # a formula that does not give the value: ignored
+    assert spin.value() == 6.5 and spin.formula_text() is None
+    w._apply_preset_data({k: v for k, v in data.items() if k != "markup_formula"})     # an old preset: just the value
+    assert spin.value() == 6.5 and spin.formula_text() is None
+    assert "Rate × Days" in w._hotbed_total_lbl.toolTip()
+
+
+# ── Excel: a cell typed as a formula is written as that formula ──────────────────────────────
+
+def _row_of(ws, desc, col):
+    return next(r for r in range(1, ws.max_row + 1) if str(ws.cell(r, col).value) == desc)
+
+
+def test_cells_typed_as_formulas_are_formulas_in_the_azn_and_usd_ctrs():
+    import openpyxl
+    from ctr_tools import window as W
+    w = H.generator()
+    w.show()
+    mp, eq, cs, tr = w._req_manpower_tbl, w._req_equip_tbl, w._req_cons_tbl, w._transport_tbl
+    ph = w._row_shift_hours(0)
+    assert ph == 12
+    desc = mp.item(0, W._MP_DESC).text()
+    _type(w, 0, W._MP_NUMEMP, "=1+1")
+    _type(w, 0, W._MP_QTY, "=2×12")                                           # × and a decimal comma are Excel-ised
+    _type(w, 0, W._MP_RATE, "=2,5*2")
+    w._pdms_check.setChecked(True)                                           # in PDMS mode a Quantity formula is in days ...
+    r1 = 1
+    desc1 = mp.item(r1, W._MP_DESC).text()
+    _type(w, r1, W._MP_QTY, "=5/2")                                          # 2.5 days at 12 h/shift = 30 h
+    w._pdms_check.setChecked(False)                                          # ... and the CTR holds hours: (5/2)*12
+    ci = next(i for i in range(cs.rowCount())                               # a priced line: a NONRECHARG one would raise a disparity
+              if cs.item(i, W._CS_STATUS).text().startswith("✓") and cs.item(i, W._CS_PRICE).text().replace(".", "").isdigit())
+    eq_desc, cs_desc = eq.item(0, W._EQ_DESC).text(), cs.item(ci, W._CS_DESC).text()
+    for tbl, row, col, text in ((eq, 0, W._EQ_QTY, "=1+1"), (eq, 0, W._EQ_RATE, "=10*2"), (eq, 0, W._EQ_DAYS, "=10+20"),
+                                (cs, ci, W._CS_QTY, "=3*2"), (cs, ci, W._CS_PRICE, "=1.5+1")):
+        dg = tbl.itemDelegateForColumn(col)
+        from PySide6.QtWidgets import QStyleOptionViewItem
+        idx = tbl.model().index(row, col)
+        ed = dg.createEditor(tbl.viewport(), QStyleOptionViewItem(), idx)
+        dg.setEditorData(ed, idx)
+        (getattr(ed, "_edit", ed)).setText(text)
+        dg.setModelData(ed, tbl.model(), idx)
+    tr_desc = tr.item(0, W._TR_DESC).text()
+    for col, text in ((W._TR_QTY, "=1+1"), (W._TR_RATE, "=50+60")):
+        dg = tr.itemDelegateForColumn(col)
+        idx = tr.model().index(0, col)
+        from PySide6.QtWidgets import QStyleOptionViewItem
+        ed = dg.createEditor(tr.viewport(), QStyleOptionViewItem(), idx)
+        dg.setEditorData(ed, idx)
+        (getattr(ed, "_edit", ed)).setText(text)
+        dg.setModelData(ed, tr.model(), idx)
+    out, _msgs = H.generate(w, "xlformulas")
+    azn = openpyxl.load_workbook(H.output_file(out, "AZN")).worksheets[0]
+    r = _row_of(azn, desc, 3)
+    assert (azn.cell(r, 2).value, azn.cell(r, 4).value, azn.cell(r, 6).value) == ("=1+1", "=2*12", "=2.5*2")
+    r = _row_of(azn, desc1, 3)
+    assert azn.cell(r, 4).value == "=(5/2)*12"                                # days -> hours, kept as a formula
+    r = _row_of(azn, tr_desc, 3)
+    assert (azn.cell(r, 2).value, azn.cell(r, 6).value) == ("=1+1", "=50+60")
+    usd = openpyxl.load_workbook(H.output_file(out, "USD"))["Pricing"]
+    r = _row_of(usd, eq_desc, 2)
+    assert (usd.cell(r, 3).value, usd.cell(r, 5).value, usd.cell(r, 6).value) == ("=1+1", "=10*2", "=10+20")
+    r = _row_of(usd, cs_desc, 2)
+    assert (usd.cell(r, 3).value, usd.cell(r, 5).value) == ("=3*2", "=1.5+1")
+    # a cell that was not typed as a formula stays a plain number
+    assert isinstance(azn.cell(_row_of(azn, desc, 3), 5).value, str) and not str(azn.cell(_row_of(azn, desc, 3), 5).value).startswith("=")
+
+
+def test_the_pdms_overview_sheet_keeps_formulas_in_days_and_the_day_rate():
+    import openpyxl
+    from ctr_tools import window as W
+    from ctr_tools.pdms_overview import add_overview_sheet, SHEET_NAME
+    w = H.generator()
+    w.show()
+    mp = w._req_manpower_tbl
+    w._pdms_check.setChecked(True)
+    H.resolve_disparities(w)
+    _type(w, 0, W._MP_QTY, "=5/2")                                           # days
+    _type(w, 0, W._MP_RATE, "=60*2")                                         # a day rate
+    _type(w, 1, W._MP_QTY, "=24*2")                                          # hours-unit formula typed while PDMS is on is days too
+    w._hotbed_days_edit.setText("")
+    data, hdr, days = w._pdms_overview_data()
+    wb = openpyxl.Workbook()
+    add_overview_sheet(wb, data, hdr, days)
+    ws = wb[SHEET_NAME]
+    cells = {str(c.value) for row in ws.iter_rows() for c in row if isinstance(c.value, str)}
+    assert "=5/2" in cells and "=60*2" in cells and "=24*2" in cells
+    w._pdms_check.setChecked(False)
+    _type(w, 2, W._MP_QTY, "=24*2")                                          # typed in hours (PDMS off): the overview shows days
+    w._pdms_check.setChecked(True)
+    data, hdr, days = w._pdms_overview_data()
+    wb = openpyxl.Workbook()
+    add_overview_sheet(wb, data, hdr, days)
+    cells = {str(c.value) for row in wb[SHEET_NAME].iter_rows() for c in row if isinstance(c.value, str)}
+    assert "=(24*2)/12" in cells
+    w._pdms_check.setChecked(False)
+
+
+def test_the_statistics_workbooks_price_items_keep_formulas_for_matching_lines():
+    import pandas as pd
+    import openpyxl
+    from io import BytesIO
+    from PySide6.QtWidgets import QStyleOptionViewItem
+    from ctr_tools import window as W
+    w = H.generator()
+    w.show()
+    eq = w._req_equip_tbl
+    r = next(i for i in range(eq.rowCount()) if eq.item(i, W._EQ_STATUS).text().startswith("✓")
+             and eq.item(i, W._EQ_RATE).text().replace(".", "").isdigit())
+    code = eq.item(r, W._EQ_CODE).text()
+    for col, text in ((W._EQ_QTY, "=2+1"), (W._EQ_RATE, "=10*2"), (W._EQ_DAYS, "=5*6")):
+        dg = eq.itemDelegateForColumn(col)
+        idx = eq.model().index(r, col)
+        ed = dg.createEditor(eq.viewport(), QStyleOptionViewItem(), idx)
+        dg.setEditorData(ed, idx)
+        (getattr(ed, "_edit", ed)).setText(text)
+        dg.setModelData(ed, eq.model(), idx)
+    w._refresh_stats()
+    pframes = w._stats_panel.price_report_frames()
+    items = pframes[1]
+    buf = BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+        items.to_excel(writer, index=False, sheet_name="Price Items")
+        n = w._formulas_into_price_items(writer.sheets["Price Items"])
+    assert n == 3
+    ws = openpyxl.load_workbook(BytesIO(buf.getvalue()))["Price Items"]
+    head = {c.value: c.column for c in ws[1]}
+    rows = [i for i in range(2, ws.max_row + 1) if str(ws.cell(i, head["Stock Code"]).value).upper() == code.upper()]
+    assert rows, "the line is in the price items"
+    got = {n_: ws.cell(rows[0], head[n_]).value for n_ in ("Qty", "Rate", "Days")}
+    assert got == {"Qty": "=2+1", "Rate": "=10*2", "Days": "=5*6"}, got

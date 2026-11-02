@@ -26,6 +26,15 @@ def _all(tbl):
     return range(tbl.rowCount()), range(tbl.columnCount())
 
 
+def _release_modifiers(tbl):
+    """Qt keeps the modifiers of the last simulated mouse event for the whole application: after a Ctrl+Shift
+    click, every later test would see Ctrl+Shift held (selectRow would toggle instead of select). A plain
+    click puts them back."""
+    QTest.mouseClick(tbl.viewport(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, tbl.viewport().rect().center())
+    from PySide6.QtWidgets import QApplication
+    assert not QApplication.keyboardModifiers()
+
+
 def test_every_loaded_row_knows_where_it_came_from_and_what_it_held():
     w = H.generator()
     for cat, tbl in w._reload_tables().items():
@@ -163,6 +172,7 @@ def test_ctrl_shift_click_picks_cells_and_letting_go_asks_before_anything_is_rel
         del w._start_reload                                                # the shared Generator must not keep the stub
     QTest.keyClick(tbl, Qt.Key_Escape)                                     # Escape drops the picks
     assert w._picks("manpower") == set()
+    _release_modifiers(tbl)
 
 
 def test_the_real_reload_reads_the_file_again_and_reports_what_it_did():
@@ -202,6 +212,7 @@ def test_picking_with_ctrl_shift_lets_go_of_the_row_a_plain_click_selected():
     assert not tbl.selectedItems()                                          # ... and Ctrl+Shift lets go of it
     assert w._picks("manpower") == {(1, W._MP_QTY)}
     w._clear_picks()
+    _release_modifiers(tbl)
 
 
 def _teach(w, cat, row, renamed):

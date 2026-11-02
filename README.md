@@ -35,7 +35,9 @@ See [USER_GUIDE.md](USER_GUIDE.md) for full step-by-step usage of all three tool
 - Fills the AZN and USD CTR templates with all rows, totals, and header fields, and exports each to PDF via LibreOffice
 - A **Settings** window (gear button at the left of the tab bar) for the remembered SAGE path, folders and saved aliases / renames / presets (each list can be reset, with a backup copy)
 - Presets for recurring project field combinations (client, location, scope, revision, job ref, output folder)
-- A **PDMS proposal** mode: the same values written into a Word proposal from a tagged template (PRP number instead of a contract number), with every price (in its own currency, per category or per cell) converted to AZN at the CBAR rate; **Reload CBAR** fetches the official rate, every fetched rate is kept in a log (checked for typos) and the Inspector's CBAR tab plots it and lists the documents that used each rate
+- **Formulas** in every number cell and box (`=25/12`, `=(5+1.5)*2`): the cell shows the result, keeps the formula for editing, and a hover text says what the number means
+- **Reload all** and **Ctrl+Shift picks**: read the CTR Request file again for a whole table or for the rows × columns you picked (your edits are replaced after a question)
+- A **PDMS proposal** mode: the same values written into a Word proposal from a tagged template (PRP number instead of a contract number), with every price (in its own currency, per category or per cell) converted to AZN at the CBAR rate (the Manpower table shows days and a day rate, as the proposal does); **Reload CBAR** fetches the official rate, every fetched rate is kept in a log (checked for typos) and the Inspector's CBAR tab plots it and lists the documents that used each rate
 
 ### CTR Tracker
 - Reads a generated CTR's header fields and cost-breakdown totals straight off the file (client, CTR number, date, revision, description, value, currency, Location)

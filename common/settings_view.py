@@ -25,7 +25,7 @@ from PySide6.QtGui import QColor, QIcon, QPainter, QPainterPath, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView, QCheckBox, QComboBox, QDialog, QFileDialog, QGroupBox, QHBoxLayout, QLabel,
     QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QPushButton, QScrollArea, QTableWidget,
-    QTableWidgetItem, QVBoxLayout, QWidget, QInputDialog,
+    QTableWidgetItem, QToolButton, QMenu, QVBoxLayout, QWidget, QInputDialog,
 )
 
 import ctr_tools.aliases as _aliases
@@ -34,6 +34,8 @@ import ctr_tools.desc_renames as _renames
 import ctr_tools.presets as _presets
 import ctr_tools.source_choices as _choices
 import ctr_tools.stockcode_types as _types
+from comparator import column_keywords as _kw
+from common.keywords_view import KeywordsDialog
 from stats import stats_view as _sv
 from ctr_tools.paths import user_data_dir
 
@@ -123,6 +125,8 @@ def count_entries(data) -> int:
     {name: {...}}."""
     if not isinstance(data, dict):
         return 0
+    if "ctr" in data and "mr" in data and "rows" in data:                  # the Column keywords list: its words
+        return sum(len(w) for side in ("ctr", "mr") for w in data[side].values() if isinstance(w, list))
     if "equipment" in data and "consumables_stockcodes" in data:        # the Stock Code types list
         return len(data["equipment"]) + len(data["consumables_stockcodes"])
     if data and set(data) <= {"manpower", "equipment", "consumable"}:
@@ -477,9 +481,30 @@ class SettingsTab(QWidget):
                         self._edit_types, self._reset_types,
                         lambda: self._restore("Stock Code types", _types._TYPES_PATH),
                         open_text="Edit…",
-                        extra=("Merge shipped…", self._merge_types,
-                               "Add the codes of the list that shipped with this version that your list lacks. "
-                               "Your own entries and decisions are kept."))
+                        more=("More ▾", [
+                            ("Merge shipped…", self._merge_types,
+                             "Add the codes of the list that shipped with this version that your list lacks. "
+                             "Your own entries and decisions are kept."),
+                            ("Undo my entries…", self._undo_types,
+                             "Remove the codes you added and the decisions you made, keep the shipped codes."),
+                        ]))
+        self._saved_row(g2, "keywords", "Column keywords",
+                        "Which header spellings mean which column (Quantity, Rate, Stock Code …) in an MR or CTR file, "
+                        "and the rows the headers are on. They only help the app FIND a column; it keeps its standard "
+                        "names. Ships with the app; Merge adds the shipped words you do not have yet, Undo my entries "
+                        "removes the words you added, Reset replaces everything with the shipped lists.",
+                        self._edit_keywords, self._reset_keywords,
+                        lambda: self._restore("Column keywords", _kw._KEYWORDS_PATH),
+                        open_text="Edit…",
+                        more=("More ▾", [
+                            ("Merge shipped…", self._merge_keywords,
+                             "Add the shipped words your list lacks. Your own words and header rows are kept."),
+                            ("Undo my entries…", self._undo_keywords,
+                             "Remove the words you added; the shipped words stay."),
+                            ("Import…", self._import_keywords,
+                             "Replace the list with one from a file (checked first; a backup is made)."),
+                            ("Export…", self._export_keywords, "Write the list to a file."),
+                        ]))
         lay.addWidget(grp2)
 
         # ── Statistics defaults ──────────────────────────────────────────────
@@ -565,7 +590,7 @@ class SettingsTab(QWidget):
         return edit
 
     def _saved_row(self, parent_layout, key, title, hint, open_fn, reset_fn, restore_fn,
-                   open_text="Open manager", extra=None):
+                   open_text="Open manager", extra=None, extras=None, more=None):
         row = QHBoxLayout()
         label = QLabel(title)
         label.setMinimumWidth(170)
@@ -577,11 +602,22 @@ class SettingsTab(QWidget):
             b = QPushButton(open_text)
             b.clicked.connect(open_fn)
             row.addWidget(b)
-        if extra is not None:
-            x = QPushButton(extra[0])
-            x.setToolTip(extra[2])
-            x.clicked.connect(extra[1])
+        for ex in ([extra] if extra is not None else []) + list(extras or []):
+            x = QPushButton(ex[0])
+            x.setToolTip(ex[2])
+            x.clicked.connect(ex[1])
             row.addWidget(x)
+        if more is not None:                      # the less used buttons behind one: (text, [(label, fn, tip), …])
+            mb = QToolButton()
+            mb.setText(more[0])
+            mb.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+            menu = QMenu(mb)
+            for label, fn, tip in more[1]:
+                act = menu.addAction(label)
+                act.setToolTip(tip)
+                act.triggered.connect(lambda _=False, f=fn: f())
+            mb.setMenu(menu)
+            row.addWidget(mb)
         r = QPushButton("Reset…")
         r.clicked.connect(reset_fn)
         row.addWidget(r)
@@ -610,6 +646,12 @@ class SettingsTab(QWidget):
         self._counts["types"].setText(
             f"{len(t['equipment'])} equipment · {len(t['consumable'])} consumable"
             + ("" if _types.shipped_available() else " · (no shipped list found)"))
+        kw = _kw.current()
+        n_own = len(_kw.own_entries(kw))
+        self._counts["keywords"].setText(
+            f"{sum(len(w) for side in _kw.SIDES for w in kw[side].values())} words"
+            + (f" · {n_own} yours" if n_own else "") + (f" · {_kw.new_shipped_words(kw)} new shipped word(s) to merge"
+                                                         if _kw.new_shipped_words(kw) else ""))
         d = _sv.stats_defaults()
         for w, setter in ((self._mode_combo, lambda: self._mode_combo.setCurrentIndex(
                                max(0, self._mode_combo.findData(d["mode"])))),
@@ -620,7 +662,7 @@ class SettingsTab(QWidget):
             w.blockSignals(False)
         for key, path in (("aliases", _aliases._ALIASES_PATH), ("renames", _renames._DESC_RENAMES_PATH),
                           ("presets", _presets._PRESETS_PATH), ("choices", _choices._CHOICES_PATH),
-                          ("types", _types._TYPES_PATH)):
+                          ("types", _types._TYPES_PATH), ("keywords", _kw._KEYWORDS_PATH)):
             n = len(backups_for(path))
             btn = self._restore_btns[key]
             btn.setEnabled(n > 0)
@@ -861,6 +903,133 @@ class SettingsTab(QWidget):
             QMessageBox.critical(self, "Reset failed", str(exc))
             return
         self.refresh()
+
+    # ── Stock Code types: undo my entries ────────────────────────────────────────
+
+    def _undo_types(self) -> None:
+        if not _types.shipped_available():
+            QMessageBox.information(self, "Undo my entries", "No shipped Stock Code types list was found in this "
+                                                             "installation, so there is nothing to keep.")
+            return
+        mine, ship = _types.current_types(), _types.shipped_types()
+        n = _types.my_entries_count(mine, ship)
+        if n == 0:
+            QMessageBox.information(self, "Undo my entries", "Your list has no entries or decisions of your own: it only "
+                                                             "holds what shipped.")
+            return
+        if QMessageBox.question(
+                self, "Undo my entries",
+                f"Remove your own changes from the Stock Code types list ({n})?\n\nCodes you added are removed and "
+                "decisions you made are undone (a code you moved goes back to where it shipped). Shipped codes stay; "
+                "shipped codes you deleted stay deleted (Merge shipped brings them back).\n\nThe current list is first "
+                "copied next to the original as “…bak-<date>-<time>…”.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel) != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            check_writable(_types._TYPES_PATH.parent)
+            copy_backup(_types._TYPES_PATH)
+            _types.undo_my_entries()
+            self._gen.reload_saved_data()
+        except OSError as exc:
+            log.exception("Undo of my Stock Code types failed")
+            QMessageBox.critical(self, "Undo failed", str(exc))
+            return
+        self.refresh()
+
+    # ── Column keywords ──────────────────────────────────────────────────────────
+
+    def _write_keywords(self, what: str, action) -> bool:
+        """Back the list up, run `action`, say what failed. True when it worked."""
+        try:
+            check_writable(_kw._KEYWORDS_PATH.parent)
+            copy_backup(_kw._KEYWORDS_PATH)
+            action()
+        except (OSError, ValueError) as exc:
+            log.exception("Column keywords: %s failed", what)
+            QMessageBox.critical(self, f"{what} failed", str(exc))
+            return False
+        return True
+
+    def _edit_keywords(self) -> None:
+        dlg = KeywordsDialog(self, _kw.current())
+        accepted = dlg.exec() == QDialog.DialogCode.Accepted
+        result = dlg.result_cfg() if accepted else None
+        dlg.deleteLater()
+        if accepted and self._write_keywords("Save", lambda: _kw.save(result)):
+            self.refresh()
+
+    def _merge_keywords(self) -> None:
+        added = []
+        if self._write_keywords("Merge", lambda: added.append(_kw.merge_shipped())):
+            QMessageBox.information(self, "Merge shipped words",
+                                    f"{added[0]} shipped word(s) added. Your own words, deletions and header rows were "
+                                    "kept (a backup of the list was made first).")
+            self.refresh()
+
+    def _undo_keywords(self) -> None:
+        n = len(_kw.own_entries(_kw.current()))
+        if n == 0:
+            QMessageBox.information(self, "Undo my entries", "You have added no words of your own: the list only holds "
+                                                             "shipped words.")
+            return
+        if QMessageBox.question(
+                self, "Undo my entries",
+                f"Remove the {n} word(s) you added to the Column keywords?\n\nShipped words stay (also the ones you "
+                "deleted stay deleted — Merge shipped brings them back); the header rows are kept. The current list is "
+                "first copied next to the original as “…bak-<date>-<time>…”.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel) != QMessageBox.StandardButton.Yes:
+            return
+        if self._write_keywords("Undo", _kw.undo_my_entries):
+            self.refresh()
+
+    def _import_keywords(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(self, "Import column keywords", "", "JSON (*.json)")
+        if not path:
+            return
+        try:
+            cfg = _kw.import_from(Path(path))
+        except ValueError as exc:
+            QMessageBox.critical(self, "Import refused", f"{Path(path).name} was not read:\n\n{exc}\n\nNothing was changed.")
+            return
+        errors = [p["text"] for p in _kw.problems(cfg) if p["level"] == "error"]
+        if errors:
+            QMessageBox.critical(self, "Import refused", "The file has errors:\n\n• " + "\n• ".join(errors) + "\n\nNothing was changed.")
+            return
+        words = sum(len(w) for side in _kw.SIDES for w in cfg[side].values())
+        if QMessageBox.question(
+                self, "Import column keywords",
+                f"Replace your Column keywords with the ones in {Path(path).name} ({words} words)?\n\nThe current list is "
+                "first copied next to the original as “…bak-<date>-<time>…”, so this can be undone with Restore….",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel) != QMessageBox.StandardButton.Yes:
+            return
+        if self._write_keywords("Import", lambda: _kw.save(cfg)):
+            self.refresh()
+
+    def _export_keywords(self) -> None:
+        path, _ = QFileDialog.getSaveFileName(self, "Export column keywords", "column_keywords.json", "JSON (*.json)")
+        if not path:
+            return
+        try:
+            _kw.export_to(Path(path))
+        except OSError as exc:
+            QMessageBox.critical(self, "Export failed", str(exc))
+            return
+        QMessageBox.information(self, "Exported", f"Written to {path}.")
+
+    def _reset_keywords(self) -> None:
+        if QMessageBox.question(
+                self, "Reset Column keywords",
+                "Replace the Column keywords (words and header rows) with the shipped ones?\n\nYour own words and "
+                "settings are lost from the list (the current file is first copied next to the original as "
+                "“…bak-<date>-<time>…”).",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel) != QMessageBox.StandardButton.Yes:
+            return
+        if self._write_keywords("Reset", _kw.reset_to_shipped):
+            self.refresh()
 
     def _reset_choices(self):
         self._reset("rechargeability choices", _choices._CHOICES_PATH,

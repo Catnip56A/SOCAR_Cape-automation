@@ -244,3 +244,48 @@ def test_a_failing_overview_sheet_does_not_lose_the_normal_statistics_sheets():
     assert saved and "NOT added" in str(saved[-1][-1]) and "No CBAR rate for GBP" in str(saved[-1][-1])
     names = openpyxl.load_workbook(sorted(out.glob("CTR_Statistics_*.xlsx"))[-1]).sheetnames
     assert "PDMS overview" not in names and names[0] == "Statistics" and "Info" in names   # the rest is there
+
+
+def test_the_header_block_lists_the_word_rows_and_the_ctr_header_fields_and_the_tables_follow_it():
+    hdr = {**HDR, "client": "SOCAR", "sub_client": "Sub Co", "customer_city": "Baku, Azerbaijan", "job_ref": "217",
+           "revision": "2", "contract_no_azn": "4410030127", "contract_no_usd": "4410030190",
+           "signer_name": "Rufat Badalov", "signer_title": "Deputy General Director", "comments": "Accommodation required"}
+    data = B.compute_pdms(MAN, [], EQ, CO, hdr, RATES, 0.1, TR, None, None)
+    wb = openpyxl.Workbook()
+    add_overview_sheet(wb, data, hdr, {"USD": "2026-10-26"})
+    ws = wb[SHEET_NAME]
+    rows = {ws.cell(row=r, column=2).value: ws.cell(row=r, column=3).value for r in range(4, 24)
+            if ws.cell(row=r, column=2).value}
+    for label, value in (("PRP No", "PRP-26-056"), ("Client", "SOCAR"), ("Sub-Client", "Sub Co"),
+                         ("Customer", "Example Customer Ltd"), ("Customer city", "Baku, Azerbaijan"),
+                         ("Attention", "Jane Doe"), ("Job", "P000001 - Test job"), ("Project type", "Offshore"),
+                         ("Job Ref", "217"), ("Revision", "2"), ("Contract No (AZN)", "4410030127"),
+                         ("Contract No (USD)", "4410030190"), ("Signer", "Rufat Badalov"),
+                         ("Signer title", "Deputy General Director"), ("Comments", "Accommodation required")):
+        assert rows.get(label) == value, (label, rows.get(label))
+    assert "Date" in rows and "Location" in rows
+    # the first table starts below the block (the old fixed row 11 would have overwritten it)
+    title_row = next(r for r in range(4, 40) if ws.cell(row=r, column=2).value == "Table 1 — Labour rates")
+    last_info = max(r for r in range(4, 40) if ws.cell(row=r, column=2).value == "Comments")
+    assert title_row >= last_info + 2
+    # a header without the optional fields still gives the block (blank values, the defaults for the letter's rows)
+    wb2 = openpyxl.Workbook()
+    add_overview_sheet(wb2, B.compute_pdms(MAN, [], EQ, CO, HDR, RATES, 0.1, TR, None, None), HDR, {})
+    ws2 = wb2[SHEET_NAME]
+    vals = {ws2.cell(row=r, column=2).value: ws2.cell(row=r, column=3).value for r in range(4, 24)}
+    assert vals["Client"] in (None, "") and vals["Signer"] == "Rufat Badalov" and vals["Customer city"] == "Baku, Azerbaijan"
+
+
+def test_the_window_gives_the_overview_the_ctr_header_fields_and_keeps_their_rows_in_pdms_mode():
+    w = H.generator()
+    w.show()
+    w._pdms_check.setChecked(True)
+    for edit, text in ((w._client_edit, "SOCAR"), (w._sub_client_edit, "AzNeft"), (w._revision_edit, "3"),
+                       (w._contract_no_azn_edit, "44-AZN"), (w._contract_no_usd_edit, "44-USD"),
+                       (w._comments_edit, "Accommodation required")):
+        edit.setText(text)
+        assert edit.isVisibleTo(w)                                   # the CTR rows stay visible in PDMS mode
+    hdr = w._pdms_payload()["header"]
+    assert (hdr["client"], hdr["sub_client"], hdr["revision"], hdr["contract_no_azn"], hdr["contract_no_usd"],
+            hdr["comments"]) == ("SOCAR", "AzNeft", "3", "44-AZN", "44-USD", "Accommodation required")
+    w._pdms_check.setChecked(False)

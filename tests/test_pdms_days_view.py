@@ -105,3 +105,74 @@ def test_a_row_without_a_shift_length_stays_in_hours_with_a_red_exclamation_mark
     assert w._days_view(tbl.model().index(r, W._MP_QTY))["problem"] is None
     assert _shown(w, r, W._MP_QTY) == "2.08"
     w._pdms_check.setChecked(False)
+
+
+def test_a_row_without_a_shift_length_is_skipped_in_pdms_mode_after_a_warning():
+    from PySide6.QtWidgets import QMessageBox
+    w = H.generator()
+    w.show()
+    tbl = w._req_manpower_tbl
+    good = _row(w, "NS-NAT-OFF-12", "24", "10")
+    bad = _row(w, "", "8", "10")
+    tbl.item(bad, W._MP_DESC).setText("Row without hours")
+    tbl.item(bad, W._MP_SHIFT).setText("Day")                              # everything else is filled in: only the hours are missing
+    tbl.item(bad, W._MP_SHIFTTYPE).setText("Normal")
+    tbl.item(bad, W._MP_NUMEMP).setText("1")
+    w._pdms_check.setChecked(True)
+    bad = {(id(c["tbl"]), c["row"]) for c in w._incomplete_cells()}         # rows with a missing value are left out first
+    rows = w._collect_rows(True, bad)
+    skipped = rows["no_shift"]
+    assert "Row without hours" in skipped
+    assert all(r["description"] != "Row without hours" for r in rows["support_rows"] + rows["other_rows"])
+    assert all(r["hours_per_shift"] for r in rows["support_rows"] + rows["other_rows"])   # none left that cannot be converted
+    normal = w._collect_rows(False, bad)                                 # the AZN / USD CTRs do not need it: still included
+    assert "Row without hours" in [r["description"] for r in normal["support_rows"] + normal["other_rows"]]
+    assert normal["no_shift"] == []
+    # Generate warns (Yes / Cancel) and lists the row; Cancel stops before anything is written
+    tpl = H.INPUTS / "PDMS_TEMPLATE_short.docx"
+    if not tpl.is_file():
+        raise H.Skip("PDMS_TEMPLATE_short.docx is not in TEST_Files/CTR creator")
+    out = H.SANDBOX / "out" / "noshift"
+    out.mkdir(parents=True, exist_ok=True)
+    w._pdms_tpl_edit.setText(str(tpl))
+    w._out_dir_edit.setText(str(out))
+    w._job_ref_edit.setText("998")
+    w._prp_edit.setText("PRP-26-998")
+    H.resolve_disparities(w)
+    asked = []
+    real = QMessageBox.question
+    try:
+        QMessageBox.question = staticmethod(lambda parent, title, text, *a, **k: (asked.append((title, text)), QMessageBox.StandardButton.Cancel)[1])
+        w._generate()
+        H.pump(5)
+        assert asked and "SKIPPED" in asked[0][1] and "Row without hours" in asked[0][1], asked
+        assert not list(out.glob("*.docx"))
+    finally:
+        QMessageBox.question = real
+    w._pdms_check.setChecked(False)
+
+
+def test_manpower_is_listed_in_the_cost_statistics_box_but_not_costed_like_the_sage_lines():
+    w = H.generator()
+    w.show()
+    tbl = w._req_manpower_tbl
+    w._refresh_stats()
+    H.pump(5)
+    lst = w._mp_stats_tbl
+    matched = [r for r in range(tbl.rowCount()) if tbl.item(r, W._MP_STATUS).text().startswith("✓")]
+    assert matched and lst.rowCount() == len(matched) and lst.isVisibleTo(w)
+    for i, r in enumerate(matched):                                              # the table's own figures, not a SAGE cost
+        assert [lst.item(i, c).text() for c in (0, 1, 3, 4, 5, 6)] == [
+            tbl.item(r, W._MP_DESC).text(), tbl.item(r, W._MP_ENC).text(), tbl.item(r, W._MP_QTY).text(),
+            "Hours", tbl.item(r, W._MP_RATE).text(), tbl.item(r, W._MP_TOTAL).text()]
+    assert "Not costed from SAGE" in w._mp_stats_lbl.text() and f"{len(matched)} matched" in w._mp_stats_lbl.text()
+    w._pdms_check.setChecked(True)                                                # PDMS mode: days and a day rate, as in the table
+    w._refresh_stats()
+    H.pump(5)
+    r = matched[0]
+    ph = w._row_shift_hours(r)
+    assert lst.item(0, 4).text() == "Days"
+    assert lst.item(0, 3).text() == f"{float(tbl.item(r, W._MP_QTY).text()) / ph:.2f}"
+    assert lst.item(0, 5).text() == f"{float(tbl.item(r, W._MP_RATE).text()) * ph:.2f}"
+    assert "₼" in w._mp_stats_lbl.text()
+    w._pdms_check.setChecked(False)

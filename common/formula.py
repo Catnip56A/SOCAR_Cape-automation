@@ -11,7 +11,7 @@ from __future__ import annotations
 import math
 import re
 
-__all__ = ["FormulaError", "is_formula", "evaluate", "format_number"]
+__all__ = ["FormulaError", "is_formula", "evaluate", "format_number", "to_excel"]
 
 _TOKEN = re.compile(r"\s*(?:(\d+(?:[.,]\d+)?|[.,]\d+)|(.))")
 _OPS = {"×": "*", "÷": "/", "−": "-", "–": "-", "x": "*", "X": "*"}
@@ -110,3 +110,16 @@ def format_number(v: float) -> str:
     """A result as cell text: whole numbers without a trailing .0 problem for the table code
     (which uses float()), otherwise at most 9 decimals — never rounded to the screen's 2."""
     return repr(round(v, 9)) if v != int(v) else str(int(v))
+
+
+def to_excel(text: str) -> str:
+    """The formula as Excel writes it: "=(5+1,5)×2" -> "=(5+1.5)*2" (a decimal point, * and /, no spaces).
+    The text is parsed first, so an invalid formula raises FormulaError."""
+    src = text.strip()
+    evaluate(src)
+    if src.startswith("="):
+        src = src[1:]
+    out = []
+    for tok in _tokens(src):
+        out.append(tok if isinstance(tok, str) else (str(int(tok)) if tok == int(tok) else repr(tok)))
+    return "=" + "".join(out)
