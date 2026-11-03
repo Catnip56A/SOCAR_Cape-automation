@@ -304,12 +304,12 @@ def test_test_on_a_file_shows_every_table_it_found_below_the_summary():
     tbl = dlg.tabs.widget(0)
     heads = [tbl.horizontalHeaderItem(c).text() for c in range(tbl.columnCount())]
     df = tables[0]["data"]
-    assert tbl.rowCount() == len(df) == 15                                  # every line the parser read, not only a count
+    assert tbl.rowCount() == len(df) == 18                                  # every line the parser read (15 with a code + 3 without), not only a count
     assert heads[0] == "Section" and "Stock Code" in heads and "Quantity" in heads
     assert not any(h.startswith("_") for h in heads)                         # the internal columns are not shown
     col = heads.index("Stock Code")
     assert {tbl.item(r, col).text() for r in range(tbl.rowCount())} == set(df["Stock Code"])
-    assert "(15)" in dlg.tabs.tabText(0)
+    assert "(18)" in dlg.tabs.tabText(0)
     empty = TestResultDialog(None, cfg, "nothing.xlsx", [])                 # nothing found: it says so instead of an empty grid
     assert empty.tabs.count() == 1 and empty.tabs.tabText(0) == "No tables"
 

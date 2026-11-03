@@ -1,30 +1,42 @@
 # Handoff — 2026-11-03
 
 ## Goal
-CTR Generator / PDMS / MR vs CTR Comparator 1.0.24 — complete (VERSION 1.0.24, the same version throughout; the .exe has not been rebuilt). Part 4 (below) is committed together with this handoff.
+MR vs CTR Comparator 1.0.25 — match modes + Proposal mode (PDMS MR vs proposal). VERSION is 1.0.25 (new release, bumped on the user's request); the .exe has not been rebuilt.
 
-## Done (full offscreen suite 315/315; the user ran the full real-app check A–H on 2026-11-03: everything OK)
-- Part 4 (2026-11-03): after Column keywords change the app asks "Re-read the loaded files?" (No leaves them marked ⟳ + the Reload changed files button; every parsed table carries `"kw"` = keywords fingerprint); an MR page naming another CTR gets "⚠ other CTR" in Step 2 (warn only, stays ticked; `"ref"` read by `sheet_parser.find_ctr_ref`); Settings › Template config = the user's own copy of `template_config.json` in the data folder (Open file / Merge shipped / Open folder / Reset / Restore); CTR presets also save Customer, Customer city, Signer, Signer title.
-- Earlier in 1.0.24 (committed): PDMS days/day-rate display, skip-with-warning, overview header, Hotbed "Reload standard", `=` formulas (also written into Excel), Reload all + Ctrl+Shift picks, Manpower in statistics, Column keywords editor (+ Test on a file, Import/Export), parser notes, "No tables" / "Problems found" reports, NaT fix.
-- Task log updated 2026-11-03: MA227, MA228, MA229, MA231 closed, MA230 closed as not needed, MA232 (presets) added; summaries for the three 1.0.24 groups are in `.claude/task_log/short_summaries.json`.
+## Done
+- Match by (Stock Code then Description / Stock Code only / Description only), remembered in QSettings `compare/match_mode`; keys in `comparator/match_keys.py`, selector on the hint line above Compare. Verified: `tests/test_match_modes.py` (9 pass, incl. the window's minimumSizeHint 444 px after Compare).
+- Proposal mode: checkbox next to Match by; CTR Browse and "Locate it…" accept `.docx`; `comparator/proposal_parser.py` reads the items table (totals rows skipped, Transportation is a normal line). Verified on the real PDMS pair (TEST_Files/MRvsCTR/PDMS MR vs CTR): 13 matched / 2 only MR / 3 only proposal; `tests/test_proposal.py` (6 pass).
+- Proposal mode view: Stock Code header shown as "Identifier"; Identifier, Rechargeable (MR), Allocation, Days (MR/CTR), Local cost start hidden (`PROPOSAL_HIDDEN_COLS`, `_load_view`); Rate-vs-Rechargeable check skips `.docx` rows.
+- Fixed: columns hidden by the user came back when the statistics finished (`_apply_local_costs` re-hides the tail columns; test fails without the fix).
+- The small window under `just run` was NOT the app: WSLg's /mnt/wslg/weston.log shows the Windows RDP client reported desktopScaleFactor 200 (UI drawn 2x) until 12:40 and 0 after a reconnect at 14:21 (UI drawn 1x). Fix is on the Windows side (`wsl --shutdown`); no repo change. Not yet confirmed by the user after the restart.
+- Items without a Stock Code (forklift, truck, minibus, scaffold, tool box) are kept by both parsers when they have a Description + Quantity > 0 (not totals/signature rows), compared by Description, and EXCLUDED from the cost statistics (`_build_stats_items` uses `_CODE_`). Verified: `tests/test_no_code_items.py` (6 pass) and a scan of the real sample files (only real items kept, no junk). Full-suite rerun was started after this change; check `scratchpad/full6.txt` result before trusting it.
+- VERSION, CHANGELOG [1.0.25], README, USER_GUIDE updated; setup.iss reads VERSION (no diff). Full offscreen suite: 329/330, the one failure (Generate test, a 6100 s clock gap) passes alone, so 330/330.
 
 ## In progress / not fully done
-- Nothing open for 1.0.24. NOT verified: a rebuilt .exe / the real Windows app (the user's checks ran under WSL).
+- Nothing half-built. NOT verified: the real Windows app / a rebuilt .exe; the "Locate it…" dialog for a moved `.docx` (needs a moved file); the Excel report/statistics with a proposal (SAGE cost is empty for rows matched by Description).
+- USER_GUIDE "Step 3 — Settings" still has an old paragraph about a "Join key" dropdown that the app no longer has (not touched).
+- Saved comparisons do not remember the match mode or Proposal mode (shown as normal).
 
 ## Decisions (with reasoning)
-- Template config uses "full copy + Merge shipped" (the user's choice, like Stock Code types / Column keywords): a later shipped change to an existing key does NOT reach an existing copy (Merge shipped adds only missing keys, Reset replaces everything); Settings shows the number of differing values. Template positions apply at the next start; only the PDMS values re-read at once (Hotbed button).
-- CTR load speed was dropped: measured 0.8 s (the CTR) and ≤3.6 s (biggest MR); the "16,379 columns" is only declared, pandas reads 75 × 52.
-- Column keywords: one list for naming columns AND finding header rows; `=word` exact, otherwise matches from the start of a word; case/punctuation ignored; the most specific word wins.
-- The user dropped two ideas on 2026-11-03: a "Teach headers…" button and an in-app editor for Template config (Open file opens the system's default program, e.g. Chrome — accepted).
+- Price of a proposal is display only (Rate column), never compared: the MR has no price; SAGE price needs a Stock Code.
+- Description key = letters and digits only, upper case; unmatched rows keep their Stock Code (a first version gave them their description and broke 7 tests, plus merged same-description rows).
+- Only the header text becomes "Identifier"; the data column stays "Stock Code" (25 uses in app.py, exports, statistics).
+- "Local cost" / "Local cost total (MR/CTR)" are one hiding family (the toggle renames them).
+- Win lock files `~$…` appear in TEST_Files when a sample is open in Word: tests skip them.
 
 ## Next
-1. Build the .exe / installer and run the Windows check (repeat A, B, D, G of the 2026-11-03 list). 2. Otherwise nothing planned; ask the user for the next task (then `/pickup`).
+1. Build the .exe and run the Windows checks (list below). 2. Then the loose ends under In progress / Parked.
 
 ## Open questions
-- None.
+- Where exactly should non-stock-code items be added (Proposal mode tables, Only-in lists, parser)?
 
 ## Parked
-- MA124, MA127–MA130, MA133, MA194 stay until feature development ends; MA205 waits for the commercial department; Disparities segfault (crash.log 2026-10-15) not reproduced.
+- Possible follow-ups: alias support for near-identical descriptions (e.g. "SUPERWOOL … 25MM"), remembering the match mode in saved comparisons, fixing the stale "Join key" text in USER_GUIDE.
 
 ## Windows checks
-- None open now (they happen at build time). After the build: Column keywords + the re-read question, the MR page hint, Template config row, formulas, Reload all + Ctrl+Shift picks, Hotbed Reload standard, presets with the PDMS header, window size with PDMS ticked.
+- Items without a Stock Code: a CTR with forklift/truck/minibus lines shows them (Only in CTR or Matched by Description); the Statistics tab does not list them; "ⓘ" note in Step 2 says they are compared by Description only.
+- Match by dropdown + Proposal mode checkbox fit on the hint line; window still fits maximised; mode survives closing and reopening.
+- Compare per mode on a real multi-sheet MR + CTR: counts as expected (default mode keeps the old result for files with unique codes).
+- Proposal mode: Browse offers the `.docx`; MR + proposal gives about 13 / 2 / 3; Columns reads "Columns (6)"; with SAGE set, Days and Local cost stay hidden after the costs fill and after ticking "Local cost total"; right-click header / Columns bring them back.
+- Move a loaded proposal, reload, "Locate it…" offers Word files. (There is no drag-and-drop in the app.)
+- `just run` looks small again only if WSLg lost the Windows scale (see Done); `wsl --shutdown` restores it.

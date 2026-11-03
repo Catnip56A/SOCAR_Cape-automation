@@ -168,16 +168,38 @@ def _filter_stock_codes(df: pd.DataFrame) -> pd.DataFrame:
     ].reset_index(drop=True)
 
 
+_TOTALS_WORD = re.compile(r"\btotals?\b", re.I)
+
+
+def _is_item_without_code(desc, qty) -> bool:
+    """A line with no usable Stock Code that is still an item to compare (a forklift, a truck): a real
+    Description (letters or digits), a Quantity above zero, and not a totals row. It is compared by Description
+    and stays out of the cost statistics, which need a Stock Code."""
+    d = _norm(desc)
+    if not any(ch.isalnum() for ch in d) or _TOTALS_WORD.search(d):
+        return False
+    try:
+        return float(_norm(qty).replace(",", ".")) > 0
+    except ValueError:
+        return False
+
+
 def _filter_mr_stock_codes(df: pd.DataFrame) -> pd.DataFrame:
-    """Drop MR rows with placeholder or counter-only Stock Code."""
+    """Drop MR rows with placeholder or counter-only Stock Code — except an item that has a Description and a
+    Quantity: it stays with a blank Stock Code (compared by Description only)."""
     if "Stock Code" not in df.columns:
         return df
     df = df.copy()
     df["Stock Code"] = df["Stock Code"].apply(_norm)
-    df = df[~df["Stock Code"].str.upper().isin(_MR_PLACEHOLDER)]
-    df = df[~df["Stock Code"].str.match(r"^\d{1,3}$")]
-    df = df[~df["Stock Code"].str.contains(":", na=False)]
-    return df.reset_index(drop=True)
+    code = df["Stock Code"]
+    bad = (code.str.upper().isin(_MR_PLACEHOLDER) | code.str.match(r"^\d{1,3}$")
+           | code.str.contains(":", na=False))
+    if bad.any() and "Description" in df.columns and "Qty" in df.columns:
+        item = pd.Series([_is_item_without_code(d, q) for d, q in zip(df["Description"], df["Qty"])], index=df.index)
+        keep_blank = bad & item
+        df.loc[keep_blank, "Stock Code"] = ""
+        bad = bad & ~keep_blank
+    return df[~bad].reset_index(drop=True)
 
 
 # A Stock Code looks like SP2300006500 / EQ0900000000 / PP8201000009: letters, then mostly digits, no spaces.
@@ -271,14 +293,19 @@ def _pricing_block(rows: list, section: str, known_col: int | None = None,
     ok = (df["Stock Code"].apply(lambda x: _norm(x).lower() not in _BAD_CODES and bool(_norm(x)))
           if "Stock Code" in df.columns else pd.Series(False, index=df.index))
     dropped = [i for i in df.index if not ok[i]]
+    keep_blank: list = []
     if dropped:
-        plain, odd = [], []
+        plain, odd, kept_names = [], [], []
         for i in dropped:
             desc = _norm(df.at[i, "Description"]) if "Description" in df.columns else ""
             desc = desc or next((_norm(v) for v in data[i] if _norm(v) and not _is_blank(v)), f"line {i + 1}")
             hit = next(((k2, v) for k2, v in enumerate(data[i]) if k2 != code_idx and _looks_like_code(v)), None)
             if hit:
                 odd.append(f"{desc} (looks like a code in column {get_column_letter(hit[0] + 1)}: {_norm(hit[1])})")
+            elif ("Description" in df.columns and "Quantity" in df.columns
+                  and _is_item_without_code(df.at[i, "Description"], df.at[i, "Quantity"])):
+                keep_blank.append(i)                      # a forklift, a truck …: compared by Description
+                kept_names.append(desc)
             else:
                 plain.append(desc)
         if odd:
@@ -288,7 +315,14 @@ def _pricing_block(rows: list, section: str, known_col: int | None = None,
             more = f" … and {len(plain) - 8} more" if len(plain) > 8 else ""
             notes.append(_note("info", f"{section}: {len(plain)} line(s) without a Stock Code are not compared: "
                                        + "; ".join(plain[:8]) + more))
-    kept = df[ok].reset_index(drop=True)
+        if kept_names:
+            more = f" … and {len(kept_names) - 8} more" if len(kept_names) > 8 else ""
+            notes.append(_note("info", f"{section}: {len(kept_names)} line(s) without a Stock Code are compared by "
+                                       "Description only (and are not in the cost statistics): "
+                                       + "; ".join(kept_names[:8]) + more))
+    if keep_blank:
+        df.loc[keep_blank, "Stock Code"] = ""
+    kept = df[ok | df.index.isin(keep_blank)].reset_index(drop=True)
     if notes:
         notes.insert(0, _note("info", f"{section}: {len(df)} line(s) found, {len(kept)} compared."))
     return kept, notes, code_idx

@@ -36,8 +36,11 @@ if sys.platform.startswith("linux"):
     os.environ.setdefault("QT_QPA_PLATFORM", "xcb")
 
 sys.path.insert(0, str(Path(__file__).parent))
+from comparator.proposal_parser import parse_proposal
 from comparator.sheet_parser import is_cover_sheet, parse_workbook
 from comparator import doc_filter
+from comparator.match_keys import (
+    DEFAULT_MATCH_MODE, MATCH_BOTH, MATCH_DESC, MATCH_MODE_KEY, MATCH_STOCK, assign_keys)
 from comparator import column_keywords as CK
 from stats import cost_stats
 from ctr_tools.stockcode_types import current_types
@@ -163,6 +166,9 @@ def _find_rate_rechargeable_mismatches(display_df: pd.DataFrame) -> set[tuple[in
     cells: set[tuple[int, str]] = set()
     if "Rechargeable (MR)" not in display_df.columns or "Rate (CTR)" not in display_df.columns:
         return cells
+    # A proposal (Word) has prices, never NONRECHARG: the check would only raise false alarms there.
+    is_proposal = (display_df["CTR Document"].map(lambda v: _norm_val(v).lower().endswith(".docx"))
+                   if "CTR Document" in display_df.columns else pd.Series(False, index=display_df.index))
     # .map() over just the two needed columns instead of .iterrows() over
     # the whole frame — iterrows() reconstructs a full mixed-type row
     # (every column) for every row just to read two values out of it.
@@ -172,6 +178,7 @@ def _find_rate_rechargeable_mismatches(display_df: pd.DataFrame) -> set[tuple[in
         rech.isin(("RECHARGE", "NONRECHARG"))
         & rate_status.notna()
         & (rate_status != rech)
+        & ~is_proposal
     )
     for row_idx in display_df.index[mismatch]:
         cells.add((row_idx, "Rechargeable (MR)"))
@@ -405,6 +412,10 @@ class PandasModel(QAbstractTableModel):
     def set_tooltips(self, tips: dict[tuple[int, str], str]):
         self._tips = tips
 
+    def set_header_labels(self, labels: dict[str, str]):
+        """Shown header text per column name (the data keeps its own name, e.g. "Stock Code")."""
+        self._header_labels = labels
+
     def attention(self, row: int, col_name: str):
         """(background, foreground) of a cell the user must not miss — a highlight kind from
         _HIGHLIGHT_COLORS (red mismatch, orange Combined, and any kind added later) or a missing Days
@@ -548,7 +559,7 @@ class PandasModel(QAbstractTableModel):
         if orientation == Qt.Orientation.Horizontal:
             col_name = self._col_names[section]
             if role == Qt.ItemDataRole.DisplayRole:
-                return col_name
+                return getattr(self, "_header_labels", {}).get(col_name, col_name)
             if role == Qt.ItemDataRole.ForegroundRole:
                 side = _col_side(col_name)
                 if side == "mr":
@@ -713,7 +724,13 @@ def _unhide_dialog(view: QTableView):
     _notify_hidden_changed(view)
 
 
-def _load_view(view: QTableView, df: pd.DataFrame):
+IDENTIFIER_LABEL = "Identifier"
+# Proposal mode: columns a proposal cannot fill or the comparison does not use start hidden
+# (Rate vs Rechargeable is off there; a proposal has no days and no Stock Codes for SAGE to price).
+PROPOSAL_HIDDEN_COLS = ("Stock Code", "Rechargeable (MR)", "Allocation", "Days (MR)", "Days (CTR)", "Local cost")
+
+
+def _load_view(view: QTableView, df: pd.DataFrame, identifier: bool = False):
     # Hidden columns are deliberately not remembered across loads.
     for idx in list(getattr(view, "_user_hidden", {})):
         view.setColumnHidden(idx, False)
@@ -724,17 +741,26 @@ def _load_view(view: QTableView, df: pd.DataFrame):
     proxy.setSortCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
     view.setModel(proxy)
     view.resizeColumnsToContents()
+    if identifier:
+        # The key column is a Stock Code or, for a proposal (no codes), a normalised Description:
+        # shown as "Identifier". Only the header text changes; the data keeps its name. Hidden through
+        # the normal hide-column mechanism (Columns / right-click brings them back).
+        if "Stock Code" in df.columns:
+            proxy.sourceModel().set_header_labels({"Stock Code": IDENTIFIER_LABEL})
+        for name in PROPOSAL_HIDDEN_COLS:
+            if name in df.columns:
+                _hide_column(view, list(df.columns).index(name))
     _notify_hidden_changed(view)
 
 
-def _show_result(stack: QStackedWidget, view: QTableView, df: pd.DataFrame):
+def _show_result(stack: QStackedWidget, view: QTableView, df: pd.DataFrame, identifier: bool = False):
     """Loads df into view and switches stack to the table (or the empty
     state if df has nothing in it). Shared by a fresh Compare and by
     reopening a saved comparison — both populate the same result stacks."""
     if df.empty:
         stack.setCurrentIndex(0)
     else:
-        _load_view(view, df)
+        _load_view(view, df, identifier)
         stack.setCurrentIndex(1)
 
 
@@ -937,8 +963,11 @@ class ParseWorker(QThread):
                              i, len(payloads))
                     break
                 job.start(i)
-                results.extend(parse_workbook(BytesIO(data), filename=name,
-                                              include_cover=self._include_cover))
+                if name.lower().endswith(".docx"):                # a PDMS proposal (Word) in place of a CTR
+                    results.extend(parse_proposal(BytesIO(data), filename=name))
+                else:
+                    results.extend(parse_workbook(BytesIO(data), filename=name,
+                                                  include_cover=self._include_cover))
                 payloads[i] = (name, b"")                 # this file's bytes are done with
                 job.done(i)
             log.info("ParseWorker: produced %d table(s)", len(results))
@@ -987,6 +1016,8 @@ class MainWindow(QMainWindow):
         self._mismatch_pos:  int       = -1   # current navigation position
         self._mismatch_kinds: dict[int, set[str]] = {}   # source row -> {"red", "orange"} (what highlights it)
         self._rate_rech_mismatch_cells: set[tuple[int, str]] = set()
+        # Proposal mode at the last Compare: the Stock Code column is shown as "Identifier" and starts hidden.
+        self._identifier_mode = False
         self._absent_cols: set[str] = set()      # display columns the loaded files do not have
 
         # Combined view: per-Stock-Code MR/CTR qty totals for matched keys.
@@ -1139,7 +1170,43 @@ class MainWindow(QMainWindow):
         )
         self._compare_hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._compare_hint.setStyleSheet(f"color: {MUTED}; font-size: 11px;")
-        pinned_l.addWidget(self._compare_hint)
+        # How rows are matched; remembered between runs. Shares the hint's line so the window
+        # does not get taller.
+        self._match_mode_combo = QComboBox()
+        self._match_mode_combo.addItem("Stock Code, then Description", MATCH_BOTH)
+        self._match_mode_combo.addItem("Stock Code only", MATCH_STOCK)
+        self._match_mode_combo.addItem("Description only", MATCH_DESC)
+        self._match_mode_combo.setToolTip(
+            "How Compare matches MR and CTR rows:\n"
+            "• Stock Code, then Description: by Stock Code; the rows left over are matched by Description.\n"
+            "• Stock Code only: rows without a Stock Code are not compared.\n"
+            "• Description only: only letters and digits count (case, spaces and punctuation are ignored).\n"
+            "Rows of one side that have no partner stay under Only in MR / Only in CTR.\n"
+            "Applies at the next Compare.")
+        self._match_mode_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
+        try:
+            _saved_mode = str(self._app_settings().value(MATCH_MODE_KEY, DEFAULT_MATCH_MODE))
+        except Exception:
+            _saved_mode = DEFAULT_MATCH_MODE
+        _mi = self._match_mode_combo.findData(_saved_mode)
+        self._match_mode_combo.setCurrentIndex(_mi if _mi >= 0 else 0)
+        self._match_mode_combo.currentIndexChanged.connect(self._on_match_mode_changed)
+        _match_lbl = QLabel("Match by:")
+        _match_lbl.setStyleSheet(f"color: {MUTED}; font-size: 11px;")
+        hint_row = QHBoxLayout()
+        hint_row.setSpacing(6)
+        # Proposal mode: a PDMS proposal (Word) is loaded in the CTR's place.
+        self._proposal_chk = QCheckBox("Proposal mode")
+        self._proposal_chk.setToolTip(
+            "Compare an MR with a PDMS proposal (a Word file) instead of a CTR.\n"
+            "The CTR side then accepts a .docx proposal as well as CTR Excel files.\n"
+            "A proposal has no Stock Codes: it is matched by Description (the default mode does that).\n"
+            "Its prices are shown, not compared.")
+        hint_row.addWidget(self._compare_hint, 1)
+        hint_row.addWidget(self._proposal_chk)
+        hint_row.addWidget(_match_lbl)
+        hint_row.addWidget(self._match_mode_combo)
+        pinned_l.addLayout(hint_row)
 
         self._compare_btn = QPushButton("Compare")
         self._compare_btn.setFixedHeight(44)
@@ -1757,10 +1824,11 @@ class MainWindow(QMainWindow):
     # ── File browsing ─────────────────────────────────────────────────────────
 
     def _browse(self, side: str):
-        paths, _ = QFileDialog.getOpenFileNames(
-            self, f"Select {side.upper()} files", "",
-            "Excel files (*.xlsx *.xls *.xlsm)"
-        )
+        if side == "ctr" and self._proposal_chk.isChecked():
+            title, flt = "Select CTR or proposal files", "CTR / proposal (*.xlsx *.xls *.xlsm *.docx)"
+        else:
+            title, flt = f"Select {side.upper()} files", "Excel files (*.xlsx *.xls *.xlsm)"
+        paths, _ = QFileDialog.getOpenFileNames(self, title, "", flt)
         if not paths:
             return
         if self._reload_pending:
@@ -2412,8 +2480,9 @@ class MainWindow(QMainWindow):
         if clicked is remove:
             return "remove"
         if clicked is locate:
-            found, _ = QFileDialog.getOpenFileName(self, f"Locate {name}", str(Path(path).parent),
-                                                   "Excel files (*.xlsx *.xls *.xlsm)")
+            flt = ("Word files (*.docx)" if str(name).lower().endswith(".docx")      # a PDMS proposal
+                   else "Excel files (*.xlsx *.xls *.xlsm)")
+            found, _ = QFileDialog.getOpenFileName(self, f"Locate {name}", str(Path(path).parent), flt)
             return found or "keep"
         return "keep"
 
@@ -2530,6 +2599,15 @@ class MainWindow(QMainWindow):
                 log.info("Reload before compare: %s", "; ".join(notes))
             self._run_compare(skip_file_check=anyway)       # "Compare anyway" was just chosen: do not ask again
 
+    def _match_mode(self) -> str:
+        return self._match_mode_combo.currentData() or DEFAULT_MATCH_MODE
+
+    def _on_match_mode_changed(self, _=None):
+        try:
+            self._app_settings().setValue(MATCH_MODE_KEY, self._match_mode())
+        except Exception:
+            log.debug("could not save the match mode", exc_info=True)
+
     def _run_compare(self, skip_file_check: bool = False):
         changed = [] if skip_file_check else self._changed_source_files()
         if changed:
@@ -2545,20 +2623,20 @@ class MainWindow(QMainWindow):
         mr  = self._mr_df.copy()
         ctr = self._ctr_df.copy()
 
-        key_col = "Stock Code"
-        for side, df in [("MR", mr), ("CTR", ctr)]:
-            col = find_key_col(list(df.columns))
-            if not col:
-                QMessageBox.warning(
-                    self, "Stock Code not found",
-                    f"Could not find a Stock Code column in the {side} data.\n"
-                    f"Columns available: {', '.join(df.columns[:8])}")
-                return
-            df["_KEY_"] = df[col].astype(str).str.strip().str.upper()
-
-        bad = {"", "NAN", "-", "NONE", "STOCKCODE", "0"}
-        mr  = mr[~mr["_KEY_"].isin(bad)]
-        ctr = ctr[~ctr["_KEY_"].isin(bad)]
+        mode = self._match_mode()
+        mr, ctr, problem = assign_keys(
+            mr, ctr, mode,
+            stock_col_fallback={"MR": find_key_col(list(mr.columns)), "CTR": find_key_col(list(ctr.columns))})
+        if problem:
+            side, cols = problem
+            what = "Description" if mode == MATCH_DESC else "Stock Code or Description"
+            if mode == MATCH_STOCK:
+                what = "Stock Code"
+            QMessageBox.warning(
+                self, f"{what} not found",
+                f"Could not find a {what} column in the {side} data.\n"
+                f"Columns available: {', '.join(cols[:8])}")
+            return
 
         merged = pd.merge(mr, ctr, on="_KEY_", how="outer",
                           suffixes=("_MR", "_CTR"), indicator=True)
@@ -2674,6 +2752,7 @@ class MainWindow(QMainWindow):
             if "_SourceFile" in ctr.columns else []
 
         self._pending_stats = self._build_stats_items(mr, ctr)
+        self._identifier_mode = self._proposal_chk.isChecked()
         self._present_compare_results()
         self._start_stats_job_later()
 
@@ -2723,9 +2802,10 @@ class MainWindow(QMainWindow):
         self._m_only_ctr.setText(str(len(self._octr_dl)))
         self._metrics_w.setVisible(True)
 
-        _show_result(self._stack_matched,  self._tab_matched,  self._display_df)
-        _show_result(self._stack_only_mr,  self._tab_only_mr,  self._omr_dl)
-        _show_result(self._stack_only_ctr, self._tab_only_ctr, self._octr_dl)
+        ident = self._identifier_mode
+        _show_result(self._stack_matched,  self._tab_matched,  self._display_df, ident)
+        _show_result(self._stack_only_mr,  self._tab_only_mr,  self._omr_dl, ident)
+        _show_result(self._stack_only_ctr, self._tab_only_ctr, self._octr_dl, ident)
         self._apply_doc_column_visibility(self._show_docs_btn.isChecked())
         self._decorate_views()
 
@@ -2852,6 +2932,13 @@ class MainWindow(QMainWindow):
         of the matching CTR row (same Stock Code) when the CTR rows agree. When the code has no
         CTR row, the CTR row has no days, or the CTR rows give different days, the MR row gets
         none and says why: it is shown highlighted, waiting for the user to type the days."""
+        # An item without a Stock Code (a forklift, a truck: compared by Description) has no SAGE cost and is
+        # not part of the statistics. The key here is the row's own Stock Code, never the Description key.
+        def with_code(df: pd.DataFrame) -> pd.DataFrame:
+            df = df.copy()
+            df["_KEY_"] = df["_CODE_"] if "_CODE_" in df.columns else df["_KEY_"]
+            return df[df["_KEY_"].astype(str) != ""]
+        mr, ctr = with_code(mr), with_code(ctr)
         ctr_days: dict[str, dict[float, set[str]]] = {}      # key -> {days: documents that say so}
         ctr_keys: set[str] = set()
         if not ctr.empty:
@@ -3614,9 +3701,22 @@ class MainWindow(QMainWindow):
                 continue
             tail_names = [c for c in df.columns if str(c).startswith(("Local cost", "Days ("))]
             base_n = len(df.columns) - len(tail_names)
+            # Qt forgets that a removed and re-inserted column was hidden: note the hidden tail columns
+            # (by name) and hide them again afterwards.
+            # ("Local cost" / "Local cost total (MR)" / "(CTR)" are one family: the toggle renames them.)
+            def family(n: str) -> str:
+                return "Local cost" if str(n).startswith("Local cost") else str(n)
+            hidden_tail = {family(name) for idx, name in view._user_hidden.items() if idx >= base_n}
+            for idx in [i for i in view._user_hidden if i >= base_n]:
+                del view._user_hidden[idx]
             model.set_tail_columns(base_n, df[tail_names])
             for col in range(base_n, model.columnCount()):
                 view.resizeColumnToContents(col)
+                name = _column_name(view, col)
+                if family(name) in hidden_tail:
+                    view._user_hidden[col] = name
+                    view.setColumnHidden(col, True)
+            _notify_hidden_changed(view)
         self._decorate_views()
 
     def _on_days_edited(self, frame_name: str, row: int, col_name: str, text: str) -> None:
@@ -4174,10 +4274,10 @@ class MainWindow(QMainWindow):
 
         self._fill_review_list()
         self._update_review_tab_badge()
-        _show_result(self._stack_error, self._tab_error, self._combined_error_df)
+        _show_result(self._stack_error, self._tab_error, self._combined_error_df, self._identifier_mode)
 
         if self._combined_btn.isChecked():
-            _load_view(self._tab_matched, self._combined_df)
+            _load_view(self._tab_matched, self._combined_df, self._identifier_mode)
             self._apply_doc_filter(rehighlight=False)
             # A fresh model has no highlights — reapply Show Combined's
             # multi-document highlighting if it was on before this rebuild.
@@ -4288,7 +4388,7 @@ class MainWindow(QMainWindow):
     def _apply_combined_view(self, active: bool):
         if self._tab_matched.model() is None:
             return
-        _load_view(self._tab_matched, self._combined_df if active else self._display_df)
+        _load_view(self._tab_matched, self._combined_df if active else self._display_df, self._identifier_mode)
         self._apply_doc_filter(rehighlight=False)
         # Compare Values doubles as Show Combined while this view is active —
         # same button/checked-state, different label/behaviour.
@@ -4604,6 +4704,7 @@ class MainWindow(QMainWindow):
                 if c in self._display_df.columns
                 and self._display_df[c].map(lambda v: _norm_val(v) == "").all()}
             self._loaded_comparison_path    = path
+            self._identifier_mode           = False       # a saved comparison does not remember Proposal mode
 
             self._pending_stats = None
             self._pending_saved_stats = data.get("stats")

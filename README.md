@@ -17,6 +17,9 @@ See [USER_GUIDE.md](USER_GUIDE.md) for full step-by-step usage of all three tool
 - Automatic table detection via named ranges (`equip_start/end`, `cons_start/end`), with a keyword-based fallback when they're absent
 - Select which sheets to include per file using a checklist, with a live preview of the combined checked data; an MR's Socar-Cape cover sheet is available as an opt-in toggle, and any loaded file can be removed individually with its ✕
 - Configurable join key (default Stock Code) and optional stock code filters, independently for each side
+- **Match by** — Stock Code, then Description (default), Stock Code only, or Description only (letters and digits only, case and punctuation ignored); the choice is remembered
+- Items **without a Stock Code** (a forklift, a truck) are kept and compared by Description; they are not part of the cost statistics
+- **Proposal mode** — compare an MR with a PDMS proposal (a Word `.docx`) in place of a CTR: its items table is read, lines are matched by Description, prices are shown but not compared
 - Comparison results across **Matched**, **Only in MR**, **Only in CTR**, **Needs Review**, and **Error Data** tabs
 - **Combined View** — aggregates matched rows to one line per Stock Code, summing Qty across every contributing document per side; Stock Codes whose rows disagree on Unit are held out for manual approval in Needs Review
 - **Filter documents** — show only rows from chosen MR/CTR files and sheets using `MR:<doc>><sheet>` terms joined with and/or/not and brackets; view-only, downloads keep everything

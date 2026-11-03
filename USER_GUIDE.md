@@ -50,6 +50,8 @@ To remove all loaded files from one side at once, click **Clear**.
 
 **If a file is edited after you added it** (for example you fixed a quantity in Excel), its name turns orange with ⟳ and a **⟳ Reload changed files** button appears above the lists — the tables you see are still the old version until you reload. Press it (or choose *Reload them and compare* in the warning Compare shows) and the app re-reads the file from where you added it and replaces its tables; sheets you had unticked stay unticked. If the file was deleted or moved you choose: **Locate it…**, **Remove it from the list**, or **Keep the old tables**. A file that cannot be read (for example locked) keeps its old tables and is named in a message; the other files still reload. After a reload press **Compare** again. If you Browse for a file whose name is already in the list, the new file **replaces** the earlier one (its tables are swapped, never doubled). If a file cannot be reloaded, the message also offers **Compare anyway** with its old tables. Files opened from a saved comparison have no file to reload from.
 
+**Proposal mode.** Tick **Proposal mode** (next to *Match by*) to compare an MR with a **PDMS proposal** — the Word document (`.docx`) you send to the customer — instead of a CTR. In the CTR column, **Browse…** then also offers Word files. The app reads the proposal's items table (Description, UOM, Qty, Costs, Total; the totals rows are skipped) and pairs its lines with the MR **by Description**, because a proposal has no Stock Codes. The proposal's prices appear in the *Rate (CTR)* column but are **not compared** with anything. In this mode the Stock Code column is named **Identifier**, and the columns a proposal cannot fill — Identifier, Rechargeable (MR), Allocation, Days (MR), Days (CTR) and Local cost — start **hidden**; the **Columns** button (or a right-click on a header) shows them again. A saved comparison does not remember Proposal mode.
+
 ---
 
 ### Step 2 — Select tables
@@ -64,9 +66,18 @@ Below the checklist is a **live preview** of the data that will be used (the com
 
 ---
 
-**Parse notes.** The app never drops a CTR line without saying so. A table whose label shows **⚠ n note(s)** (yellow) may have lines that were *not* compared — hover it for the details; **ⓘ lines skipped** means only lines without a Stock Code (for example scaffold, trucks) were left out, which is normal. A Stock Code column that has no header in the CTR is found by its content and reported. An **MR page that names another CTR** than the loaded one (for example a stale *NCH-1* page left over from an earlier request) shows **⚠ other CTR** in Step 2 with both numbers in its tooltip, and a hint to use the *Socar-Cape* sheet when that one matches; it stays ticked — you decide. A file that was read but is **faulty** (for example no Quantity or Description column is recognised) is reported in a **“Problems found in the files”** window when you browse it, and its entry in Step 1 turns red with a ⚠ — hover it for the list. The saved Excel report has a **Parse Notes** sheet with the same messages.
+**Parse notes.** The app never drops a CTR line without saying so. A table whose label shows **⚠ n note(s)** (yellow) may have lines that were *not* compared — hover it for the details; **ⓘ lines skipped** means only lines that cannot be compared (a totals row, a line without a Description or Quantity) were left out, which is normal. A **line without a Stock Code** — a forklift, a truck, a minibus — is kept when it has a Description and a Quantity, and is compared **by Description** (see *Match by*); it is not part of the cost statistics, which need a Stock Code. A Stock Code column that has no header in the CTR is found by its content and reported. An **MR page that names another CTR** than the loaded one (for example a stale *NCH-1* page left over from an earlier request) shows **⚠ other CTR** in Step 2 with both numbers in its tooltip, and a hint to use the *Socar-Cape* sheet when that one matches; it stays ticked — you decide. A file that was read but is **faulty** (for example no Quantity or Description column is recognised) is reported in a **“Problems found in the files”** window when you browse it, and its entry in Step 1 turns red with a ⚠ — hover it for the list. The saved Excel report has a **Parse Notes** sheet with the same messages.
 
 ### Step 3 — Settings
+
+**Match by** — the dropdown on the hint line above **Compare** chooses how rows are paired:
+
+- **Stock Code, then Description** (default) — rows are paired by Stock Code first; the rows left over are paired by Description.
+- **Stock Code only** — only Stock Codes; a row without a code is not compared.
+- **Description only** — only descriptions. Only **letters and digits** count, in any case, so *Hot-wash hose 3/8"* and *HOT WASH HOSE 3/8* are the same item.
+
+A row with no partner stays under **Only in MR** / **Only in CTR** (with its Stock Code). When one side has several rows for the same item, the **Combined View** adds their quantities, exactly as it does for a Stock Code. A row paired by Description shows the normalised description in the Stock Code column and has no SAGE cost, because it has no Stock Code in common. Your choice is **remembered** the next time you open the app, and applies at the next Compare.
+
 
 **Join key** — a dropdown that lets you choose which column to use for matching rows between MR and CTR. The default is **Stock Code**. Only choose a different column if your files do not contain a Stock Code column.
 

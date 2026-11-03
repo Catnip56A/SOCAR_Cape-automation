@@ -50,30 +50,33 @@ def _only(tabs):
 def test_a_stock_code_column_without_a_header_is_found_by_its_content():
     t = _only(parse_workbook(_ctr("nohdr.xlsx")))
     codes = set(t["data"]["Stock Code"])
-    assert len(t["data"]) == 15                                          # 3 equipment + 12 consumables (was 3)
+    assert len(t["data"]) == 18                                          # 3 equipment + 12 consumables (was 3) + 3 lines without a code, kept
     assert {"EQ0900000000", "PP6700000001", "EQ4900015000", "SP2300000001", "SP2300000012"} <= codes
     warns = [n["text"] for n in t["notes"] if n["level"] == "warn"]
     assert len(warns) == 1 and "no header" in warns[0] and "column J" in warns[0] and "12 code(s)" in warns[0]
 
 
-def test_lines_without_a_code_are_skipped_but_named():
+def test_lines_without_a_code_are_kept_and_named():
     t = _only(parse_workbook(_ctr("named.xlsx")))
     info = " ".join(n["text"] for n in t["notes"] if n["level"] == "info")
-    assert "6 line(s) found, 3 compared" in info
+    assert "6 line(s) found, 6 compared" in info                           # (they used to be dropped: "3 compared")
+    assert "3 line(s) without a Stock Code are compared by Description only" in info
     for desc in ("CONVENTIONAL SCAFFOLD", "Truck for Materials", "Minibus (Including Driver)"):
         assert desc in info, desc
     assert "SALA MINI BLOCK" not in info
+    blank = t["data"][t["data"]["Stock Code"].astype(str).str.strip() == ""]
+    assert len(blank) == 3 and set(blank["Description"]) >= {"CONVENTIONAL SCAFFOLD", "Truck for Materials"}
 
 
 def test_a_properly_labelled_ctr_has_no_warning():
     t = _only(parse_workbook(_ctr("labelled.xlsx", cons_code_header="ProductCode")))
-    assert len(t["data"]) == 15
+    assert len(t["data"]) == 18                                           # 15 with a code + 3 kept without one
     assert not [n for n in t["notes"] if n["level"] == "warn"]
 
 
 def test_a_code_in_another_column_is_not_dropped_silently():
     t = _only(parse_workbook(_ctr("oddcol.xlsx", cons_code_header="ProductCode", equip_code_in_k_for=1)))
-    assert len(t["data"]) == 14                                           # the SALA line has its code in K: not compared ...
+    assert len(t["data"]) == 17                                           # 14 + 3 lines without a code; the SALA line has its code in K: not compared ...
     warn = " ".join(n["text"] for n in t["notes"] if n["level"] == "warn")
     assert "SALA MINI BLOCK" in warn and "column K" in warn and "EQ0900000000" in warn   # ... and it says so
 
