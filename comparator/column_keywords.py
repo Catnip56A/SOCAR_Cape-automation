@@ -242,6 +242,13 @@ def save(cfg: dict) -> None:
     _cache = None
 
 
+def fingerprint() -> str:
+    """A short stamp of the words and rows in use now. A parsed table remembers the one it was read with, so the app can
+    tell that a file was read with earlier Column keywords."""
+    import hashlib
+    return hashlib.md5(json.dumps(current(), sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()[:12]
+
+
 def header_row(cfg: dict, key: str) -> int | None:
     """The Excel row number set for "mr" / "ctr_equipment" / "ctr_consumables", or None (= find it)."""
     return cfg.get("rows", {}).get(key)

@@ -13,11 +13,19 @@ from __future__ import annotations
 
 import json
 import logging
+import shutil
 from pathlib import Path
+
+from ctr_tools.paths import user_data_dir
 
 log = logging.getLogger(__name__)
 
-_CONFIG_PATH = Path(__file__).parent / "template_config.json"
+# Two copies, like the Stock Code types and the Column keywords:
+#   * the SHIPPED file next to this module — bundled into the .exe, read-only for the user there;
+#   * the user's own copy in the per-user data folder, created from it on first use. THIS is what the app reads
+#     and what Settings opens, so an edit applies to the installed app too (no rebuild).
+_SHIPPED_CONFIG_PATH = Path(__file__).parent / "template_config.json"
+_CONFIG_PATH = user_data_dir() / "template_config.json"
 
 _DEFAULTS: dict = {
     "azn_template": {
@@ -492,21 +500,43 @@ def _copy_default(value):
     return value
 
 
+def _seed_user_copy() -> None:
+    """First use: copy the shipped file to the user's data folder (byte for byte, so its layout and comments stay)."""
+    if _CONFIG_PATH.exists() or not _SHIPPED_CONFIG_PATH.exists():
+        return
+    try:
+        _CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(_SHIPPED_CONFIG_PATH, _CONFIG_PATH)
+    except OSError as exc:
+        log.warning("Could not create %s from the shipped file: %s", _CONFIG_PATH, exc)
+
+
+def _read_config_file(path: Path) -> dict:
+    with Path(path).open("r", encoding="utf-8") as fh:
+        data = json.load(fh)
+    if not isinstance(data, dict):
+        raise ValueError("a JSON object was expected")
+    return data
+
+
 def load_config() -> dict:
     """
-    Load template_config.json, merging file values over _DEFAULTS
-    section by section. Unknown keys in the file are included as-is.
+    Load the user's template_config.json (created from the shipped one on first use), merging file values over
+    _DEFAULTS section by section. Unknown keys in the file are included as-is. A user file that cannot be read
+    falls back to the shipped file, then to the built-in defaults.
     """
-    if not _CONFIG_PATH.exists():
-        return {k: _copy_default(v) for k, v in _DEFAULTS.items()}
-
-    try:
-        with _CONFIG_PATH.open("r", encoding="utf-8") as fh:
-            data = json.load(fh)
-    except Exception as exc:
-        log.warning(
-            "Could not load %s (%s) — using built-in defaults.", _CONFIG_PATH, exc
-        )
+    _seed_user_copy()
+    data = None
+    for path in (_CONFIG_PATH, _SHIPPED_CONFIG_PATH):
+        if not Path(path).exists():
+            continue
+        try:
+            data = _read_config_file(path)
+            break
+        except Exception as exc:
+            log.warning("Could not load %s (%s)%s", path, exc,
+                        " — trying the shipped file." if path == _CONFIG_PATH else " — using built-in defaults.")
+    if data is None:
         return {k: _copy_default(v) for k, v in _DEFAULTS.items()}
 
     result: dict = {}
@@ -542,3 +572,67 @@ def reload_pdms_config() -> dict:
         raise ValueError(f"{_CONFIG_PATH.name} has no usable “pdms” section")
     CFG["pdms"] = {**_DEFAULTS.get("pdms", {}), **data.get("pdms", {})}
     return CFG["pdms"]
+
+
+# ── the user's copy: what differs from the shipped file, and the Settings buttons ────────────────────────────
+
+def _leaf_paths(obj, prefix=()):
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            yield from _leaf_paths(v, prefix + (k,))
+    else:
+        yield prefix, obj
+
+
+def differs_from_shipped() -> tuple[int, int]:
+    """(values the user's copy has changed, values of the shipped file the user's copy lacks). (0, 0) = the same."""
+    try:
+        ship, mine = _read_config_file(_SHIPPED_CONFIG_PATH), _read_config_file(_CONFIG_PATH)
+    except Exception:
+        return 0, 0
+    mine_leaves = dict(_leaf_paths(mine))
+    changed = missing = 0
+    for path, value in _leaf_paths(ship):
+        if path[:1] == ("_comment",) or path[0].startswith("_"):
+            continue
+        if path not in mine_leaves:
+            missing += 1
+        elif mine_leaves[path] != value:
+            changed += 1
+    return changed, missing
+
+
+def _merge_missing(into: dict, ship: dict) -> int:
+    n = 0
+    for k, v in ship.items():
+        if k not in into:
+            into[k] = v
+            n += sum(1 for _ in _leaf_paths(v)) or 1
+        elif isinstance(v, dict) and isinstance(into[k], dict):
+            n += _merge_missing(into[k], v)
+    return n
+
+
+def merge_shipped_config() -> int:
+    """Add the settings of the shipped file the user's copy does not have yet (a newer version brings some); the user's
+    own values are kept. The caller backs the file up first. Returns how many values were added."""
+    ship, mine = _read_config_file(_SHIPPED_CONFIG_PATH), _read_config_file(_CONFIG_PATH)
+    added = _merge_missing(mine, ship)
+    if added:
+        _CONFIG_PATH.write_text(json.dumps(mine, indent=2, ensure_ascii=False), encoding="utf-8")
+    return added
+
+
+def reset_to_shipped_config() -> None:
+    """Replace the user's copy with the shipped file (the caller backs the old copy up first)."""
+    _CONFIG_PATH.unlink(missing_ok=True)
+    _seed_user_copy()
+
+
+def check_user_config() -> str | None:
+    """None when the user's copy is readable, else why not (Settings shows it; the app then runs on the shipped file)."""
+    try:
+        _read_config_file(_CONFIG_PATH)
+    except Exception as exc:
+        return str(exc)
+    return None

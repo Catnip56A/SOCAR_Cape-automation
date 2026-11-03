@@ -20,8 +20,8 @@ import tempfile
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import QPointF, Qt, QThread, Signal
-from PySide6.QtGui import QColor, QIcon, QPainter, QPainterPath, QPixmap
+from PySide6.QtCore import QPointF, Qt, QThread, QUrl, Signal
+from PySide6.QtGui import QColor, QDesktopServices, QIcon, QPainter, QPainterPath, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView, QCheckBox, QComboBox, QDialog, QFileDialog, QGroupBox, QHBoxLayout, QLabel,
     QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QPushButton, QScrollArea, QTableWidget,
@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
 )
 
 import ctr_tools.aliases as _aliases
+import ctr_tools.config as _config
 import ctr_tools.cbar_rates as _cbar
 import ctr_tools.desc_renames as _renames
 import ctr_tools.presets as _presets
@@ -425,6 +426,8 @@ class _CurrencyListWorker(QThread):
 
 
 class SettingsTab(QWidget):
+    keywords_changed = Signal()           # the Column keywords (words or rows) were saved, merged, imported, reset or restored
+
     def __init__(self, ctr_gen, parent=None):
         super().__init__(parent)
         self._gen = ctr_gen
@@ -504,6 +507,21 @@ class SettingsTab(QWidget):
                             ("Import…", self._import_keywords,
                              "Replace the list with one from a file (checked first; a backup is made)."),
                             ("Export…", self._export_keywords, "Write the list to a file."),
+                        ]))
+        self._saved_row(g2, "config", "Template config",
+                        "The template layout positions, the PDMS defaults (customer, signer, Hotbed rate …) and the "
+                        "transport rates (template_config.json). Your copy in the data folder is what the app reads — "
+                        "in the installed program too. A file with a JSON error is ignored (the shipped one is used). "
+                        "Template positions apply at the next start; the Hotbed's “Reload standard” button re-reads the "
+                        "PDMS values at once. Merge shipped adds the settings of the shipped file that your copy lacks; "
+                        "Reset replaces your copy with the shipped file.",
+                        self._open_config, self._reset_config,
+                        lambda: self._restore("Template config", _config._CONFIG_PATH),
+                        open_text="Open file",
+                        more=("More ▾", [
+                            ("Merge shipped…", self._merge_config,
+                             "Add the settings of the shipped file your copy lacks. Your own values are kept."),
+                            ("Open folder", self._open_config_folder, "Open the data folder that holds your copy."),
                         ]))
         lay.addWidget(grp2)
 
@@ -652,6 +670,13 @@ class SettingsTab(QWidget):
             f"{sum(len(w) for side in _kw.SIDES for w in kw[side].values())} words"
             + (f" · {n_own} yours" if n_own else "") + (f" · {_kw.new_shipped_words(kw)} new shipped word(s) to merge"
                                                          if _kw.new_shipped_words(kw) else ""))
+        err = _config.check_user_config()
+        changed, missing = _config.differs_from_shipped()
+        self._counts["config"].setText(
+            f"⚠ cannot be read ({err}) — the shipped file is used" if err else
+            ("same as the shipped file" if not (changed or missing) else
+             f"{changed} value(s) differ from the shipped file"
+             + (f" · {missing} new shipped value(s) to merge" if missing else "")))
         d = _sv.stats_defaults()
         for w, setter in ((self._mode_combo, lambda: self._mode_combo.setCurrentIndex(
                                max(0, self._mode_combo.findData(d["mode"])))),
@@ -662,7 +687,8 @@ class SettingsTab(QWidget):
             w.blockSignals(False)
         for key, path in (("aliases", _aliases._ALIASES_PATH), ("renames", _renames._DESC_RENAMES_PATH),
                           ("presets", _presets._PRESETS_PATH), ("choices", _choices._CHOICES_PATH),
-                          ("types", _types._TYPES_PATH), ("keywords", _kw._KEYWORDS_PATH)):
+                          ("types", _types._TYPES_PATH), ("keywords", _kw._KEYWORDS_PATH),
+                          ("config", _config._CONFIG_PATH)):
             n = len(backups_for(path))
             btn = self._restore_btns[key]
             btn.setEnabled(n > 0)
@@ -808,7 +834,10 @@ class SettingsTab(QWidget):
             return
         log.info("Restored %s from %s (previous list saved as %s)", what, chosen, saved)
         QMessageBox.information(self, "Restored", f"{what.capitalize()} restored from {chosen.name}.")
-        self.refresh()
+        if Path(path) == Path(_kw._KEYWORDS_PATH):
+            self._keywords_done()
+        else:
+            self.refresh()
 
     def _reset_aliases(self):
         self._reset("Match By aliases", _aliases._ALIASES_PATH,
@@ -951,13 +980,18 @@ class SettingsTab(QWidget):
             return False
         return True
 
+    def _keywords_done(self) -> None:
+        """The list changed: show it, and tell the main window (it offers to re-read the loaded files)."""
+        self.refresh()
+        self.keywords_changed.emit()
+
     def _edit_keywords(self) -> None:
         dlg = KeywordsDialog(self, _kw.current())
         accepted = dlg.exec() == QDialog.DialogCode.Accepted
         result = dlg.result_cfg() if accepted else None
         dlg.deleteLater()
         if accepted and self._write_keywords("Save", lambda: _kw.save(result)):
-            self.refresh()
+            self._keywords_done()
 
     def _merge_keywords(self) -> None:
         added = []
@@ -965,7 +999,7 @@ class SettingsTab(QWidget):
             QMessageBox.information(self, "Merge shipped words",
                                     f"{added[0]} shipped word(s) added. Your own words, deletions and header rows were "
                                     "kept (a backup of the list was made first).")
-            self.refresh()
+            self._keywords_done()
 
     def _undo_keywords(self) -> None:
         n = len(_kw.own_entries(_kw.current()))
@@ -982,7 +1016,7 @@ class SettingsTab(QWidget):
                 QMessageBox.StandardButton.Cancel) != QMessageBox.StandardButton.Yes:
             return
         if self._write_keywords("Undo", _kw.undo_my_entries):
-            self.refresh()
+            self._keywords_done()
 
     def _import_keywords(self) -> None:
         path, _ = QFileDialog.getOpenFileName(self, "Import column keywords", "", "JSON (*.json)")
@@ -1006,7 +1040,7 @@ class SettingsTab(QWidget):
                 QMessageBox.StandardButton.Cancel) != QMessageBox.StandardButton.Yes:
             return
         if self._write_keywords("Import", lambda: _kw.save(cfg)):
-            self.refresh()
+            self._keywords_done()
 
     def _export_keywords(self) -> None:
         path, _ = QFileDialog.getSaveFileName(self, "Export column keywords", "column_keywords.json", "JSON (*.json)")
@@ -1029,7 +1063,61 @@ class SettingsTab(QWidget):
                 QMessageBox.StandardButton.Cancel) != QMessageBox.StandardButton.Yes:
             return
         if self._write_keywords("Reset", _kw.reset_to_shipped):
-            self.refresh()
+            self._keywords_done()
+
+    # ── Template config ──────────────────────────────────────────────────────────
+
+    def _open_config(self) -> None:
+        _config._seed_user_copy()
+        path = _config._CONFIG_PATH
+        if not path.exists() or not QDesktopServices.openUrl(QUrl.fromLocalFile(str(path))):
+            QMessageBox.information(self, "Template config", f"Open this file in your editor:\n\n{path}")
+
+    def _open_config_folder(self) -> None:
+        folder = _config._CONFIG_PATH.parent
+        if not folder.exists() or not QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder))):
+            QMessageBox.information(self, "Template config", f"The folder is:\n\n{folder}")
+
+    def _after_config_change(self) -> None:
+        try:
+            _config.reload_pdms_config()                 # the PDMS values apply at once; the template positions at the next start
+        except ValueError:
+            pass
+        self.refresh()
+
+    def _merge_config(self) -> None:
+        added = []
+        try:
+            check_writable(_config._CONFIG_PATH.parent)
+            _config._seed_user_copy()
+            copy_backup(_config._CONFIG_PATH)
+            added.append(_config.merge_shipped_config())
+        except (OSError, ValueError) as exc:
+            log.exception("Merging the shipped template config failed")
+            QMessageBox.critical(self, "Merge failed", str(exc))
+            return
+        QMessageBox.information(self, "Merge shipped settings",
+                                f"{added[0]} shipped value(s) added. Your own values were kept (a backup of your copy was "
+                                "made first).")
+        self._after_config_change()
+
+    def _reset_config(self) -> None:
+        if QMessageBox.question(
+                self, "Reset template config",
+                "Replace your template_config.json with the shipped one?\n\nYour edits are lost from the file (the current "
+                "copy is first saved next to it as “…bak-<date>-<time>…”; template positions apply at the next start).",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel) != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            check_writable(_config._CONFIG_PATH.parent)
+            copy_backup(_config._CONFIG_PATH)
+            _config.reset_to_shipped_config()
+        except OSError as exc:
+            log.exception("Reset of the template config failed")
+            QMessageBox.critical(self, "Reset failed", str(exc))
+            return
+        self._after_config_change()
 
     def _reset_choices(self):
         self._reset("rechargeability choices", _choices._CHOICES_PATH,

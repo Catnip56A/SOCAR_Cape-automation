@@ -374,6 +374,8 @@ def collect_storage(win) -> list[dict]:
     add("App data", "CTR presets", _presets._PRESETS_PATH, loaded="yes (preset list)")
     from comparator import column_keywords as _kw
     add("App data", "Column keywords", _kw._KEYWORDS_PATH, loaded="yes (MR / CTR parsers)")
+    from ctr_tools import config as _cfg
+    add("App data", "Template config (your copy)", _cfg._CONFIG_PATH, loaded="yes (read at start)")
     add("App data", "Saved comparisons folder", _socar_data_root() / "Comparisons", "dir")
     from ctr_tools import cbar_rates as _cbar
     add("App data", "CBAR rates (saved, what the app starts from)", _cbar._RATES_PATH, loaded="yes (CBAR rates)")

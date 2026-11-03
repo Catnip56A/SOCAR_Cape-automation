@@ -60,6 +60,35 @@ def _norm(v) -> str:
     return str(v).strip()
 
 
+_REF_RE = re.compile(r"(?<![A-Za-z0-9])CTR[\s\-_]?(\d{2})[\s\-_]?(\d{2,4})(?!\d)", re.I)
+
+
+def find_ctr_ref(texts) -> str | None:
+    """The first CTR number (CTR-26-319) in a list of texts, normalised, or None."""
+    for t in texts:
+        m = _REF_RE.search(str(t)) if t is not None else None
+        if m:
+            return f"CTR-{m.group(1)}-{m.group(2)}"
+    return None
+
+
+def _ref_of_ws(ws) -> str | None:
+    """The CTR number written near the top of an openpyxl sheet (an MR page: next to "Date of request"; a CTR: "Ref:")."""
+    try:
+        cells = (c for row in ws.iter_rows(min_row=1, max_row=12, max_col=16, values_only=True) for c in row)
+        return find_ctr_ref(cells)
+    except Exception:
+        return None
+
+
+def _ref_of_sheet(file, sheet_name: str) -> str | None:
+    try:
+        top = pd.read_excel(file, sheet_name=sheet_name, header=None, nrows=12)
+    except Exception:
+        return None
+    return find_ctr_ref(v for v in top.to_numpy().ravel() if isinstance(v, str))
+
+
 def _is_blank(v) -> bool:
     """True for empty, placeholder, or any numeric zero (0, 0.0, 0.00 …)."""
     s = _norm(v)
@@ -375,6 +404,7 @@ def _parse_named_ranges(wb, display_name: str, include_cover: bool = False) -> l
                     "table_name":   "Plant & Equipment",
                     "data":         df,
                     "notes":        notes,
+                    "ref":          _ref_of_ws(ws) or find_ctr_ref([display_name]),
                 })
 
         # MR or CTR: Consumables section
@@ -407,6 +437,7 @@ def _parse_named_ranges(wb, display_name: str, include_cover: bool = False) -> l
                         "table_name":   table_name,
                         "data":         df,
                         "notes":        notes,
+                        "ref":          _ref_of_ws(ws) or (None if is_mr else find_ctr_ref([display_name])),
                     })
 
     return results
@@ -609,6 +640,14 @@ def _detect_format(file, sheet_name: str) -> str | None:
 # Public API
 # ---------------------------------------------------------------------------
 
+def _stamped(results: list) -> list:
+    """Every table remembers which Column keywords it was read with ("kw"): see column_keywords.fingerprint."""
+    fp = CK.fingerprint()
+    for t in results:
+        t["kw"] = fp
+    return results
+
+
 def parse_workbook(path, sheet_names=None, filename=None, include_cover=False) -> list:
     """
     Parse one workbook and return all detected tables.
@@ -649,7 +688,7 @@ def parse_workbook(path, sheet_names=None, filename=None, include_cover=False) -
         results = _parse_named_ranges(wb, display_name, include_cover)
         wb.close()
         if results:
-            return results
+            return _stamped(results)
     except Exception:
         log.debug(
             "Named-range parsing failed for %r, falling back to sheet-based "
@@ -722,10 +761,11 @@ def parse_workbook(path, sheet_names=None, filename=None, include_cover=False) -
             "table_name":   sn,
             "data":         df,
             "notes":        notes,
+            "ref":          _ref_of_sheet(_make_file(), sn) or (find_ctr_ref([display_name]) if fmt != "mr" else None),
         })
 
 
-    return results
+    return _stamped(results)
 
 
 # ---------------------------------------------------------------------------

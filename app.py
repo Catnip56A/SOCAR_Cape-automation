@@ -38,6 +38,7 @@ if sys.platform.startswith("linux"):
 sys.path.insert(0, str(Path(__file__).parent))
 from comparator.sheet_parser import is_cover_sheet, parse_workbook
 from comparator import doc_filter
+from comparator import column_keywords as CK
 from stats import cost_stats
 from ctr_tools.stockcode_types import current_types
 from stats.stats_view import STOPPED as _STATS_STOPPED, StatsPanel, StatsWorker
@@ -1676,6 +1677,7 @@ class MainWindow(QMainWindow):
         # tab bar's own row, so it lines up with the tabs.
         self._settings_dlg = SettingsDialog(self._ctr_gen, self)
         self._settings_tab = self._settings_dlg.tab
+        self._settings_tab.keywords_changed.connect(self._on_keywords_changed)
         self._gear_btn = QToolButton()
         self._gear_btn.setIcon(gear_icon(20))
         self._gear_btn.setIconSize(QSize(20, 20))
@@ -1949,6 +1951,10 @@ class MainWindow(QMainWindow):
                                     "These files were read, but they are not as expected — parts of them may not be "
                                     "compared:\n\n" + "\n".join(lines) + "\n\nFix the file, or add the header's "
                                     "spelling under Settings › Column keywords, then reload the file.")
+            hints = self._ref_hints()
+            if hints:
+                self._set_status("⚠ " + hints[0] + (f" (and {len(hints) - 1} more)" if len(hints) > 1 else "")
+                                 + " — see the yellow row in Step 2.")
             if empty:
                 self._set_status(f"⚠ No tables could be read from: {', '.join(empty)}")
                 QMessageBox.warning(self, "No tables found",
@@ -2034,6 +2040,11 @@ class MainWindow(QMainWindow):
                     highlight = True
                 else:
                     label += "  ⓘ lines skipped"
+            mismatch = self._ref_mismatch(t) if side == "mr" and t is not None else None
+            if mismatch:                   # an MR page for another CTR: told, never decided for the user
+                tip += "\n\n⚠ " + mismatch
+                label += "  ⚠ other CTR"
+                highlight = True
 
             item = QListWidgetItem()
             item.setFlags(Qt.ItemFlag.ItemIsEnabled)
@@ -2090,6 +2101,8 @@ class MainWindow(QMainWindow):
         if side != "mr":
             for i, t in enumerate(tables):
                 _add_row(i, t)
+            if getattr(self, "_mr_table_list", None) is not None and self._mr_tables:
+                self._fill_table_list(self._mr_table_list, self._mr_tables, "mr")    # the MR hints compare with these CTRs
             return
 
         # MR: group per file, and always end each file with its Socar-Cape
@@ -2130,6 +2143,30 @@ class MainWindow(QMainWindow):
     def _refresh_file_warnings(self, side: str):
         self._paint_file_warnings(side)
         self._mark_changed_files()
+
+    def _ctr_refs(self) -> set[str]:
+        return {t["ref"] for t in self._ctr_tables if t.get("ref")}
+
+    def _ref_mismatch(self, t: dict) -> str | None:
+        """For an MR table: why it may be for another request — it names a CTR that is not any loaded CTR — or None
+        (it matches, names none, or no CTR is loaded to compare with)."""
+        ref, refs = t.get("ref"), self._ctr_refs()
+        if not ref or not refs or ref in refs:
+            return None
+        text = (f"This MR page refers to {ref}, but the CTR file(s) loaded are {', '.join(sorted(refs))} — it may be a "
+                "leftover from an earlier request.")
+        ok = [o["source_sheet"] for o in self._mr_tables
+              if o["source_file"] == t["source_file"] and o.get("ref") in refs and o is not t]
+        if ok:
+            text += (f"\nThe {ok[0]} sheet of this file refers to the loaded CTR: consider unticking this page "
+                     f"and ticking {ok[0]}.")
+        return text
+
+    def _ref_hints(self) -> list[str]:
+        """One short line per MR page that names another CTR than the loaded ones (for the status bar)."""
+        refs = ", ".join(sorted(self._ctr_refs()))
+        return [f"MR page {t['source_sheet']} of {t['source_file']} refers to {t['ref']}, not {refs}"
+                for t in self._mr_tables if self._ref_mismatch(t)]
 
     @staticmethod
     def _no_tables_text(side: str) -> str:
@@ -2253,6 +2290,7 @@ class MainWindow(QMainWindow):
         """(side, file name, what happened) for every MR / CTR file whose tables are loaded but whose file on disk
         changed (or is gone) since it was read. Files reopened from a saved comparison have no origin: skipped."""
         out = []
+        fp = CK.fingerprint()                        # the Column keywords in use now
         for side, tables in (("MR", self._mr_tables), ("CTR", self._ctr_tables)):
             for name in sorted({t["source_file"] for t in tables}):
                 origin = self._file_origin.get((side.lower(), name))
@@ -2264,6 +2302,8 @@ class MainWindow(QMainWindow):
                     out.append((side, name, "the file is no longer there"))
                 elif now != before:
                     out.append((side, name, "the file was changed after it was added"))
+                elif any(t.get("kw") not in (None, fp) for t in tables if t["source_file"] == name):
+                    out.append((side, name, "read with earlier Column keywords"))
         return out
 
     def _check_files_in_background(self):
@@ -2298,14 +2338,35 @@ class MainWindow(QMainWindow):
                     pal = label.palette()
                     pal.setColor(label.foregroundRole(), QColor("#E65100"))
                     label.setPalette(pal)
-                    label.setToolTip(f"{name}: {why[(side, name)]}.\nThe tables loaded from it are the OLD version — "
-                                     "use \"Reload changed files\" to read it again.")
+                    if why[(side, name)].startswith("read with earlier"):
+                        label.setToolTip(f"{name}: it was read with the previous Column keywords.\nUse \"Reload changed "
+                                         "files\" to read it again with the current ones.")
+                    else:
+                        label.setToolTip(f"{name}: {why[(side, name)]}.\nThe tables loaded from it are the OLD version — "
+                                         "use \"Reload changed files\" to read it again.")
         self._reload_btn.setVisible(bool(changed))
         self._reload_btn.setEnabled(self._reload_pending == 0)
         self._reload_btn.setText(f"⟳  Reload changed files ({len(changed)})")
         self._reload_btn.setToolTip("Reads these files again from where they were added and replaces their tables "
                                     "(your unticked sheets stay unticked):\n"
                                     + "\n".join(f"  • {s}: {n} — {w}" for s, n, w in changed))
+
+    def _on_keywords_changed(self) -> None:
+        """The Column keywords changed (Settings): the loaded files were read with the previous words. Offer to re-read
+        them now; if the answer is No they stay marked ⟳ (and Compare asks) until they are re-read."""
+        changed = [c for c in self._changed_source_files() if c[2].startswith("read with earlier")]
+        self._mark_changed_files()
+        if not changed or self._reload_pending:
+            return
+        answer = QMessageBox.question(
+            self, "Re-read the loaded files?",
+            "The Column keywords changed. These loaded files were read with the previous words:\n\n"
+            + "\n".join(f"  • {side}: {name}" for side, name, _why in changed)
+            + "\n\nRe-read them now with the new words? (Your unticked sheets stay unticked.)\n"
+              "If you say No, they stay marked ⟳ until you press “Reload changed files”.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.Yes)
+        if answer == QMessageBox.StandardButton.Yes:
+            self._reload_changed_files(changed)
 
     def changeEvent(self, event):
         super().changeEvent(event)
@@ -2321,8 +2382,8 @@ class MainWindow(QMainWindow):
         box = QMessageBox(self)
         box.setIcon(QMessageBox.Icon.Warning)
         box.setWindowTitle("Files changed since they were added")
-        box.setText("These files changed on disk after they were added, so the tables below are from the OLD "
-                    "version of each file:\n\n" + "\n".join(f"  • {side}: {name} — {why}" for side, name, why in changed)
+        box.setText("These files changed after they were added (on disk, or the Column keywords they were read with), "
+                    "so the tables below are from the OLD version of each file:\n\n" + "\n".join(f"  • {side}: {name} — {why}" for side, name, why in changed)
                     + "\n\n\"Reload them and compare\" reads each file again from where it was added.")
         reload_btn = box.addButton("Reload them and compare", QMessageBox.ButtonRole.AcceptRole)
         anyway = box.addButton("Compare anyway", QMessageBox.ButtonRole.DestructiveRole)

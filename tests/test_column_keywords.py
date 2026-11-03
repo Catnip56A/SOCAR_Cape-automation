@@ -312,3 +312,54 @@ def test_test_on_a_file_shows_every_table_it_found_below_the_summary():
     assert "(15)" in dlg.tabs.tabText(0)
     empty = TestResultDialog(None, cfg, "nothing.xlsx", [])                 # nothing found: it says so instead of an empty grid
     assert empty.tabs.count() == 1 and empty.tabs.tabText(0) == "No tables"
+
+
+def _wait_idle(win, what="parse"):
+    H.wait(lambda: not win._reload_pending and all(not w.isRunning() for w in win._workers), 60)
+    H.pump(20)
+
+
+def test_saving_the_keywords_offers_to_re_read_the_loaded_files_and_marks_them_until_then():
+    import app as A
+    from PySide6.QtWidgets import QMessageBox
+    from common import settings_view as SVW
+    path = _ctr("kw_reread.xlsx", cons_code_header="ProductCode", cons_header=("Description", "Qnt", "Unit", "Unit Price", "Total"))
+    Std = QMessageBox.StandardButton
+    real = QMessageBox.question
+    try:
+        _fresh()
+        win = A.MainWindow()
+        win.show()
+        H.pump(5)
+        win._file_origin[("ctr", path.name)] = (str(path), A.file_stamp(str(path)))
+        win._add_file_row(win._ctr_file_list, "ctr", path.name)
+        win._parse("ctr", [(path.name, path.read_bytes())])
+        _wait_idle(win)
+
+        def warns():
+            return sum(1 for t in win._ctr_tables for n in t["notes"] if n["level"] == "warn")
+        assert warns() == 1 and win._changed_source_files() == []                 # read with the words of that moment
+        cfg = json.loads(json.dumps(CK.current()))
+        cfg["ctr"]["Quantity"].append("=qnt")
+        CK.save(cfg)                                                              # what Settings › Edit… › Save writes
+        assert win._changed_source_files() == [("CTR", path.name, "read with earlier Column keywords")]
+        asked = []
+        QMessageBox.question = staticmethod(lambda p, t, text, *a, **k: (asked.append(text), Std.No)[1])
+        win._settings_tab.keywords_changed.emit()                                 # ... and the signal it sends
+        assert asked and path.name in asked[0] and "previous words" in asked[0]
+        label = win._ctr_file_list.itemWidget(win._ctr_file_list.item(0))._label
+        assert label.text().startswith("⟳ ") and "previous Column keywords" in label.toolTip() and win._reload_btn.isVisible()
+        assert warns() == 1                                                       # No: nothing was re-read, it stays marked
+        QMessageBox.question = staticmethod(lambda p, t, text, *a, **k: Std.Yes)
+        win._settings_tab.keywords_changed.emit()                                 # Yes: re-read with the new words
+        _wait_idle(win)
+        assert warns() == 0 and win._changed_source_files() == [] and not win._reload_btn.isVisible()
+        assert not win._ctr_file_list.itemWidget(win._ctr_file_list.item(0))._label.text().startswith("⟳")
+        tab = SVW.SettingsTab(H.generator())                                      # every save / merge / undo / import / reset sends it
+        got = []
+        tab.keywords_changed.connect(lambda: got.append(1))
+        tab._merge_keywords()
+        assert got == [1]
+    finally:
+        QMessageBox.question = real
+        _fresh()

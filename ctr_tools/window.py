@@ -117,6 +117,10 @@ _PRESET_FIELD_LABELS = {
     "job_ref":         "Job Ref",
     "output_dir":      "Output folder",
     "markup_rate_pct": "Markup Rate",
+    "customer_name":   "PDMS Customer",
+    "customer_city":   "PDMS Customer city",
+    "signer_name":     "PDMS Signer",
+    "signer_title":    "PDMS Signer title",
 }
 _PRESET_SAVES = ", ".join(_PRESET_FIELD_LABELS.get(f, f) for f in _PRESET_FIELDS)
 _PRESET_OMITS = (
@@ -4454,6 +4458,10 @@ class CTRGeneratorWidget(QWidget):
             "job_ref":         self._job_ref_edit.text(),
             "output_dir":      self._out_dir_edit.text(),
             "markup_rate_pct": self._markup_spin.value(),
+            "customer_name":   self._customer_edit.text(),            # the PDMS proposal's header
+            "customer_city":   self._customer_city_edit.text(),
+            "signer_name":     self._signer_edit.text(),
+            "signer_title":    self._signer_title_edit.text(),
             **({"markup_formula": f} if (f := self._markup_spin.formula_text()) else {}),   # only while the value came from one
         }
 
@@ -4467,6 +4475,10 @@ class CTRGeneratorWidget(QWidget):
         self._job_ref_edit.setText(data.get("job_ref", ""))
         if data.get("output_dir"):
             self._out_dir_edit.setText(data["output_dir"])
+        for key, edit in (("customer_name", self._customer_edit), ("customer_city", self._customer_city_edit),
+                          ("signer_name", self._signer_edit), ("signer_title", self._signer_title_edit)):
+            if key in data:                                      # an older preset has no PDMS header: leave the boxes alone
+                edit.setText(str(data[key]))
         self._markup_spin.clear_formula()                    # a preset brings its own (or none)
         try:
             self._markup_spin.setValue(float(data.get("markup_rate_pct", _DEFAULT_MARKUP_PCT)))

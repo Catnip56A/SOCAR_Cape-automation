@@ -7,7 +7,9 @@ presets survive restarts of the packaged .exe — not next to this module,
 which under PyInstaller onefile bundling is a temp dir wiped every launch.
 
 Fields saved per preset: client, sub_client, location, scope,
-revision, project_type, job_ref, output_dir, markup_rate_pct.
+revision, project_type, job_ref, output_dir, markup_rate_pct, and the PDMS proposal's
+customer_name, customer_city, signer_name, signer_title (an older preset without them
+leaves those four boxes as they are when it is loaded).
 
 'date' is intentionally excluded — it defaults to today and is usually
 overridden by the CTR Request anyway. Contract No (AZN/USD) is also
@@ -35,6 +37,7 @@ _BUNDLED_DEFAULT_PATH = Path(__file__).parent / "ctr_presets.json"
 _PRESET_FIELDS = (
     "client", "sub_client", "location", "scope", "revision",
     "project_type", "job_ref", "output_dir", "markup_rate_pct",
+    "customer_name", "customer_city", "signer_name", "signer_title",      # the PDMS proposal's header
 )
 
 

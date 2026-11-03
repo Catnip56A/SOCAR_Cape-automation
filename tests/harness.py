@@ -46,6 +46,10 @@ import comparator.column_keywords as _CK   # noqa: E402
 
 _CK._KEYWORDS_PATH = SANDBOX / "column_keywords.json"                # the user's keywords: a fixture per test
 
+import ctr_tools.config as _CFG   # noqa: E402
+
+_CFG._CONFIG_PATH = SANDBOX / "data" / "SOCAR" / "CTRGenerator" / "template_config.json" if False else _CFG._CONFIG_PATH
+
 from PySide6.QtWidgets import QApplication, QMessageBox   # noqa: E402
 
 app = QApplication.instance() or QApplication([])

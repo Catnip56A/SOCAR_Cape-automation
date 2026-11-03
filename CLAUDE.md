@@ -26,7 +26,7 @@ Paths that are off-limits to test runs:
 
 - `~/.local/share/SOCAR/CTRGenerator/` (and the Windows/macOS equivalents
   returned by `ctr_tools/paths.py:user_data_dir`) — `match_aliases.json`,
-  `desc_renames.json`, `ctr_presets.json`, `column_keywords.json`
+  `desc_renames.json`, `ctr_presets.json`, `column_keywords.json`, `template_config.json` (the user's copy)
 - `TEST_Files/**/Output/` — real generated CTRs and the user's own templates
 - The native **QSettings** store (`QSettings("SOCAR", "CTRGenerator")`: last-used paths,
   statistics defaults — `~/.config/SOCAR/CTRGenerator.conf` on Linux, the registry on
@@ -44,6 +44,8 @@ D._DESC_RENAMES_PATH = TMP / "desc_renames.json"
 P._PRESETS_PATH = TMP / "ctr_presets.json"
 import comparator.column_keywords as CK
 CK._KEYWORDS_PATH = TMP / "column_keywords.json"
+import ctr_tools.config as CF
+CF._CONFIG_PATH = TMP / "template_config.json"      # the user's copy; ctr_tools/template_config.json is the shipped file (read-only)
 ```
 
 ## UI Testing Limits

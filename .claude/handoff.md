@@ -1,33 +1,30 @@
-# Handoff — 2026-11-02
+# Handoff — 2026-11-03
 
 ## Goal
-CTR Generator / PDMS / MR vs CTR Comparator 1.0.24 — built and committed as the release (parts 1–3, last commit 45c0a91); VERSION is 1.0.24; the .exe has not been rebuilt.
+CTR Generator / PDMS / MR vs CTR Comparator 1.0.24 — complete (VERSION 1.0.24, the same version throughout; the .exe has not been rebuilt). Part 4 (below) is committed together with this handoff.
 
-## Done (full offscreen suite 304/304 on the committed state; no real-Windows run yet)
-- PDMS: Manpower shown in days / day rate (cells keep hours); rows with no shift length skipped after a Yes/Cancel warning; overview sheet header lists the Word letter + CTR header fields; CTR header rows stay visible in PDMS mode; Hotbed "Reload standard" button (re-reads `template_config.json` pdms block; days untouched).
-- CTR Generator: `=` formulas in every number cell/box (also written as Excel formulas into the AZN/USD CTRs, the PDMS overview and statistics Price Items); hover meanings; "Reload all" + Ctrl+Shift picks (rows × columns) + saved-rename question; Manpower list in the Cost statistics box. The user checked formulas, days view, reload/picks/rename popup in the real app (WSL).
-- MR vs CTR: CTR parser finds a Stock Code column without a header, never drops a line silently (Parse Notes in Step 2 / status / report sheet), tolerant header rows ("Tot", "CTR total"), warnings for unrecognised header / duplicate column / missing Quantity or Description (names the unrecognised headers), "No tables found" and "Problems found in the files" dialogs + red ⚠ file entry, `NaT` column fixed.
-- Settings › Column keywords (`comparator/column_keywords.py`, `common/keywords_view.py`): editable header words and MR / CTR equipment / CTR consumables header rows; Edit, Merge shipped, Undo my entries, Reset, Restore, Import/Export, Test on a file (grid of found tables), checks before saving; Stock Code types got Undo my entries + the same More ▾ menu. Verified by tests only.
-- Task log updated 2026-11-02 (MA215–MA231 added, MA124/127/205 raised); `.claude/task_log/short_summaries.json` has the new summaries but is NOT committed.
+## Done (full offscreen suite 315/315; the user ran the full real-app check A–H on 2026-11-03: everything OK)
+- Part 4 (2026-11-03): after Column keywords change the app asks "Re-read the loaded files?" (No leaves them marked ⟳ + the Reload changed files button; every parsed table carries `"kw"` = keywords fingerprint); an MR page naming another CTR gets "⚠ other CTR" in Step 2 (warn only, stays ticked; `"ref"` read by `sheet_parser.find_ctr_ref`); Settings › Template config = the user's own copy of `template_config.json` in the data folder (Open file / Merge shipped / Open folder / Reset / Restore); CTR presets also save Customer, Customer city, Signer, Signer title.
+- Earlier in 1.0.24 (committed): PDMS days/day-rate display, skip-with-warning, overview header, Hotbed "Reload standard", `=` formulas (also written into Excel), Reload all + Ctrl+Shift picks, Manpower in statistics, Column keywords editor (+ Test on a file, Import/Export), parser notes, "No tables" / "Problems found" reports, NaT fix.
+- Task log updated 2026-11-03: MA227, MA228, MA229, MA231 closed, MA230 closed as not needed, MA232 (presets) added; summaries for the three 1.0.24 groups are in `.claude/task_log/short_summaries.json`.
 
 ## In progress / not fully done
-- Column keywords (MA227, 90 %): not confirmed on the real app. The user's test failed only because the word was `=Descript` while the file header is `Descrip` (checked 2026-11-02); after the spelling is fixed and the file reloaded it should work.
-- Saved Column keywords do not re-read files that are already loaded (user must reload; "Reload changed files" only watches the file on disk) — MA228.
+- Nothing open for 1.0.24. NOT verified: a rebuilt .exe / the real Windows app (the user's checks ran under WSL).
 
 ## Decisions (with reasoning)
-- Keywords: a full copy in the user data folder seeded from the shipped lists (like Stock Code types), not additions-only, so the user can delete shipped words; one list for naming columns AND finding header rows; `=word` = exact header, otherwise starts-at-a-word match, case/punctuation ignored, most specific word wins.
-- Excel formulas are stored in a role beside the cell value and live only while the cell still holds that value (no hooks in re-match / reload code).
-- The installed .exe reads the `template_config.json` bundled in it (edits apply to dev runs only) — user wants an editable copy later (MA231).
+- Template config uses "full copy + Merge shipped" (the user's choice, like Stock Code types / Column keywords): a later shipped change to an existing key does NOT reach an existing copy (Merge shipped adds only missing keys, Reset replaces everything); Settings shows the number of differing values. Template positions apply at the next start; only the PDMS values re-read at once (Hotbed button).
+- CTR load speed was dropped: measured 0.8 s (the CTR) and ≤3.6 s (biggest MR); the "16,379 columns" is only declared, pandas reads 75 × 52.
+- Column keywords: one list for naming columns AND finding header rows; `=word` exact, otherwise matches from the start of a word; case/punctuation ignored; the most specific word wins.
+- The user dropped two ideas on 2026-11-03: a "Teach headers…" button and an in-app editor for Template config (Open file opens the system's default program, e.g. Chrome — accepted).
 
 ## Next
-0. REMINDER (user asked 2026-11-02): after the evening items are done, run `/tasklog` to add them — MA228–MA231 are logged as planned (0 %); raise them and add any new work; remind the user at the end of the session.
-1. Commit `.claude/task_log/short_summaries.json` (and this file). 2. The evening items the user planned (task log rows MA228–MA231): re-read loaded files after saving Column keywords; MR-page-refers-to-another-CTR warning; faster CTR load (Pricing sheet declares 16,379 columns); editable `template_config.json` for the .exe.
+1. Build the .exe / installer and run the Windows check (repeat A, B, D, G of the 2026-11-03 list). 2. Otherwise nothing planned; ask the user for the next task (then `/pickup`).
 
 ## Open questions
-- None unresolved.
+- None.
 
 ## Parked
 - MA124, MA127–MA130, MA133, MA194 stay until feature development ends; MA205 waits for the commercial department; Disparities segfault (crash.log 2026-10-15) not reproduced.
 
 ## Windows checks
-- None open (they happen at build time). After the .exe is built: formulas, days view, Reload all + Ctrl+Shift picks, Column keywords editor + Test on a file, the "Problems found" dialog with CTR-26-319, Hotbed Reload standard, window still fits when maximised.
+- None open now (they happen at build time). After the build: Column keywords + the re-read question, the MR page hint, Template config row, formulas, Reload all + Ctrl+Shift picks, Hotbed Reload standard, presets with the PDMS header, window size with PDMS ticked.

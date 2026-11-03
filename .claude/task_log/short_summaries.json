@@ -49,7 +49,8 @@
   "1.0.22|App-wide / Infrastructure": "The automatic checks of the app were repaired so a leftover from one check no longer makes later checks wait for minutes.",
   "1.0.22|CTR Generator": "The Re-match All buttons now say what they will change and ask before they run.",
   "1.0.23|App-wide / Infrastructure": "Fixed a crash that could happen when searching a results table with Ctrl+F after comparing again.",
-  "1.0.24|Proposals / Documents": "PDMS proposals show days and a day rate, skip lines that cannot be converted after a warning, list every header detail in the overview sheet, and the Hotbed row can be reset to its standard; the Onshore text was closed as not needed.",
+  "1.0.24|Proposals / Documents": "PDMS proposals show days and a day rate, skip lines that cannot be converted after a warning, list every header detail in the overview sheet, keep the PDMS header in presets, and the Hotbed row can be reset to its standard; the Onshore text was closed as not needed.",
   "1.0.24|CTR Generator": "Any number can now be typed as a formula such as =25/12 and stays a formula in the Excel files; the Reload buttons read the request file again for a whole table or only the cells you pick; and Manpower is listed in the statistics.",
-  "1.0.24|MR vs CTR Comparator": "A CTR whose headers were renamed is now read correctly, and the app tells you when a file has problems or no tables instead of staying silent; the header spellings and rows can be taught in Settings."
+  "1.0.24|MR vs CTR Comparator": "A CTR whose headers were renamed is read correctly, the app tells you when a file has problems, no tables or belongs to another CTR, and after you teach a header in Settings it offers to re-read the loaded files.",
+  "1.0.24|App-wide / Infrastructure": "The program now reads its own editable copy of the template settings, so a change no longer needs a rebuild of the installed program."
 }
