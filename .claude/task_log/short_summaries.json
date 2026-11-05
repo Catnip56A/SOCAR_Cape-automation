@@ -52,5 +52,6 @@
   "1.0.24|Proposals / Documents": "PDMS proposals show days and a day rate, skip lines that cannot be converted after a warning, list every header detail in the overview sheet, keep the PDMS header in presets, and the Hotbed row can be reset to its standard; the Onshore text was closed as not needed.",
   "1.0.24|CTR Generator": "Any number can now be typed as a formula such as =25/12 and stays a formula in the Excel files; the Reload buttons read the request file again for a whole table or only the cells you pick; and Manpower is listed in the statistics.",
   "1.0.24|MR vs CTR Comparator": "A CTR whose headers were renamed is read correctly, the app tells you when a file has problems, no tables or belongs to another CTR, and after you teach a header in Settings it offers to re-read the loaded files.",
-  "1.0.24|App-wide / Infrastructure": "The program now reads its own editable copy of the template settings, so a change no longer needs a rebuild of the installed program."
+  "1.0.24|App-wide / Infrastructure": "The program now reads its own editable copy of the template settings, so a change no longer needs a rebuild of the installed program.",
+  "1.0.25|MR vs CTR Comparator": "You can now choose how items are paired (by stock code, by description, or both), compare an MR with a PDMS proposal (Word file), and items without a stock code, such as a forklift or a truck, are compared by their description."
 }
