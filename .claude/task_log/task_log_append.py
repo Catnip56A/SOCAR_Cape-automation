@@ -38,13 +38,13 @@ replace-text replace OLD with NEW in the Task Name, Remaining and Comments of ev
 delete-row   remove one row for good (only when the user asks) and move every higher id of the same
          prefix down by one, so the numbering stays gapless; sheets 2 and 3 are rebuilt. Make a copy of the
          file first: the per-release backup is not taken again when one already exists
-refresh  rebuild sheets 2 and 3 only (use after editing short_summaries.json)
+refresh  rebuild sheets 2, 3 and 4 only (use after editing short_summaries.json)
 Sheet 3 ("Shortened Form", completed tasks only, stated in its row 1) has one row per Version x App Part: a one-line plain-language summary
 (from short_summaries.json, key "Version|App Part") plus figures computed from sheet 1.
 Columns are found by their header text in row 1, so the user may delete or move
 columns (e.g. the spare "Col N" ones); only the headers listed in NEEDED must exist.
-Existing rows are never rewritten except by `update`. Sheets 2 ("By App Part") and 3
-are rebuilt from sheet 1 after every change. Close the file in Excel first.
+Existing rows are never rewritten except by `update`. Sheets 2 ("By App Part"), 3 and 4 ("General Form": per App Part the average Completion % of all
+its rows and the last release number it was edited in) are rebuilt from sheet 1 after every change. Close the file in Excel first.
 Writes go through a temp file and an atomic swap. Backups: ONE per release, not one per write - before the first write
 under a new number in VERSION the file is copied to .claude/task_log/backups/<name>_start_of_<version>.xlsx (= the log as it
 was at the end of the previous version); later writes of that version make no further copy.
@@ -67,7 +67,7 @@ ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_XLSX = ROOT / "Task_Log_MagsudAbbaszade.xlsx"
 CHANGELOG = ROOT / "CHANGELOG.md"
 BACKUP_DIR = Path(__file__).resolve().parent / "backups"
-S1, S2, S3 = "All Tasks", "By App Part", "Shortened Form"
+S1, S2, S3, S4 = "All Tasks", "By App Part", "Shortened Form", "General Form"
 SUMMARIES = Path(__file__).resolve().parent / "short_summaries.json"
 RANK = {"High": 3, "Medium": 2, "Low": 1}
 PARTS = ["CTR Generator", "MR vs CTR Comparator", "CTR Tracker", "App-wide / Infrastructure"]
@@ -269,6 +269,36 @@ def rebuild_sheet3(wb, L):
     tb.tableStyleInfo = TableStyleInfo(name="TableStyleLight1", showRowStripes=False)
     ws.add_table(tb)
     ws.freeze_panes = "A3"
+
+
+def rebuild_sheet4(wb, L):
+    """General Form: one row per App Part (all its rows, finished or not): average Completion % and the
+    highest release number it has been edited in. Rebuilt from sheet 1 on every write."""
+    ws1 = wb[S1]
+    by = {}
+    for r in data_rows(ws1):
+        by.setdefault(ws1.cell(r, L.col["App Part"]).value, []).append(
+            (ws1.cell(r, L.col["Completion %"]).value or 0, str(ws1.cell(r, L.col["Version"]).value)))
+    if S4 in wb.sheetnames:
+        del wb[S4]
+    ws = wb.create_sheet(S4)
+    for c, (h, w) in enumerate(zip(["App Part", "Completion %", "Last Version edited"], [26.7, 14, 20]), 1):
+        cell = ws.cell(1, c, h)
+        ws.column_dimensions[get_column_letter(c)].width = w
+        cell.font = Font(bold=True, color="FFFFFF")
+        cell.fill = PatternFill("solid", fgColor="1F3864")
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        cell.border = BORDER
+    parts = [p for p in PARTS if p in by] + [p for p in by if p not in PARTS]
+    for r, part in enumerate(parts, 2):
+        pcts = [p for p, _ in by[part]]
+        vers = [tuple(map(int, v.split("."))) for _, v in by[part] if VERSION_RE.match(v)]
+        vals = [part, sum(pcts) / len(pcts), ".".join(map(str, max(vers))) if vers else "-"]
+        for c, v in enumerate(vals, 1):
+            cell = ws.cell(r, c, v)
+            cell.border = BORDER
+            cell.alignment = Alignment(vertical="top", horizontal="center" if c > 1 else None)
+        ws.cell(r, 2).number_format = "0%"
 
 
 def drop_column(ws, name):
@@ -485,6 +515,7 @@ def main():
 
     rebuild_sheet2(wb, L)
     rebuild_sheet3(wb, L)
+    rebuild_sheet4(wb, L)
     # Write to a temp file in the same folder, then swap it in, so a crash or a reader
     # mid-write never sees a half-written file.
     tmp = path.with_name(f".{path.stem}.tmp{path.suffix}")
