@@ -5,6 +5,11 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and version numbers come from the [VERSION](VERSION) file.
 
+## [1.0.26] - 2026-11-15
+### Changed
+- **PDMS: the AZN conversion is no longer marked provisional.** The commercial team confirmed the conversion works as asked, so the orange background of the CBAR rate boxes, the "PROVISIONAL" wording of their tooltip, the "provisional conversion" warning shown before a proposal is generated, and the "(provisional rule)" remark in the PDMS overview Excel sheet are gone. The code comments (`builder_pdms.py`, `pdms_overview.py`, `window.py`) and the USER_GUIDE sentence were updated to match.
+- **MR vs CTR: the Compare Values message names the Qty mode.** The status bar now reads "Compare Values (Qty: CTR < MR only) — 20 rows with Qty, Unit, or Rate/Rechargeable mismatch highlighted in red." and, when nothing differs, "Compare Values (Qty: all differences) — no Qty, Unit, or Rate/Rechargeable mismatches found." A result that looked like "nothing happened" with *CTR < MR only* now says which mode it used.
+
 ## [1.0.25] - 2026-11-03
 ### Added
 - **MR vs CTR: Match by — three ways to match rows.** A dropdown above *Compare* / *Load Comparison…* (on the hint line, so the window is no taller) chooses how Compare pairs MR and CTR rows: **Stock Code, then Description** (the default: rows are matched by Stock Code first, and the rows still unmatched are matched by Description), **Stock Code only** (the old behaviour: a row without a code is not compared) and **Description only**. A Description counts by its **letters and digits only**, upper case: *Hot-wash hose 3/8"* equals *HOT WASH HOSE 3/8*. Rows that find no partner stay under *Only in MR* / *Only in CTR* with their own Stock Code (rows that merely share a Description are not merged); several rows of one side for the same Description are summed by the Combined View exactly as several rows of one Stock Code are. A row matched by Description has no Stock Code in common, so it shows the normalised Description in the Stock Code column and gets no SAGE cost. The choice is **remembered between runs** (`compare/match_mode`). `comparator/match_keys.py` (`assign_keys`, `desc_key`), `_match_mode`, `_run_compare` (`app.py`); `tests/test_match_modes.py`.

@@ -22,9 +22,9 @@ are replaced here:
 
 Fixed texts and defaults live in template_config.json ("pdms").
 
-PROVISIONAL: the USD -> AZN conversion of equipment and consumables (CBAR rate,
-consumables mark-up applied) is not confirmed by the colleagues yet — task log
-MA202. Everything that depends on it is in _unit_prices().
+The USD -> AZN conversion of equipment and consumables (CBAR rate, consumables mark-up
+applied) works as the colleagues asked (task log MA202). Everything that depends on it is
+in _unit_prices().
 """
 
 from __future__ import annotations
@@ -141,7 +141,7 @@ def _currency_of(row: dict, category: str, defaults: dict) -> str:
 
 def _unit_prices(equip_rows, consump_rows, rates: dict, markup_rate: float, defaults: dict):
     """
-    PROVISIONAL (MA202): AZN prices of equipment and consumables. A price is in the line's own
+    AZN prices of equipment and consumables. A price is in the line's own
     currency (else its category's); it is converted to AZN first, and the consumables mark-up
     is added to the converted price. Line totals are rounded to 2 decimals.
     Non-rechargeable lines (no number) are not billed and are left out.
@@ -398,7 +398,7 @@ def build_pdms(
         salutation_name, scope (job title), project_type (Offshore/Onshore),
         signer_name, signer_title. Missing optional values fall back to the
         "pdms" block of template_config.json.
-    rates: {currency code: AZN per 1 unit} (CBAR; provisional, MA202). A price is in its line's
+    rates: {currency code: AZN per 1 unit} (CBAR). A price is in its line's
         own "currency" key, else in its category's default (`currencies`, over the "pdms"
         block's: manpower AZN, equipment USD, consumables USD, transport AZN); it is converted to
         AZN first, then the mark-up is added, and line totals are rounded to 2 decimals.

@@ -1,36 +1,34 @@
-# Handoff — 2026-11-12
+# Handoff — 2026-11-15
 
 ## Goal
-App-wide / Infrastructure: task log tooling (`/tasklog` prompt and `General Form` sheet). No app code changed; VERSION stays 1.0.25.
+Release 1.0.26, part 1 of 1 (one of the last versions): two small changes after the presentation prep. VERSION and CHANGELOG are updated; the task log is deliberately NOT updated for this version.
 
 ## Done
-- `/tasklog` prompt (`.claude/commands/tasklog.md`) now has a General Form step and the final line must say whether it was updated (read back after the edit).
-- `task_log_append.py`: new `rebuild_sheet4` builds General Form (per App Part: average Completion % of ALL its rows, highest release number as "Last Version edited"); called after `rebuild_sheet3` on every write; `refresh` and the docstring cover it. Verified: ran `refresh` on a copy in the scratchpad, then on the real xlsx; sheet order unchanged, 237 rows in All Tasks untouched.
-- Real log General Form now: CTR Generator 97 %/1.0.24, Comparator 100 %/1.0.25, Tracker 100 %/1.0.18, App-wide 98 %/1.0.24, Proposals / Documents 82 %/1.0.24, Outside app / Automation 50 %/-.
-- `/tasklog` run this session: open items asked, user said none changed; `missing` listed nothing.
+- PDMS: the CBAR rate boxes lost their orange background; the "PROVISIONAL" tooltip, the "provisional conversion" warning before Generate and the "(provisional rule)" line in the PDMS overview sheet are gone; comments in `builder_pdms.py`, `pdms_overview.py`, `window.py` and one USER_GUIDE sentence updated (the conversion works as the commercial team asked).
+- MR vs CTR: the Compare Values status message names the Qty mode ("Compare Values (Qty: CTR < MR only) — …", also in the "no mismatches" message) — `app.py`.
+- VERSION 1.0.26, CHANGELOG entry added. Full offscreen suite: 336 passed, 0 failed.
+- Presentation (outside the repo): deck draft 3 (34 slides), Word script draft 2 and the Excalidraw map live in the user's Desktop folder `SOCAR_CAPE_presentation Dec 1st 2026` (01_Script … 05_Build_scripts, README.txt there). Presentation is on 1 December.
 
 ## In progress / not fully done
-- `tasklog.md` step 3 still says "the script does not touch" General Form and describes a manual edit; that is now wrong (the script rebuilds it). Needs rewording.
-- GUIDE.md ("Workbook layout") does not mention the General Form sheet yet.
-- NOT verified: how the sheet looks in Excel (column widths and styling were set from code only). Header look may differ from the user's hand-made original.
-- The old hand-made General Form was replaced; only 4 parts were listed, 2 parts added (Proposals / Documents, Outside app / Automation). User has not confirmed the 2 extra rows.
+- Nothing in the app is half-done. Not committed yet (user commits).
 
 ## Decisions (with reasoning)
-- Completion % = plain average over every row of the part (same as By App Part), so it stays consistent between sheets.
-- "Last Version edited" ignores `In process` / `Outside app` (not release numbers); shows `-` when none.
-- No new backup: `…_start_of_1.0.25.xlsx` already exists (one backup per release).
-- Task log `--comment` REPLACES the cell: pass the old history + " | " + the new entry.
+- Provisional marking removed because the user confirmed the conversion works as the colleagues said.
+- No task-log row for 1.0.26 (user's call).
+- Items without a Stock Code, price comparison in Proposal mode: unchanged, presented as by-design limits.
 
 ## Next
-Reword `tasklog.md` step 3 and add General Form to GUIDE.md, then ask the user whether to keep the 2 extra part rows. Otherwise ask for the next app task (`/pickup`).
+Build the .exe and check on Windows (below). Commit title: "1.0.26 part 1 - PDMS conversion no longer marked provisional, Compare Values status names the Qty mode".
 
 ## Open questions
-- Keep Proposals / Documents and Outside app / Automation rows in General Form, or only the original four?
+- Still open from before: keep the two extra part rows in General Form, or only the original four?
 
 ## Parked
-- Alias support for near-identical descriptions (e.g. "SUPERWOOL … 25MM"); remembering the match mode in saved comparisons; stale "Join key" paragraph in USER_GUIDE Step 3.
+- Alias support for near-identical descriptions; remembering the match mode in saved comparisons; stale "Join key" paragraph in USER_GUIDE Step 3.
 - Excel report and statistics with a proposal (SAGE cost empty for rows matched by Description) not checked.
-- MA124, MA127–MA130, MA133, MA194 stay until feature development ends; MA205 waits for the commercial department.
+- MA124, MA128–MA130, MA133, MA194 stay until feature development ends.
+- Showing the app's name in the window title / exe as "SOCAR Cape Commercial Automation": not wanted now (the app will expand).
 
 ## Windows checks
-- None for the app. Optional: open `Task_Log_MagsudAbbaszade.xlsx` in Excel and look at General Form.
+- Generator in PDMS mode: the CBAR rate boxes are white, no orange; Generate shows no "provisional" warning; the overview Excel has no "(provisional rule)" text.
+- MR vs CTR: press Compare Values in both Qty modes and read the status bar (the mode is named in it).

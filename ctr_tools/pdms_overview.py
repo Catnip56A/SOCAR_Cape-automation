@@ -11,8 +11,6 @@ Every price keeps its own currency; a CBAR-rate block at the top holds the conve
 each was last checked or changed, and each line looks its rate up there (VLOOKUP on the currency
 code). Amounts in manats use the sheet's own number format. The figures come from
 builder_pdms.compute_pdms(), so the sheet and the Word document cannot disagree.
-
-PROVISIONAL (task log MA202): which rate / date PDMS converts with is not confirmed yet.
 """
 
 from __future__ import annotations
@@ -123,7 +121,7 @@ def add_overview_sheet(wb, data: dict, header: dict, rate_days: dict | None = No
     sh.put(1, 2, f"PDMS overview — {header.get('prp_number', '')}", bold=True, size=14, border=False)
     sh.put(2, 2, "The same figures as the PDMS proposal (Word), with the arithmetic in the cells: change a "
                  "rate or a quantity and the totals follow. Prices are in their own currency and are "
-                 "converted to manats with the CBAR rates below (provisional rule); a total is rounded to "
+                 "converted to manats with the CBAR rates below; a total is rounded to "
                  "2 decimals. Stock codes and Encodings are shown here only, not in the proposal.",
            italic=True, color="666666", border=False)
     ws.merge_cells(start_row=2, start_column=2, end_row=2, end_column=12)

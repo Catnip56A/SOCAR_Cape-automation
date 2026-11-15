@@ -4023,7 +4023,7 @@ class MainWindow(QMainWindow):
             self._mismatch_lbl.setVisible(True)
             self._nav_mismatch(0, absolute=True)   # scroll to first match
             self._set_status(
-                f"Compare Values — {n} row{'s' if n != 1 else ''} with "
+                f"Compare Values ({self._qty_mode_combo.currentText()}) — {n} row{'s' if n != 1 else ''} with "
                 "Qty, Unit, or Rate/Rechargeable mismatch highlighted in red.")
         else:
             self._mismatch_lbl.setText(
@@ -4031,7 +4031,8 @@ class MainWindow(QMainWindow):
                 '&#10003;&nbsp; All values match'
                 '</span>')
             self._mismatch_lbl.setVisible(True)
-            self._set_status("Compare Values — no Qty, Unit, or Rate/Rechargeable mismatches found.")
+            self._set_status(f"Compare Values ({self._qty_mode_combo.currentText()}) — "
+                             "no Qty, Unit, or Rate/Rechargeable mismatches found.")
 
     def _apply_combined_doc_highlights(self, source: "PandasModel", active: bool):
         """Combined-view highlighting. `active` is Show Combined (orange):

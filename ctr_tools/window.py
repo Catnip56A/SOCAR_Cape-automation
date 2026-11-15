@@ -3598,8 +3598,7 @@ class CTRGeneratorWidget(QWidget):
         self._attention_edit.setToolTip(
             "Filled from the requester in the CTR Request; \"Dear …,\" uses its first name.")
         # CBAR rates: one indented line per turned-on currency (Settings), each with its own
-        # Reload button. PROVISIONAL (task log MA202): the proposal converts every price that is
-        # not in AZN with these rates; how the colleagues want it done is not confirmed yet.
+        # Reload button. The proposal converts every price that is not in AZN with these rates.
         self._fx: dict[str, dict] = {}
         self._cbar_worker = None
         self._fx_group = QWidget()
@@ -3992,8 +3991,8 @@ class CTRGeneratorWidget(QWidget):
 
     # ── CBAR rates (PDMS proposal) ────────────────────────────────────────────
 
-    _FX_NOTE = ("PROVISIONAL: prices not in AZN are converted with these rates (then the consumables / "
-                "transport mark-up is added). How the colleagues want this done is not confirmed yet.")
+    _FX_NOTE = ("Prices not in AZN are converted with these rates (then the consumables / "
+                "transport mark-up is added).")
 
     def _rebuild_fx_rows(self) -> None:
         """One indented line per turned-on currency (Settings): its rate, its own Reload button and
@@ -4031,7 +4030,6 @@ class CTRGeneratorWidget(QWidget):
             edit = QLineEdit()
             edit.setToolTip(f"AZN per 1 {code} (CBAR). A formula such as =1.7*1.02 is allowed.")
             install_formula_edit(edit)
-            edit.setStyleSheet("background: #FFF3E0;")           # orange = provisional
             btn = QPushButton("Reload")
             btn.setFixedWidth(70)
             note = QLabel("")
@@ -6627,8 +6625,6 @@ class CTRGeneratorWidget(QWidget):
         if pdms_on:
             if not self._attention_edit.text().strip():
                 warnings.append("Attention is empty — the proposal's \"Attention:\" and \"Dear …\" lines will be blank.")
-            warnings.append("The USD→AZN conversion of equipment and consumables is provisional "
-                            "(the colleagues' rule is not confirmed yet).")
             for _code, (_rate, _day) in self._fx_rates().items():
                 if _code in self._currencies_in_use() and _day is None and _rate and _rate > 0:   # typed by hand: check it against the log (warn only)
                     _hist = cbar_rates.history(_code)
