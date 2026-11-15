@@ -32,6 +32,9 @@ completion, how many tasks are not finished, phases. Also rebuilt on every scrip
 not edit it by hand. A group with no text in the JSON shows a blank "What was done" and is
 listed by `missing` as `summary<TAB>key`. Write the text, then run `refresh`.
 
+**General Form** — one row per App Part: average Completion % of all its rows and the highest
+release number it was edited in (`-` if none). Rebuilt on every script write; do not edit by hand.
+
 ## Column conventions
 
 | Column | Convention |

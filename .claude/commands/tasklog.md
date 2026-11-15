@@ -18,11 +18,11 @@ Only run it against the real file; to test it, pass `--xlsx` with a copy.
    Also add a one-line plain-language summary (for a non-technical reader) per new Version|App Part to
    `.claude/task_log/short_summaries.json`, and for any `summary<TAB>key` line printed by `missing`; then run `... refresh`.
    If open-item updates changed a group's meaning, update its line too.
-3. **General Form sheet.** Every task log edit (open-item updates, new rows, summaries) must
-   also be reflected in the `General Form` sheet of the xlsx. The script does not touch it, so
-   inspect the sheet (read-only first), edit a test copy, make a backup, and save atomically,
-   as for the rest of the log. Do not skip this step, even if the other sheets look complete.
-4. Finish with one line: rows added, rows updated, and whether General Form was updated.
+3. **General Form sheet.** It is rebuilt by the script on every write (`add`, `update`,
+   `update-many`, `refresh`) from ALL rows of each App Part: average Completion % and last release
+   number. Never edit it by hand. After the writes, read the sheet back and check it matches the
+   log; if you made no write, run `refresh`.
+4. Finish with one line: rows added, rows updated, and whether General Form was rebuilt and checked.
 
 ## Locked file
 
