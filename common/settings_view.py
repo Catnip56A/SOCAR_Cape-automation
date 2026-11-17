@@ -549,6 +549,17 @@ class SettingsTab(QWidget):
         g3.addWidget(hint)
         lay.addWidget(grp3)
 
+        # ── Generate ─────────────────────────────────────────────────────────
+        grp_g = QGroupBox("Generate")
+        gg = QVBoxLayout(grp_g)
+        self._warn_mp_chk = QCheckBox("Warn when the Manpower table is empty")
+        self._warn_mp_chk.setToolTip("On: Generate asks Continue / Cancel when there are no Manpower rows. "
+                                     "Off: it generates without asking.")
+        self._warn_mp_chk.toggled.connect(
+            lambda on: self._gen._settings().setValue(self._gen.KEY_WARN_EMPTY_MANPOWER, bool(on)))
+        gg.addWidget(self._warn_mp_chk)
+        lay.addWidget(grp_g)
+
         # ── CBAR currencies (PDMS proposal) ──────────────────────────────────
         grp4 = QGroupBox("CBAR currencies (PDMS proposal)")
         g4 = QVBoxLayout(grp4)
@@ -685,6 +696,9 @@ class SettingsTab(QWidget):
             w.blockSignals(True)
             setter()
             w.blockSignals(False)
+        self._warn_mp_chk.blockSignals(True)
+        self._warn_mp_chk.setChecked(getattr(self._gen, "_warn_empty_manpower", lambda: True)())
+        self._warn_mp_chk.blockSignals(False)
         for key, path in (("aliases", _aliases._ALIASES_PATH), ("renames", _renames._DESC_RENAMES_PATH),
                           ("presets", _presets._PRESETS_PATH), ("choices", _choices._CHOICES_PATH),
                           ("types", _types._TYPES_PATH), ("keywords", _kw._KEYWORDS_PATH),

@@ -55,5 +55,7 @@
   "1.0.24|App-wide / Infrastructure": "The program now reads its own editable copy of the template settings, so a change no longer needs a rebuild of the installed program.",
   "1.0.25|MR vs CTR Comparator": "You can now choose how items are paired (by stock code, by description, or both), compare an MR with a PDMS proposal (Word file), and items without a stock code, such as a forklift or a truck, are compared by their description.",
   "1.0.25|Proposals / Documents": "The short proposal and the PDMS proposal wording and layout are finished.",
-  "1.0.25|CTR Generator": "The CTR request file now uses formulas that also work in Excel 2019."
+  "1.0.25|CTR Generator": "The CTR request file now uses formulas that also work in Excel 2019.",
+  "1.0.26|CTR Generator": "Many Stock Codes can now be settled at once in the Disparities window, an empty Manpower table asks before generating (and the question can be switched off in Settings), and a folder or file path saved on another PC is no longer shown.",
+  "1.0.26|Proposals / Documents": "The PDMS Hotbed Include tick is now remembered the next time the app starts."
 }

@@ -94,3 +94,22 @@ def test_an_edit_of_the_config_file_applies_without_restarting_and_a_broken_file
         C.CFG["pdms"] = old_pdms
         w._pdms_check.setChecked(False)
     assert C.CFG["pdms"]["hotbed_rate"] == old_pdms["hotbed_rate"]
+
+
+def test_the_include_tick_is_remembered_between_runs_and_nothing_else_of_the_hotbed():
+    w = H.generator()
+    w._hotbed_rate_edit.setText("77")
+    w._hotbed_days_edit.setText("3")
+    try:
+        w._hotbed_incl_chk.setChecked(False)               # saved the moment it changes
+        fresh = H._new_generator()                         # a new window = the next run of the app
+        fresh.restore_settings()
+        assert not fresh._hotbed_incl_chk.isChecked()
+        assert fresh._hotbed_rate_edit.text() == f"{float(W.pdms_defaults()['hotbed_rate']):g}"
+        assert fresh._hotbed_days_edit.text() == ""
+        w._hotbed_incl_chk.setChecked(True)
+        again = H._new_generator()
+        again.restore_settings()
+        assert again._hotbed_incl_chk.isChecked()
+    finally:
+        w._hotbed_incl_chk.setChecked(True)

@@ -39,3 +39,28 @@ def test_the_presets_label_names_the_new_fields():
     for f in ("customer_name", "customer_city", "signer_name", "signer_title"):
         assert f in _PRESET_FIELDS
     assert "PDMS Customer" in W._PRESET_SAVES and "PDMS Signer title" in W._PRESET_SAVES
+
+
+def test_a_folder_or_file_that_is_not_on_this_pc_is_not_shown():
+    import tempfile
+    from pathlib import Path
+    w = H.generator_without_files()
+    here = tempfile.mkdtemp(prefix="ctr_out_")
+    w._out_dir_edit.setText("")
+    w._apply_preset_data({"output_dir": "/no/such/folder/on/this/pc"})
+    assert w._out_dir_edit.text() == ""                                   # a preset from another machine
+    w._apply_preset_data({"output_dir": here})
+    assert w._out_dir_edit.text() == here                                 # a real folder is used
+    w._apply_preset_data({"output_dir": "/no/such/folder/on/this/pc"})
+    assert w._out_dir_edit.text() == here                                 # and a missing one never replaces it
+    s = w._settings()
+    s.setValue("paths/output_dir", "C:\\Users\\Somebody\\Output")
+    s.setValue("paths/azn_template", "/no/such/AZN_TEMPLATE.xlsx")
+    s.setValue("paths/usd_template", str(H.INPUTS / "USD_TEMPLATE.xlsx"))
+    fresh = H._new_generator()
+    fresh._azn_tpl_edit.setText(""); fresh._usd_tpl_edit.setText(""); fresh._out_dir_edit.setText("")
+    fresh.restore_settings()
+    assert fresh._out_dir_edit.text() == "" and fresh._azn_tpl_edit.text() == ""
+    assert fresh._usd_tpl_edit.text() == str(H.INPUTS / "USD_TEMPLATE.xlsx")
+    for k in ("paths/output_dir", "paths/azn_template", "paths/usd_template"):
+        s.remove(k)

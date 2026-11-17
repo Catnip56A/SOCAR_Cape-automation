@@ -225,6 +225,7 @@ class DisparitiesDialog(QDialog):
         self.table.setHorizontalHeaderLabels([""] + cs.DISPARITY_COLUMNS)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)   # Ctrl / Shift
         self.table.verticalHeader().setVisible(False)
         install_elided_tooltips(self.table)
         install_find(self.table)
@@ -232,9 +233,18 @@ class DisparitiesDialog(QDialog):
         row = QHBoxLayout()
         self.count = QLabel("")
         self.count.setStyleSheet("color: #757575; font-size: 11px;")
+        self.choose_sel = QPushButton("Choose for selected…")
+        self.choose_sel.setToolTip("Select several lines (Ctrl or Shift + click), then give them all the same "
+                                   "choice. The choice is kept per Stock Code, so a code on several lines "
+                                   "is set once.")
+        self.choose_sel.setEnabled(False)
+        self.choose_sel.clicked.connect(self._choose_selected)
+        self.table.itemSelectionChanged.connect(
+            lambda: self.choose_sel.setEnabled(bool(self._selected_codes())))
         close = QPushButton("Close")
         close.clicked.connect(self.accept)
         row.addWidget(self.count, 1)
+        row.addWidget(self.choose_sel)
         row.addWidget(close)
         lay.addLayout(row)
         self._fill()
@@ -259,6 +269,38 @@ class DisparitiesDialog(QDialog):
         open_n = len(self._panel.disparity_table())
         self.count.setText(f"{open_n} Stock Code(s) still need a choice" if open_n
                            else "Nothing left to choose — all disparities are resolved")
+
+    def _selected_codes(self) -> list[str]:
+        """The Stock Codes of the selected lines, each once (the choice is per code)."""
+        col = cs.DISPARITY_COLUMNS.index("Stock Code") + 1
+        rows = sorted({i.row() for i in self.table.selectedIndexes()})
+        codes = []
+        for r in rows:
+            it = self.table.item(r, col)
+            if it is not None and it.text() not in codes:
+                codes.append(it.text())
+        return codes
+
+    def _choose_selected(self) -> None:
+        codes = self._selected_codes()
+        if not codes:
+            return
+        menu = QMenu(self)
+        title = menu.addAction(f"{len(codes)} Stock Code(s) selected")
+        title.setEnabled(False)
+        menu.addSeparator()
+        a_doc = menu.addAction("Use the document for all")
+        a_sage = menu.addAction("Use SAGE for all")
+        a_clear = menu.addAction("Clear my choice for all")
+        act = menu.exec(self.choose_sel.mapToGlobal(self.choose_sel.rect().topLeft()))
+        if act is None:
+            return
+        self._apply_to_selected(cs.CHOICE_DOC if act is a_doc else cs.CHOICE_SAGE if act is a_sage else None)
+
+    def _apply_to_selected(self, choice: str | None) -> None:
+        """Give every selected Stock Code this choice (None = clear it)."""
+        self._panel.set_choices_bulk(self._selected_codes(), choice)
+        self._fill()
 
     def _choose(self, button, key: str, name: str, doc_says: str, sage_says: str, chosen: str) -> None:
         menu = QMenu(self)
@@ -800,6 +842,17 @@ class StatsPanel(QWidget):
             self._choices.pop(key, None)
         else:
             self._choices[key] = choice
+        self.refresh()
+        self.choices_changed.emit(self.choices())
+
+    def set_choices_bulk(self, keys, choice: str | None) -> None:
+        """Choose (or, with None, clear) the source for several Stock Codes at once: one
+        recalculation and one announcement instead of one per code."""
+        for key in set(keys):
+            if choice is None:
+                self._choices.pop(key, None)
+            else:
+                self._choices[key] = choice
         self.refresh()
         self.choices_changed.emit(self.choices())
 

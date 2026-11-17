@@ -2231,6 +2231,9 @@ class CTRGeneratorWidget(QWidget):
         self._hotbed_rate_edit.textChanged.connect(self._update_hotbed_total)
         self._hotbed_days_edit.textChanged.connect(self._update_hotbed_total)
         self._hotbed_incl_chk.toggled.connect(lambda _on: self._update_hotbed_total())
+        # Only the Include tick is remembered (saved the moment it changes); rate, days and currency are per job.
+        self._hotbed_incl_chk.toggled.connect(
+            lambda on: self._settings().setValue(self.KEY_HOTBED_INCLUDE, bool(on)))
         self._update_hotbed_total()                  # the label says what the line will do from the start
         self._hotbed_cur_combo.currentTextChanged.connect(lambda _t: self._update_hotbed_total())
         for _w in self._hotbed_widgets:
@@ -3762,6 +3765,14 @@ class CTRGeneratorWidget(QWidget):
     def _settings() -> QSettings:
         return QSettings("SOCAR", "CTRGenerator")
 
+    KEY_WARN_EMPTY_MANPOWER = "warnEmptyManpower"
+    KEY_HOTBED_INCLUDE = "pdms/hotbed_include"
+
+    def _warn_empty_manpower(self) -> bool:
+        """Settings: warn (Continue / Cancel) before generating with an empty Manpower table. On by default."""
+        v = self._settings().value(self.KEY_WARN_EMPTY_MANPOWER, True)
+        return v if isinstance(v, bool) else str(v).lower() in ("1", "true", "yes")
+
     def sage_path(self) -> str:
         return self._sage_edit.text().strip()
 
@@ -3874,13 +3885,16 @@ class CTRGeneratorWidget(QWidget):
         }
         for key, edit in _edits.items():
             val = s.value(f"paths/{key}", "")
-            if val:
+            # A remembered path that is not on THIS PC (settings or a preset that came from another
+            # machine) is not shown: the box stays empty.
+            if val and (Path(val).is_dir() if key == "output_dir" else Path(val).is_file()):
                 edit.setText(val)
         for key, edit in self._pdms_remembered().items():
             val = s.value(f"pdms/{key}", "")
             if val:
                 edit.setText(val)
         self._pdms_check.setChecked(str(s.value("pdms/enabled", "false")).lower() == "true")
+        self._hotbed_incl_chk.setChecked(str(s.value(self.KEY_HOTBED_INCLUDE, "true")).lower() == "true")
 
     def save_settings(self) -> None:
         """Persist current paths to QSettings. Call from the parent closeEvent."""
@@ -4471,7 +4485,7 @@ class CTRGeneratorWidget(QWidget):
         self._revision_edit.setText(data.get("revision", ""))
         self._project_type_edit.setText(data.get("project_type", "Offshore"))
         self._job_ref_edit.setText(data.get("job_ref", ""))
-        if data.get("output_dir"):
+        if data.get("output_dir") and Path(data["output_dir"]).is_dir():     # a folder from another PC is left out
             self._out_dir_edit.setText(data["output_dir"])
         for key, edit in (("customer_name", self._customer_edit), ("customer_city", self._customer_city_edit),
                           ("signer_name", self._signer_edit), ("signer_title", self._signer_title_edit)):
@@ -6597,8 +6611,9 @@ class CTRGeneratorWidget(QWidget):
             elif not _is_dir_writable(out_path):
                 errors.append(f"Output folder is not writable: {output_dir}")
 
-        if self._req_manpower_tbl.rowCount() == 0:
-            errors.append("Manpower table is empty — load a CTR Request or add rows first.")
+        if self._req_manpower_tbl.rowCount() == 0 and self._warn_empty_manpower():
+            warnings.append("Manpower table is empty — the CTR will have no labour rows "
+                            "(load a CTR Request or add rows first if that is not intended).")
 
         self._refresh_stats()
         open_disp = self._stats_panel.disparity_table()
