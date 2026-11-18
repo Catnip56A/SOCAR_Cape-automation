@@ -244,14 +244,14 @@
   "transport_rates": {
     "_comment": "AZN rate, mark-up and duration unit per requested transport type — the request form gives only the type, quantity and duration. One type may expand into several CTR lines (a minibus bills vehicle+driver and fuel separately, only the former marked up). A type with no entry here is written using its requested wording at a 0.00 rate with _default's mark-up, so it appears in the UI to be priced by hand.",
     "_default": [
-      { "rate_azn": 0.0, "markup": 0.065, "uom": "Days" }
+      { "rate_azn": 0.0, "markup": 0.05, "uom": "Days" }
     ],
     "Mini Bus": [
-      { "description": "Minibus+driver",   "rate_azn": 110.0, "markup": 0.065, "uom": "Days" },
+      { "description": "Minibus+driver",   "rate_azn": 110.0, "markup": 0.05, "uom": "Days" },
       { "description": "Fuel for minibus", "rate_azn": 10.0,  "markup": 0.0,   "uom": "Days" }
     ],
     "Truck": [
-      { "description": "Truck", "rate_azn": 135.0, "markup": 0.065, "uom": "Trips" }
+      { "description": "Truck", "rate_azn": 135.0, "markup": 0.05, "uom": "Trips" }
     ]
   },
 

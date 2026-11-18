@@ -193,6 +193,95 @@ class _RestoreDialog(QDialog):
         return self._paths[r] if 0 <= r < len(self._paths) else None
 
 
+class _ConfigMergeDialog(QDialog):
+    """Merge shipped… for the template config: every setting where your copy and the shipped file differ,
+    with a tick per setting. New settings (a newer version brings some) start ticked; a value your copy has
+    changed starts UNticked, because it may be your own — ticking it replaces it with the shipped one."""
+
+    def __init__(self, parent, diffs: list[dict]):
+        super().__init__(parent)
+        self._diffs = diffs
+        self.setWindowTitle("Merge shipped settings")
+        self.resize(900, 520)
+        lay = QVBoxLayout(self)
+        note = QLabel("Tick the settings to take from the shipped file. <b>New</b> settings are ticked. A setting "
+                      "marked <b>Different</b> is not ticked: your copy has another value (it may be your own); "
+                      "ticking it replaces yours. A backup is made first and Restore… brings it back.")
+        note.setWordWrap(True)
+        note.setStyleSheet(_MUTED)
+        lay.addWidget(note)
+        self._find = QLineEdit()
+        self._find.setPlaceholderText("Search the settings…")
+        self._find.setClearButtonEnabled(True)
+        self._find.textChanged.connect(self._filter)
+        lay.addWidget(self._find)
+        self._table = QTableWidget(len(diffs), 5)
+        self._table.setHorizontalHeaderLabels(["", "Setting", "Your value", "Shipped value", "Status"])
+        self._table.verticalHeader().setVisible(False)
+        self._table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self._table.horizontalHeader().setStretchLastSection(True)
+        for r, d in enumerate(diffs):
+            tick = QTableWidgetItem()
+            tick.setFlags(Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEnabled)
+            tick.setCheckState(Qt.CheckState.Checked if d["kind"] == "new" else Qt.CheckState.Unchecked)
+            self._table.setItem(r, 0, tick)
+            self._table.setItem(r, 1, QTableWidgetItem(" › ".join(str(k) for k in d["path"])))
+            self._table.setItem(r, 2, QTableWidgetItem("—" if d["kind"] == "new" else self._show(d["mine"])))
+            self._table.setItem(r, 3, QTableWidgetItem(self._show(d["shipped"])))
+            self._table.setItem(r, 4, QTableWidgetItem("New" if d["kind"] == "new" else "Different"))
+        self._table.setColumnWidth(0, 30)
+        self._table.setColumnWidth(1, 380)
+        self._table.setColumnWidth(2, 160)
+        self._table.setColumnWidth(3, 160)
+        lay.addWidget(self._table, 1)
+        self._count = QLabel("")
+        self._count.setStyleSheet(_MUTED)
+        self._table.itemChanged.connect(lambda _i: self._update_count())
+        row = QHBoxLayout()
+        row.addWidget(self._count, 1)
+        for text, fn in (("Tick new", lambda: self._tick(lambda d: d["kind"] == "new")),
+                         ("Tick all", lambda: self._tick(lambda d: True)),
+                         ("Untick all", lambda: self._tick(lambda d: False))):
+            b = QPushButton(text)
+            b.clicked.connect(fn)
+            row.addWidget(b)
+        ok = QPushButton("Apply ticked")
+        ok.clicked.connect(self.accept)
+        cancel = QPushButton("Cancel")
+        cancel.clicked.connect(self.reject)
+        row.addWidget(ok)
+        row.addWidget(cancel)
+        lay.addLayout(row)
+        self._update_count()
+
+    @staticmethod
+    def _show(v) -> str:
+        text = json.dumps(v, ensure_ascii=False)
+        return text if len(text) <= 90 else text[:87] + "…"
+
+    def _filter(self, text: str) -> None:
+        t = text.strip().lower()
+        for r in range(self._table.rowCount()):
+            hay = " ".join(self._table.item(r, c).text() for c in (1, 2, 3)).lower()
+            self._table.setRowHidden(r, bool(t) and t not in hay)
+
+    def _tick(self, which) -> None:
+        was = self._table.blockSignals(True)
+        for r, d in enumerate(self._diffs):
+            if not self._table.isRowHidden(r):
+                self._table.item(r, 0).setCheckState(Qt.CheckState.Checked if which(d) else Qt.CheckState.Unchecked)
+        self._table.blockSignals(was)
+        self._update_count()
+
+    def _update_count(self) -> None:
+        n = len(self.chosen())
+        self._count.setText(f"{n} of {len(self._diffs)} ticked")
+
+    def chosen(self) -> list[dict]:
+        return [d for r, d in enumerate(self._diffs)
+                if self._table.item(r, 0).checkState() == Qt.CheckState.Checked]
+
+
 class _ChoicesDialog(QDialog):
     """Edit the rechargeability choices: for a Stock Code whose rechargeability differs between a
     document and SAGE, which source is right — the document or SAGE. The same list the Disparities
@@ -513,14 +602,15 @@ class SettingsTab(QWidget):
                         "transport rates (template_config.json). Your copy in the data folder is what the app reads — "
                         "in the installed program too. A file with a JSON error is ignored (the shipped one is used). "
                         "Template positions apply at the next start; the Hotbed's “Reload standard” button re-reads the "
-                        "PDMS values at once. Merge shipped adds the settings of the shipped file that your copy lacks; "
-                        "Reset replaces your copy with the shipped file.",
+                        "PDMS values at once. Merge shipped lists what differs from the shipped file and takes the settings you tick "
+                        "(new ones are ticked; a value you changed is not, and a warning comes before it is replaced); "
+                        "Reset replaces your whole copy with the shipped file.",
                         self._open_config, self._reset_config,
                         lambda: self._restore("Template config", _config._CONFIG_PATH),
                         open_text="Open file",
                         more=("More ▾", [
                             ("Merge shipped…", self._merge_config,
-                             "Add the settings of the shipped file your copy lacks. Your own values are kept."),
+                             "Choose which settings to take from the shipped file: new ones, and (after a warning) different ones."),
                             ("Open folder", self._open_config_folder, "Open the data folder that holds your copy."),
                         ]))
         lay.addWidget(grp2)
@@ -558,6 +648,12 @@ class SettingsTab(QWidget):
         self._warn_mp_chk.toggled.connect(
             lambda on: self._gen._settings().setValue(self._gen.KEY_WARN_EMPTY_MANPOWER, bool(on)))
         gg.addWidget(self._warn_mp_chk)
+        self._warn_notes_chk = QCheckBox("Remind me to look at the proposal's notes before generating")
+        self._warn_notes_chk.setToolTip("On: in PDMS mode, Generate asks Continue / Cancel while the Notes button is still red. "
+                                        "Off: it generates without asking.")
+        self._warn_notes_chk.toggled.connect(
+            lambda on: self._gen._settings().setValue(self._gen.KEY_WARN_UNSEEN_NOTES, bool(on)))
+        gg.addWidget(self._warn_notes_chk)
         lay.addWidget(grp_g)
 
         # ── CBAR currencies (PDMS proposal) ──────────────────────────────────
@@ -699,6 +795,9 @@ class SettingsTab(QWidget):
         self._warn_mp_chk.blockSignals(True)
         self._warn_mp_chk.setChecked(getattr(self._gen, "_warn_empty_manpower", lambda: True)())
         self._warn_mp_chk.blockSignals(False)
+        self._warn_notes_chk.blockSignals(True)
+        self._warn_notes_chk.setChecked(getattr(self._gen, "_warn_unseen_notes", lambda: True)())
+        self._warn_notes_chk.blockSignals(False)
         for key, path in (("aliases", _aliases._ALIASES_PATH), ("renames", _renames._DESC_RENAMES_PATH),
                           ("presets", _presets._PRESETS_PATH), ("choices", _choices._CHOICES_PATH),
                           ("types", _types._TYPES_PATH), ("keywords", _kw._KEYWORDS_PATH),
@@ -1100,19 +1199,49 @@ class SettingsTab(QWidget):
         self.refresh()
 
     def _merge_config(self) -> None:
-        added = []
         try:
             check_writable(_config._CONFIG_PATH.parent)
             _config._seed_user_copy()
+            diffs = _config.config_differences()
+        except (OSError, ValueError) as exc:
+            log.exception("Reading the template config differences failed")
+            QMessageBox.critical(self, "Merge failed", str(exc))
+            return
+        if not diffs:
+            QMessageBox.information(self, "Merge shipped settings", "Your copy has every shipped setting, with the same values.")
+            return
+        dlg = _ConfigMergeDialog(self, diffs)
+        accepted = dlg.exec() == QDialog.DialogCode.Accepted
+        chosen = dlg.chosen() if accepted else []
+        dlg.deleteLater()
+        if not chosen:
+            return
+        replaced = [d for d in chosen if d["kind"] == "changed"]
+        if replaced:                              # values your copy has changed (maybe your own): ask before replacing
+            shown = "\n".join(f"• {' › '.join(str(k) for k in d['path'])}:  {_ConfigMergeDialog._show(d['mine'])}  →  "
+                              f"{_ConfigMergeDialog._show(d['shipped'])}" for d in replaced[:12])
+            if len(replaced) > 12:
+                shown += f"\n… and {len(replaced) - 12} more"
+            if QMessageBox.warning(
+                    self, "Replace your values?",
+                    f"{len(replaced)} value(s) in your copy differ from the shipped file and will be REPLACED — they may be "
+                    f"settings you made yourself:\n\n{shown}\n\nYour copy is first saved as a backup; Restore… on this row "
+                    "brings it back.",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                    QMessageBox.StandardButton.Cancel) != QMessageBox.StandardButton.Yes:
+                return
+        added = []
+        try:
             copy_backup(_config._CONFIG_PATH)
-            added.append(_config.merge_shipped_config())
+            added.append(_config.merge_shipped_config([d["path"] for d in chosen]))
         except (OSError, ValueError) as exc:
             log.exception("Merging the shipped template config failed")
             QMessageBox.critical(self, "Merge failed", str(exc))
             return
         QMessageBox.information(self, "Merge shipped settings",
-                                f"{added[0]} shipped value(s) added. Your own values were kept (a backup of your copy was "
-                                "made first).")
+                                f"{added[0]} setting(s) taken from the shipped file"
+                                + (f", {len(replaced)} of them replacing a value of yours" if replaced else "")
+                                + ". A backup of your copy was made first (Restore… brings it back).")
         self._after_config_change()
 
     def _reset_config(self) -> None:

@@ -11,6 +11,7 @@ cannot be parsed, so the app always starts even with a broken config.
 
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import shutil
@@ -433,14 +434,14 @@ _DEFAULTS: dict = {
     # shows up in the UI to be priced by hand rather than disappearing.
     "transport_rates": {
         "_default": [
-            {"rate_azn": 0.0, "markup": 0.065, "uom": "Days"}
+            {"rate_azn": 0.0, "markup": 0.05, "uom": "Days"}
         ],
         "Mini Bus": [
-            {"description": "Minibus+driver",  "rate_azn": 110.0, "markup": 0.065, "uom": "Days"},
+            {"description": "Minibus+driver",  "rate_azn": 110.0, "markup": 0.05, "uom": "Days"},
             {"description": "Fuel for minibus", "rate_azn": 10.0, "markup": 0.0,   "uom": "Days"}
         ],
         "Truck": [
-            {"description": "Truck", "rate_azn": 135.0, "markup": 0.065, "uom": "Trips"}
+            {"description": "Truck", "rate_azn": 135.0, "markup": 0.05, "uom": "Trips"}
         ],
     },
 
@@ -602,6 +603,41 @@ def differs_from_shipped() -> tuple[int, int]:
     return changed, missing
 
 
+def _is_note(path: tuple) -> bool:
+    """A "_comment" (or any top-level "_…" note) is not a setting."""
+    return path[0].startswith("_") or str(path[-1]).startswith("_comment")
+
+
+def config_differences() -> list[dict]:
+    """Every setting where the user's copy and the shipped file differ, for the Merge shipped list:
+    {"path": (keys…), "mine": value (None when the copy lacks it), "shipped": value, "kind": "new" | "changed"}.
+    A list or a number is one setting. Notes ("_comment") are left out."""
+    ship, mine = _read_config_file(_SHIPPED_CONFIG_PATH), _read_config_file(_CONFIG_PATH)
+    mine_leaves = dict(_leaf_paths(mine))
+    out = []
+    for path, value in _leaf_paths(ship):
+        if not path or _is_note(path):
+            continue
+        if path not in mine_leaves:
+            out.append({"path": path, "mine": None, "shipped": value, "kind": "new"})
+        elif mine_leaves[path] != value:
+            out.append({"path": path, "mine": mine_leaves[path], "shipped": value, "kind": "changed"})
+    return out
+
+
+def _set_path(root: dict, path: tuple, value) -> bool:
+    node = root
+    for key in path[:-1]:
+        nxt = node.get(key)
+        if nxt is None:
+            nxt = node[key] = {}
+        if not isinstance(nxt, dict):
+            return False                      # a value sits where the shipped file has a section: left alone
+        node = nxt
+    node[path[-1]] = copy.deepcopy(value)
+    return True
+
+
 def _merge_missing(into: dict, ship: dict) -> int:
     n = 0
     for k, v in ship.items():
@@ -613,10 +649,17 @@ def _merge_missing(into: dict, ship: dict) -> int:
     return n
 
 
-def merge_shipped_config() -> int:
-    """Add the settings of the shipped file the user's copy does not have yet (a newer version brings some); the user's
-    own values are kept. The caller backs the file up first. Returns how many values were added."""
+def merge_shipped_config(paths=None) -> int:
+    """Without `paths`: add the settings of the shipped file the user's copy does not have yet (a newer version brings
+    some); the user's own values are kept. With `paths` (from config_differences): take exactly those settings from
+    the shipped file, a changed value included. The caller backs the file up first. Returns how many values were set."""
     ship, mine = _read_config_file(_SHIPPED_CONFIG_PATH), _read_config_file(_CONFIG_PATH)
+    if paths is not None:
+        ship_leaves = dict(_leaf_paths(ship))
+        added = sum(1 for p in paths if p in ship_leaves and _set_path(mine, tuple(p), ship_leaves[p]))
+        if added:
+            _CONFIG_PATH.write_text(json.dumps(mine, indent=2, ensure_ascii=False), encoding="utf-8")
+        return added
     added = _merge_missing(mine, ship)
     if added:
         _CONFIG_PATH.write_text(json.dumps(mine, indent=2, ensure_ascii=False), encoding="utf-8")

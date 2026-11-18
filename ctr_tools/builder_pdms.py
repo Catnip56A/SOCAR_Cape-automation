@@ -20,6 +20,14 @@ are replaced here:
     {{#IF_EQUIPMENT}} ... {{/IF_EQUIPMENT}}   (same for CONSUMABLES)
         caption and table between the markers are deleted when the section is empty
 
+    {{NOTES_<PLACE>}} {{NOTES_<PLACE>_BULLET}}   (e.g. SCHEDULE, EXCLUSIONS, PRICE_BASIS)
+        the notes of that place (ctr_tools/pdms_notes.py): the paragraph carrying the tag is the model
+        — style, indent and Word numbering — copied once per ticked note, in order; _BULLET is the model
+        of a "* " line (a bullet note gets the "* " prefix; without it the main model is used)
+    {{#IF_NOTES_<PLACE>}} ... {{/IF_NOTES_<PLACE>}}
+        heading and tags between the markers are deleted when no note is ticked there
+    A template without these tags works as before.
+
 Fixed texts and defaults live in template_config.json ("pdms").
 
 The USD -> AZN conversion of equipment and consumables (CBAR rate, consumables mark-up
@@ -39,6 +47,7 @@ import docx
 from docx.table import Table, _Row
 from docx.text.paragraph import Paragraph
 
+from ctr_tools import pdms_notes
 from ctr_tools.config import CFG
 from ctr_tools.xl_formula import pick as _pick, pick_days as _pick_days
 from ctr_tools.naming import pdms_output_filename
@@ -277,6 +286,72 @@ def _drop_markers(doc, name: str) -> None:
             p._p.getparent().remove(p._p)
 
 
+_NOTES_TAG = re.compile(r"^\{\{NOTES_([A-Z0-9_]+?)(_BULLET)?\}\}$")
+
+
+def _set_paragraph_text(p: Paragraph, text: str) -> None:
+    """The whole text in the first run (its look is the paragraph's), the other runs removed."""
+    runs = p.runs
+    if not runs:
+        p.add_run(text)
+        return
+    runs[0].text = text
+    for run in runs[1:]:
+        run._r.getparent().remove(run._r)
+
+
+def notes_places_in(doc) -> list[str]:
+    """The places (lower case: "schedule", "exclusions" …) the template has a {{NOTES_<PLACE>}} tag for."""
+    out = []
+    for p in doc.paragraphs:
+        m = _NOTES_TAG.match(p.text.strip())
+        if m and m.group(1).lower() not in out:
+            out.append(m.group(1).lower())
+    return out
+
+
+def _fill_notes(doc, items: dict, values: dict) -> list[str]:
+    """Write the notes into the template. items = {place: [{"text", "kind"}, …]} in order; values = {placeholder:
+    value}. For every place the template has a tag for, the tagged paragraph is the model that is copied (its style,
+    indent and Word numbering, so 3.1, 3.2 … number themselves) once per note; the model paragraphs are then removed.
+    A place with no note loses its {{#IF_NOTES_…}} block (heading included), or only its tag when there are no
+    markers. A place the template has no tag for is skipped. Returns the placeholders left without a value."""
+    models: dict[str, dict] = {}
+    for p in list(doc.paragraphs):
+        m = _NOTES_TAG.match(p.text.strip())
+        if m:
+            models.setdefault(m.group(1).lower(), {})["bullet" if m.group(2) else "main"] = p
+    unresolved: list[str] = []
+    for place, found in models.items():
+        main = found.get("main") or found.get("bullet")
+        lines = list(items.get(place) or [])
+        name = "NOTES_" + place.upper()
+        has_block = (_find_paragraph(doc, "{{#IF_%s}}" % name) is not None
+                     and _find_paragraph(doc, "{{/IF_%s}}" % name) is not None)
+        if not lines:
+            if has_block:
+                _remove_block(doc, name)
+            else:
+                for model in found.values():
+                    model._p.getparent().remove(model._p)
+            continue
+        last = main._p
+        for line in lines:
+            kind = line.get("kind")
+            model = found.get("bullet") if kind == "bullet" and found.get("bullet") is not None else main
+            text = pdms_notes.render(str(line.get("text", "")), values)
+            unresolved += pdms_notes.missing(str(line.get("text", "")), values)
+            el = copy.deepcopy(model._p)
+            last.addnext(el)
+            last = el
+            _set_paragraph_text(Paragraph(el, main._parent), ("* " if kind == "bullet" else "") + text)
+        for model in found.values():
+            model._p.getparent().remove(model._p)
+        if has_block:
+            _drop_markers(doc, name)
+    return list(dict.fromkeys(unresolved))
+
+
 def _find_table(doc, tag: str) -> Table:
     for t in doc.tables:
         if any(tag in c.text for r in t.rows for c in r.cells):
@@ -389,6 +464,7 @@ def build_pdms(
     third_party_rows: list[dict] | None = None,
     hotbed: dict | None = None,
     currencies: dict | None = None,
+    notes: dict | None = None,
 ) -> Path:
     """
     Write the PDMS proposal into a copy of the template and return its path.
@@ -405,6 +481,10 @@ def build_pdms(
     hotbed: {"rate", "days"[, "currency"]} or None (= left out). With both a rate and days it is
         calculated (rate × days, counted in the labour total); with one or both None the line is
         inserted with just what is given and no total.
+    notes: {"items": {place: [{"text", "kind"}, …]}, "values": {placeholder: value}} — what goes under the
+        {{NOTES_<PLACE>}} tags of the template (see _fill_notes). None = the saved notes with what is pre-ticked
+        and each placeholder's usual value (the location and the currency from this proposal); it only matters
+        to a template that has the tags.
     markup_rate: consumables mark-up as a fraction (the USD CTR's).
     third_party_rows: the transport lines (as for build_azn); they are listed at the end of the
         consumables table with their cost only, and counted in that table's total.
@@ -516,6 +596,18 @@ def build_pdms(
         _fill_row(summary_t, r._tr, {
             "{{S_LABOUR}}": _money(labour_total, sym), "{{S_MATERIAL}}": _money(equip_total, sym),
             "{{S_CONSUMABLES}}": _money(cons_total, sym), "{{S_GRAND}}": _money(grand_total, sym)})
+
+    # ── the notes (only a template that has the tags) ──
+    if notes_places_in(doc):
+        if notes is None:
+            data = pdms_notes.load_notes()
+            auto = {"location": location, "currency": currency}
+            notes = {"items": {p: [n for n in pdms_notes.notes_for(data, p) if n["id"] in ids]
+                               for p, ids in pdms_notes.default_ticks(data).items()},
+                     "values": {n: pdms_notes.initial_value(data, n, auto) for n in pdms_notes.placeholder_names(data)}}
+        left = _fill_notes(doc, notes.get("items", {}), notes.get("values", {}))
+        if left:
+            log.warning("PDMS notes: no value for %s — the text keeps the {name}", ", ".join(left))
 
     # ── text tags (body, headers, footers) ──
     for par in _all_paragraphs(doc):

@@ -78,7 +78,7 @@ from ctr_tools.builder_azn import (
 )
 from ctr_tools.builder_usd import build_usd
 from ctr_tools.builder_pdms import (
-    attention_from_requester, build_pdms, compute_pdms, pdms_defaults, salutation_from_attention,
+    attention_from_requester, build_pdms, compute_pdms, notes_places_in, pdms_defaults, salutation_from_attention,
 )
 from ctr_tools.pdms_overview import add_overview_sheet
 from ctr_tools.parser import (
@@ -86,6 +86,8 @@ from ctr_tools.parser import (
     parse_ctr_request, parse_equip_names_db, parse_encoding_info,
 )
 from ctr_tools.pdf_exporter import export_to_pdf
+from ctr_tools import pdms_notes
+from ctr_tools.pdms_notes_view import PdmsNotesWindow
 from ctr_tools import cbar_rates
 from ctr_tools.tasks import TASKS, Job
 
@@ -302,7 +304,7 @@ class CTRWorker(QThread):
             self._support_rows, self._other_rows, self._equip_rows, self._consump_rows,
             pdms["template"], out, pdms["header"], rates=pdms["rates"],
             markup_rate=self._markup_rate or 0.0, third_party_rows=self._third_party_rows,
-            hotbed=pdms.get("hotbed"), currencies=pdms.get("currencies"),
+            hotbed=pdms.get("hotbed"), currencies=pdms.get("currencies"), notes=pdms.get("notes"),
         )
         log.info("CTRWorker: PDMS proposal written: %s", docx_path)
         cbar_rates.log_usage(docx_path.name, pdms["header"].get("prp_number", ""), pdms["rates_used"])
@@ -543,6 +545,8 @@ _CUR_ROLE = Qt.UserRole + 50   # a Rate / Price cell's own currency code (None =
 _SRC_ROLE = Qt.UserRole + 52      # on every cell of a row built from the CTR Request: (table, which request item)
 _LOADED_ROLE = Qt.UserRole + 53   # the text a cell had right after it was loaded (to tell what the user changed)
 _PICK_ROLE = Qt.UserRole + 54     # True on a cell picked with Ctrl+Shift+click for a reload
+_TR_EXC_ROLE = Qt.UserRole + 55    # a Transport row's Mark Up % cell: True = this line is an exception, False = it shares the mark-up
+_TR_PREV_ROLE = Qt.UserRole + 56   # the text that cell had before the user's edit (to tell a real change)
 _FORMULA_ROLE = Qt.UserRole + 51   # (formula text, the value text it gave, unit); live only while the cell still holds that value
 
 
@@ -2472,6 +2476,8 @@ class CTRGeneratorWidget(QWidget):
         self._transport_tbl.setMaximumHeight(220)
         self._transport_tbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self._transport_tbl.cellChanged.connect(self._on_transport_changed)
+        self._transport_tbl.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._transport_tbl.customContextMenuRequested.connect(self._transport_markup_menu)
         gl.addWidget(self._transport_tbl)
 
         btn_row = QHBoxLayout()
@@ -3501,13 +3507,194 @@ class CTRGeneratorWidget(QWidget):
         _pct = float(line.get("markup", 0) or 0) * 100
         tbl.setItem(r, _TR_MARKUP, QTableWidgetItem(f"{_pct:g}"))
         tbl.setItem(r, _TR_TOTAL,  _ro_item("0.00"))
+        mk = tbl.item(r, _TR_MARKUP)
+        mk.setData(_TR_PREV_ROLE, mk.text())
+        if line.get("shared"):                       # a line added by hand shares the mark-up
+            mk.setData(_TR_EXC_ROLE, False)
         tbl.blockSignals(False)
         self._recalc_transport_row(r)
+        self._decide_transport_exceptions()
+
+    # ── Transport mark-up shared by the lines (exceptions) ───────────────────
+    # The request gives no mark-ups: each line gets its one from transport_rates in template_config.json.
+    # The lines share ONE mark-up (editing it on a line offers to change the others too); a line can
+    # be an exception (fuel at 0 %) and is then left alone. The notes of the PDMS proposal quote the
+    # shared value.
+
+    @staticmethod
+    def _pct_text(text: str) -> float:
+        """A Mark Up % cell as a number; blank or not a number is "no mark-up" (0)."""
+        try:
+            v = float(str(text).strip())
+        except ValueError:
+            return 0.0
+        return v if v == v else 0.0
+
+    def _tr_pct(self, row: int) -> float:
+        it = self._transport_tbl.item(row, _TR_MARKUP)
+        return self._pct_text(it.text() if it else "")
+
+    def _tr_is_exception(self, row: int) -> bool:
+        it = self._transport_tbl.item(row, _TR_MARKUP)
+        return bool(it is not None and it.data(_TR_EXC_ROLE) is True)
+
+    def _decide_transport_exceptions(self) -> None:
+        """Give every line that has not been decided yet its place: it shares the mark-up when it
+        equals the common one (the value of the lines already sharing, else the most frequent value, ties
+        by order), otherwise it is an exception — fuel at 0 % next to vehicles at 6.5 %."""
+        tbl = self._transport_tbl
+        items = [tbl.item(r, _TR_MARKUP) for r in range(tbl.rowCount())]
+        common = next((self._tr_pct(r) for r, it in enumerate(items) if it is not None and it.data(_TR_EXC_ROLE) is False), None)
+        if common is None:
+            vals = [self._tr_pct(r) for r, it in enumerate(items) if it is not None and it.data(_TR_EXC_ROLE) is None]
+            if vals:
+                common = max(dict.fromkeys(vals), key=vals.count)
+        was = tbl.blockSignals(True)
+        try:
+            for r, it in enumerate(items):
+                if it is not None and it.data(_TR_EXC_ROLE) is None:
+                    it.setData(_TR_EXC_ROLE, abs(self._tr_pct(r) - (common or 0.0)) > 1e-9)
+        finally:
+            tbl.blockSignals(was)
+        self._refresh_transport_markers()
+
+    def _refresh_transport_markers(self) -> None:
+        """An exception line shows its mark-up in italics (its tooltip says why)."""
+        tbl = self._transport_tbl
+        was = tbl.blockSignals(True)
+        try:
+            for r in range(tbl.rowCount()):
+                it = tbl.item(r, _TR_MARKUP)
+                if it is not None:
+                    f = it.font()
+                    if f.italic() != self._tr_is_exception(r):
+                        f.setItalic(self._tr_is_exception(r))
+                        it.setFont(f)
+        finally:
+            tbl.blockSignals(was)
+
+    def _shared_third_party_markup(self) -> float | None:
+        """The mark-up the lines share, as a fraction (0.065 = 6.5 %), or None when every line is an
+        exception (or there are no lines)."""
+        tbl = self._transport_tbl
+        for r in range(tbl.rowCount()):
+            it = tbl.item(r, _TR_MARKUP)
+            if it is not None and it.data(_TR_EXC_ROLE) is False:
+                return self._tr_pct(r) / 100.0
+        return None
+
+    def _set_transport_exception(self, rows: list[int], exception: bool) -> None:
+        """Change the status of lines without typing a figure. Exception: the line keeps its value and
+        is left alone from now on. Back to sharing: it takes the shared mark-up (when no line shares
+        yet, the first of them starts it, the others follow it)."""
+        tbl = self._transport_tbl
+        shared = self._shared_third_party_markup()
+        pct = None if shared is None else shared * 100.0
+        was = tbl.blockSignals(True)
+        try:
+            for r in rows:
+                it = tbl.item(r, _TR_MARKUP)
+                if it is None:
+                    continue
+                if exception:
+                    it.setData(_TR_EXC_ROLE, True)
+                    continue
+                if pct is None:
+                    pct = self._tr_pct(r)
+                it.setText(f"{pct:g}")
+                it.setData(_TR_PREV_ROLE, it.text())
+                it.setData(_TR_EXC_ROLE, False)
+        finally:
+            tbl.blockSignals(was)
+        self._refresh_transport_markers()
+        for r in rows:
+            self._recalc_transport_row(r)
+        self._recalc_azn_totals()
+
+    def _transport_markup_menu(self, pos) -> None:
+        tbl = self._transport_tbl
+        clicked = tbl.rowAt(pos.y())
+        if clicked < 0:
+            return
+        picked = sorted({i.row() for i in tbl.selectionModel().selectedRows()} | set())
+        rows = picked if clicked in picked else [clicked]
+        share_rows = [r for r in rows if self._tr_is_exception(r)]
+        exc_rows = [r for r in rows if not self._tr_is_exception(r)]
+        shared = self._shared_third_party_markup()
+        menu = QMenu(tbl)
+        a_exc = menu.addAction(f"Make an exception — keep its mark-up ({len(exc_rows)} line(s))")
+        a_exc.setEnabled(bool(exc_rows))
+        a_share = menu.addAction(
+            (f"Share the mark-up — takes {shared * 100:g} %" if shared is not None
+             else "Share the mark-up — starts with this line's figure") + f" ({len(share_rows)} line(s))")
+        a_share.setEnabled(bool(share_rows))
+        act = menu.exec(tbl.viewport().mapToGlobal(pos))
+        if act is a_exc:
+            self._set_transport_exception(exc_rows, True)
+        elif act is a_share:
+            self._set_transport_exception(share_rows, False)
+
+    def _on_transport_markup_edited(self, row: int) -> None:
+        """The user changed a line's Mark Up %. A line that shares the mark-up asks whether the other
+        sharing lines change too; an exception only changes itself (and joins the others again when it
+        is typed to the shared value)."""
+        tbl = self._transport_tbl
+        it = tbl.item(row, _TR_MARKUP)
+        if it is None:
+            return
+        new = self._tr_pct(row)
+        if abs(new - self._pct_text(str(it.data(_TR_PREV_ROLE) or ""))) < 1e-9:
+            return                                    # nothing really changed (the same figure retyped)
+        shared = self._shared_third_party_markup()
+        was = tbl.blockSignals(True)
+        try:
+            it.setData(_TR_PREV_ROLE, it.text())
+            if self._tr_is_exception(row):
+                if shared is not None and abs(new - shared * 100.0) < 1e-9:
+                    it.setData(_TR_EXC_ROLE, False)   # typed to the shared value: shares again
+                return
+            others = [r for r in range(tbl.rowCount())
+                      if r != row and tbl.item(r, _TR_MARKUP) is not None
+                      and tbl.item(r, _TR_MARKUP).data(_TR_EXC_ROLE) is False]
+        finally:
+            tbl.blockSignals(was)
+        if not others:
+            return
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setWindowTitle("Mark-up of the transport lines")
+        box.setText(f"<b>Change the mark-up of the other {len(others)} line(s) to {new:g} % as well?</b>"
+                    "<p>The lines share one mark-up. <b>Only this line</b> makes this line an exception: "
+                    "later changes leave it alone, and the proposal's notes do not quote it.</p>")
+        box.setTextFormat(Qt.TextFormat.RichText)
+        all_btn = box.addButton("All lines", QMessageBox.ButtonRole.AcceptRole)
+        only_btn = box.addButton("Only this line", QMessageBox.ButtonRole.RejectRole)
+        box.setEscapeButton(only_btn)
+        box.exec()
+        change_all = box.clickedButton() is all_btn
+        box.deleteLater()
+        was = tbl.blockSignals(True)
+        try:
+            if change_all:
+                for r in others:
+                    o = tbl.item(r, _TR_MARKUP)
+                    o.setText(f"{new:g}")
+                    o.setData(_TR_PREV_ROLE, o.text())
+            else:
+                it.setData(_TR_EXC_ROLE, True)
+        finally:
+            tbl.blockSignals(was)
+        self._refresh_transport_markers()
+        for r in others if change_all else ():
+            self._recalc_transport_row(r)
 
     def _add_transport_row(self):
+        shared = self._shared_third_party_markup()
         self._append_transport_row({
             "transport_type": "", "description": "", "quantity": "", "duration": "",
-            "uom": "Days", "rate_azn": "", "markup": self._markup_rate(),
+            "uom": "Days", "rate_azn": "",
+            "markup": shared if shared is not None else self._markup_rate(),
+            "shared": shared is not None,
         })
         self._recalc_azn_totals()
 
@@ -3520,6 +3707,8 @@ class CTRGeneratorWidget(QWidget):
     def _on_transport_changed(self, row: int, col: int):
         if col == _TR_TOTAL:
             return
+        if col == _TR_MARKUP:
+            self._on_transport_markup_edited(row)
         self._recalc_transport_row(row)
         self._recalc_azn_totals()
 
@@ -3650,7 +3839,21 @@ class CTRGeneratorWidget(QWidget):
             _tbl.model().rowsRemoved.connect(lambda *_a: self._update_group_titles_soon())
         for _c in self._cat_combos.values():
             _c.currentTextChanged.connect(lambda _t: (self._recalc_all_totals(), self._update_group_titles()))
-        self._pdms_rows = [row_prp, row_cu, row_ci, row_at, row_ld, row_sg, row_st]
+        # The PDMS proposal's notes (schedule, exclusions, price basis …): one button that opens a floating window.
+        # It is red until it has been opened for this task (a new CTR Request or another Job Ref turns it red again).
+        row_nt = QHBoxLayout()
+        _nt_lbl = QLabel("Notes:")
+        _nt_lbl.setFixedWidth(95)
+        _nt_lbl.setStyleSheet(f"color: {MUTED}; font-size: 11px;")
+        self._notes_btn = QPushButton("Notes…")
+        self._notes_btn.clicked.connect(self._open_notes_window)
+        row_nt.addWidget(_nt_lbl)
+        row_nt.addWidget(self._notes_btn)
+        row_nt.addStretch(1)
+        self._notes_win = None
+        self._notes_seen = False
+        self._notes_job_ref = ""
+        self._pdms_rows = [row_prp, row_cu, row_ci, row_at, row_ld, row_sg, row_st, row_nt]
         for row in (row_c, row_sc, row_l, row_s, row_d, row_cna, row_cnu, row_rv, row_pt, row_cm):
             gl.addLayout(row)
         for row in self._pdms_rows:
@@ -3659,6 +3862,7 @@ class CTRGeneratorWidget(QWidget):
         gl.addWidget(self._cat_widget)
         self._pdms_check.toggled.connect(self._set_pdms_mode)
         self._set_pdms_mode(False)
+        self._update_notes_button()
 
         gl.addSpacing(6)
 
@@ -3668,6 +3872,7 @@ class CTRGeneratorWidget(QWidget):
         self._job_ref_edit = QLineEdit("217")
         self._job_ref_edit.setFixedWidth(120)
         self._job_ref_edit.setPlaceholderText("e.g. 217")
+        self._job_ref_edit.editingFinished.connect(self._job_ref_finished)      # another job: the notes are looked at again
         ref_row.addWidget(ref_lbl)
         ref_row.addWidget(self._job_ref_edit)
         ref_row.addStretch()
@@ -4179,6 +4384,10 @@ class CTRGeneratorWidget(QWidget):
             hint = self._NUMBER_HINTS.get((self._table_key(index), index.column()))
             if hint:
                 lines.append(hint)
+            if self._table_key(index) == "transport" and index.column() == _TR_MARKUP:
+                lines.append("<b>Exception</b>: this line keeps its own mark-up; changing the others does not touch it."
+                             if self._tr_is_exception(index.row()) else
+                             "This line shares the transport mark-up: changing it asks whether the other sharing lines change too.")
         if live:
             f = live[0]
             note = "" if live[2] == unit else " (written in days; shown here as the value only)"
@@ -4452,6 +4661,87 @@ class CTRGeneratorWidget(QWidget):
         if hasattr(self, "_stats_panel"):
             self._refresh_price_totals()
 
+    # ── PDMS notes (floating window) ─────────────────────────────────────────
+
+    KEY_WARN_UNSEEN_NOTES = "warnUnseenNotes"
+
+    def _warn_unseen_notes(self) -> bool:
+        """Settings: remind (Continue / Cancel) when Generate is pressed before the notes were looked at. On by default."""
+        v = self._settings().value(self.KEY_WARN_UNSEEN_NOTES, True)
+        return v if isinstance(v, bool) else str(v).lower() in ("1", "true", "yes")
+
+    def _notes_auto(self) -> dict:
+        """What the app itself knows for the notes' placeholders."""
+        shared = self._shared_third_party_markup()
+        return {"location": self._job_location(), "currency": pdms_defaults()["currency"],
+                "markup_materials": f"{self._markup_spin.value():g}",
+                "markup_third_party": f"{shared * 100:g}" if shared is not None else ""}
+
+    def _ensure_notes_window(self) -> PdmsNotesWindow:
+        if self._notes_win is None:
+            self._notes_win = PdmsNotesWindow(self)
+            self._notes_win.changed.connect(self._update_notes_button)
+        self._notes_win.set_auto(self._notes_auto())
+        return self._notes_win
+
+    def _template_has_note_tags(self) -> bool | None:
+        """True / False: does the PDMS Template set in the Generator have {{NOTES_…}} tags? None = no readable template."""
+        path = self._pdms_tpl_edit.text().strip()
+        if not path or not Path(path).is_file():
+            return None
+        try:
+            import docx as _docx
+            return bool(notes_places_in(_docx.Document(path)))
+        except Exception:
+            return None
+
+    def _open_notes_window(self) -> None:
+        win = self._ensure_notes_window()
+        win.set_template_has_tags(self._template_has_note_tags())
+        self._notes_seen = True                       # opening it is enough
+        self._update_notes_button()
+        win.show()
+        win.raise_()
+        win.activateWindow()
+
+    def _update_notes_button(self, *_a) -> None:
+        ticked, total = (self._notes_win.counts() if self._notes_win is not None else (None, None))
+        if ticked is None:
+            try:
+                data = pdms_notes.load_notes()
+                ticked = sum(len(v) for v in pdms_notes.default_ticks(data).values())
+                total = sum(len(pdms_notes.notes_for(data, p)) for p in data["places"])
+            except Exception:
+                ticked = total = 0
+        if self._notes_seen:
+            self._notes_btn.setText(f"Notes ({ticked} of {total} ticked)…")
+            self._notes_btn.setStyleSheet(_btn_style())
+            self._notes_btn.setToolTip("Open the notes of the proposal: what goes under the Schedule of Activities, "
+                                       "the Exclusions and the Price Basis, and their values.")
+        else:
+            self._notes_btn.setText(f"Notes ({ticked} of {total} ticked) — look at them for this job")
+            self._notes_btn.setStyleSheet(_btn_style("#B71C1C", "#FFEBEE").replace("background: white", "background: #FFEBEE"))
+            self._notes_btn.setToolTip("Red until you open it: check the notes of this proposal before generating. "
+                                       "It turns red again for a new CTR Request or another Job Ref.")
+
+    def _reset_notes_for_task(self) -> None:
+        """A new job: the notes go back to what is pre-ticked and the button asks to be looked at again."""
+        self._notes_seen = False
+        if self._notes_win is not None:
+            self._notes_win.reset_for_new_task()
+            self._notes_win.set_auto(self._notes_auto())
+        self._update_notes_button()
+
+    def _job_ref_finished(self) -> None:
+        ref = self._job_ref_edit.text().strip()
+        if ref != self._notes_job_ref:
+            self._notes_job_ref = ref
+            self._reset_notes_for_task()
+
+    def _notes_payload(self) -> dict:
+        """What the proposal's notes are made of: the ticked notes by place and the placeholder values."""
+        return self._ensure_notes_window().payload()
+
     def _markup_rate(self) -> float:
         """Current markup rate as a fraction (e.g. 0.065), for build_usd()."""
         return self._markup_spin.value() / 100.0
@@ -4697,6 +4987,7 @@ class CTRGeneratorWidget(QWidget):
             return
 
         log.info("Loading CTR Request: %s", path)
+        self._reset_notes_for_task()
         self._load_ctr_btn.setEnabled(False)
         self._ctr_req_status.setText("Loading CTR Request…")
 
@@ -6339,6 +6630,7 @@ class CTRGeneratorWidget(QWidget):
                            for c, (r, d) in self._fx_rates().items() if c in self._currencies_in_use()},
             "currencies": {k: c.currentText() for k, c in self._cat_combos.items()},
             "hotbed":    self._hotbed_values(),
+            "notes":     self._notes_payload(),
             "header": {
                 "prp_number":     self._prp_edit.text().strip(),
                 "date":           self._letter_date_edit.text().strip(),
@@ -6636,6 +6928,19 @@ class CTRGeneratorWidget(QWidget):
 
         if not self._client_edit.text().strip():
             warnings.append("Client is empty — the template cell will be left blank.")
+
+        if pdms_on:
+            if self._template_has_note_tags() is False:
+                warnings.append("The PDMS Template has no note tags, so the notes list is NOT used: the proposal keeps the "
+                                "fixed texts of that template (use a template with the tags, for example "
+                                "PDMS_TEMPLATE_short_v2.docx).")
+            if not self._notes_seen and self._warn_unseen_notes():
+                warnings.append("The notes of the proposal have not been looked at for this job (the Notes button is red) — "
+                                "the pre-ticked ones will be used.")
+            _left = self._ensure_notes_window().missing()
+            if _left:
+                warnings.append("A note has a value that is still empty: " + ", ".join("{%s}" % n for n in _left)
+                                + " — the text keeps the name in braces.")
 
         if pdms_on:
             if not self._attention_edit.text().strip():
