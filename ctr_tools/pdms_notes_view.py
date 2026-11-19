@@ -152,6 +152,56 @@ class NewPlaceholderDialog(QDialog):
         self.accept()
 
 
+class NewScheduleDialog(QDialog):
+    """Add a work schedule of your own: a name and the values one choice sets (location, working days, hours, the days
+    paid at the overtime rate and its coefficient)."""
+
+    def __init__(self, parent, data: dict):
+        super().__init__(parent)
+        self._data = data
+        self.schedule: dict | None = None
+        self.setWindowTitle("New work schedule")
+        lay = QVBoxLayout(self)
+        note = QLabel("One choice of a work schedule fills all of these placeholders in the notes.")
+        note.setWordWrap(True)
+        note.setStyleSheet(_MUTED)
+        lay.addWidget(note)
+        form = QFormLayout()
+        self.label_edit = QLineEdit()
+        self.label_edit.setPlaceholderText("e.g. Onshore, Monday to Saturday, 12 hours")
+        self.edits = {k: QLineEdit() for k in N.SCHEDULE_KEYS}
+        self.edits["location"].setPlaceholderText("Onshore or Offshore")
+        self.edits["working_days"].setPlaceholderText("e.g. Monday to Saturday")
+        self.edits["hours"].setPlaceholderText("e.g. 12")
+        self.edits["overtime_days"].setPlaceholderText("Optional, with the comma: e.g. Sunday, ")
+        self.edits["overtime_coef"].setPlaceholderText("e.g. 1.5")
+        form.addRow("Name", self.label_edit)
+        for k in N.SCHEDULE_KEYS:
+            form.addRow(f"{{{k}}}", self.edits[k])
+        lay.addLayout(form)
+        row = QHBoxLayout()
+        row.addStretch(1)
+        ok, cancel = QPushButton("Add"), QPushButton("Cancel")
+        ok.clicked.connect(self._accept)
+        cancel.clicked.connect(self.reject)
+        row.addWidget(ok)
+        row.addWidget(cancel)
+        lay.addLayout(row)
+
+    def _accept(self) -> None:
+        values = {k: e.text() for k, e in self.edits.items()}
+        needed = [k for k in ("location", "working_days", "hours", "overtime_coef") if not values[k].strip()]
+        if needed:
+            QMessageBox.warning(self, "New work schedule", "Fill in: " + ", ".join(needed) + ".")
+            return
+        try:
+            self.schedule = N.add_schedule(self._data, self.label_edit.text(), values)
+        except ValueError as exc:
+            QMessageBox.warning(self, "New work schedule", str(exc))
+            return
+        self.accept()
+
+
 class PlaceholderManager(QDialog):
     """Prepare the values a placeholder offers (add, delete, reorder, choose the one a new proposal starts with) and
     remove a placeholder of your own. `on_change` is called after every change (the window saves and refreshes)."""
@@ -417,6 +467,7 @@ class PdmsNotesWindow(QWidget):
         self.auto: dict[str, str] = {}
         self._touched: set[str] = set()
         self._boxes: dict[str, _PlaceholderBox] = {}
+        self.schedule: str | None = None            # the work schedule chosen for this proposal (None until chosen)
         self.reset_for_new_task()
 
         lay = QVBoxLayout(self)
@@ -463,6 +514,25 @@ class PdmsNotesWindow(QWidget):
         row.addStretch(1)
         row.addWidget(self.reset_btn)
         lay.addLayout(row)
+        srow = QHBoxLayout()
+        srow.addWidget(QLabel("<b>Work schedule</b>:"))
+        self.sched_combo = QComboBox()
+        self.sched_combo.setToolTip("One choice sets the location, working days, hours and the overtime days and "
+                                    "coefficient of the schedule notes. Nothing is chosen until you choose.")
+        self.sched_combo.currentIndexChanged.connect(self._schedule_picked)
+        self.sched_add_btn, self.sched_del_btn = QPushButton("Add schedule…"), QPushButton("Delete schedule")
+        self.sched_add_btn.setToolTip("Add a work schedule of your own to the list.")
+        self.sched_del_btn.setToolTip("Delete the chosen schedule (only one you added yourself).")
+        self.sched_add_btn.clicked.connect(self._add_schedule)
+        self.sched_del_btn.clicked.connect(self._delete_schedule)
+        srow.addWidget(self.sched_combo, 1)
+        srow.addWidget(self.sched_add_btn)
+        srow.addWidget(self.sched_del_btn)
+        lay.addLayout(srow)
+        self.sched_note = QLabel("")
+        self.sched_note.setWordWrap(True)
+        self.sched_note.setStyleSheet("color: #C62828; font-size: 11px;")
+        lay.addWidget(self.sched_note)
         vrow = QHBoxLayout()
         vrow.addWidget(QLabel("<b>Values</b> for the placeholders of the ticked notes:"), 1)
         self.new_ph_btn, self.manage_btn = QPushButton("New placeholder…"), QPushButton("Manage values…")
@@ -493,8 +563,10 @@ class PdmsNotesWindow(QWidget):
                 self.restoreGeometry(g)
         except Exception:
             pass
+        self._fill_schedules()
         self._fill_tree()
         self._fill_values()
+        self.changed.connect(self._schedule_state)
 
     def set_template_has_tags(self, has: bool | None) -> None:
         """Say so when the PDMS Template set in the Generator has no note tags: then these notes are not used."""
@@ -511,8 +583,10 @@ class PdmsNotesWindow(QWidget):
         """Back to what is pre-ticked, and the values the app knows (a new CTR Request, another job)."""
         self.ticks = {p: set(ids) for p, ids in N.default_ticks(self.data).items()}
         self._touched.clear()
+        self.schedule = None
         self._apply_auto_values()
         if hasattr(self, "tree"):
+            self._fill_schedules()
             self._fill_tree()
             self._fill_values()
         self.changed.emit() if hasattr(self, "tree") else None
@@ -540,6 +614,69 @@ class PdmsNotesWindow(QWidget):
                           for p in self.data["places"]},
                 "values": dict(self.values)}
 
+    # ── the work schedule ────────────────────────────────────────────────────
+
+    def schedule_needed(self) -> bool:
+        """True while a ticked note uses what a work schedule sets and none has been chosen."""
+        return self.schedule is None and any(
+            N.uses_schedule(n["text"]) for p in self.data["places"] for n in self.ticked_notes(p))
+
+    def _fill_schedules(self) -> None:
+        self.sched_combo.blockSignals(True)
+        self.sched_combo.clear()
+        self.sched_combo.addItem("(not chosen — choose one)", None)
+        for sc in N.all_schedules(self.data):
+            self.sched_combo.addItem(sc["label"], sc["id"])
+        idx = self.sched_combo.findData(self.schedule) if self.schedule else 0
+        self.sched_combo.setCurrentIndex(max(idx, 0))
+        self.sched_combo.blockSignals(False)
+        self._schedule_state()
+
+    def _schedule_state(self) -> None:
+        self.sched_del_btn.setEnabled(bool(self.schedule) and not N.is_shipped_schedule(self.schedule))
+        need = self.schedule_needed()
+        self.sched_note.setText("No work schedule is chosen: the schedule notes use the standard values until you choose one."
+                                if need else "")
+
+    def _schedule_picked(self, _index: int) -> None:
+        self.choose_schedule(self.sched_combo.currentData())
+
+    def choose_schedule(self, sid: str | None) -> None:
+        """Choose a work schedule (None = none): it sets the location, working days, hours and the overtime values."""
+        sc = N.schedule_by_id(self.data, sid) if sid else None
+        self.schedule = sc["id"] if sc else None
+        if sc:
+            for key, value in sc["values"].items():
+                self.values[key] = value
+                self._touched.add(key)                    # what the schedule says wins over what the app filled itself
+                box = self._boxes.get(key)
+                if box is not None and box.value() != value:
+                    box.set_value(value)
+        idx = self.sched_combo.findData(self.schedule) if self.schedule else 0
+        if idx >= 0 and self.sched_combo.currentIndex() != idx:
+            self.sched_combo.blockSignals(True)
+            self.sched_combo.setCurrentIndex(idx)
+            self.sched_combo.blockSignals(False)
+        self._schedule_state()
+        self._fill_tree()
+        self.changed.emit()
+
+    def _add_schedule(self) -> None:
+        dlg = NewScheduleDialog(self, self.data)
+        if dlg.exec() == QDialog.DialogCode.Accepted and dlg.schedule:
+            self._save()
+            self._fill_schedules()
+            self.choose_schedule(dlg.schedule["id"])
+        dlg.deleteLater()
+
+    def _delete_schedule(self) -> None:
+        sid = self.schedule
+        if sid and not N.is_shipped_schedule(sid) and N.delete_schedule(self.data, sid):
+            self._save()
+            self.schedule = None
+            self._fill_schedules()
+            self.changed.emit()
+
     def used_placeholders(self) -> list[str]:
         out = []
         for p in self.data["places"]:
@@ -549,7 +686,7 @@ class PdmsNotesWindow(QWidget):
 
     def missing(self) -> list[str]:
         """Placeholders of the ticked notes that have no value."""
-        return [n for n in self.used_placeholders() if not self.values.get(n)]
+        return [n for n in self.used_placeholders() if not self.values.get(n) and not N.is_optional(n)]
 
     def counts(self) -> tuple[int, int]:
         """(ticked, offered): note lines in the places, a note in two places counts twice."""

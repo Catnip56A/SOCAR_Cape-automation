@@ -144,10 +144,10 @@ class _Stop(Exception):
     pass
 
 
-def _generate_to_the_checks(w):
+def _generate_to_the_checks(w, tpl="PDMS_TEMPLATE_short.docx"):
     """Press Generate in PDMS mode up to the warning dialog; the answer is Cancel, so nothing is written."""
     w._pdms_check.setChecked(True)
-    w._pdms_tpl_edit.setText(str(H.INPUTS / "PDMS_TEMPLATE_short.docx"))
+    w._pdms_tpl_edit.setText(str(H.INPUTS / tpl))
     w._out_dir_edit.setText(str(H.SANDBOX / "out" / "notes_ui"))
     w._job_ref_edit.setText("999")
     w._prp_edit.setText("PRP-26-888")
@@ -313,3 +313,42 @@ def test_new_placeholders_and_prepared_values_through_the_dialogs():
     assert mgr.del_ph.isEnabled()
     mgr.delete_placeholder("crane_days")
     assert "crane_days" not in N.load_notes()["placeholders"]
+
+
+def test_the_work_schedule_is_unchosen_until_chosen_then_sets_its_values_and_wins_over_the_request():
+    w = _gen()
+    win = w._ensure_notes_window()
+    assert win.schedule is None and win.schedule_needed()                    # nothing chosen: the notes use the standard values
+    assert win.sched_combo.currentIndex() == 0 and "No work schedule is chosen" in win.sched_note.text()
+    win.set_auto({"location": "Offshore"})
+    win.choose_schedule("onshore-6-10")
+    v = win.payload()["values"]
+    assert (v["location"], v["working_days"], v["hours"], v["overtime_days"], v["overtime_coef"]) == (
+        "Onshore", "Monday to Saturday", "10", "Sunday, ", "1.5")
+    win.set_auto({"location": "Offshore"})                                    # the request says Offshore: the schedule still wins
+    assert win.payload()["values"]["location"] == "Onshore"
+    assert not win.schedule_needed() and win.sched_note.text() == "" and win.missing() == []
+    assert not win.sched_del_btn.isEnabled()                                  # a shipped schedule cannot be deleted
+    win.reset_for_new_task()                                                   # a new job: unchosen again
+    assert win.schedule is None and win.sched_combo.currentIndex() == 0 and win.values["working_days"] == "Monday to Sunday"
+
+
+def test_a_schedule_of_your_own_is_added_chosen_saved_and_deleted_and_generate_warns_when_none_is_chosen():
+    w = _gen()
+    win = w._ensure_notes_window()
+    sc = N.add_schedule(win.data, "Onshore, Monday to Saturday, 12 hours",
+                        {"location": "Onshore", "working_days": "Monday to Saturday", "hours": "12",
+                         "overtime_days": "Sunday, ", "overtime_coef": "1.5"})
+    win._save()
+    win._fill_schedules()
+    win.choose_schedule(sc["id"])
+    assert win.values["hours"] == "12" and win.sched_del_btn.isEnabled()
+    assert sc["id"] in {s["id"] for s in N.all_schedules(N.load_notes())}      # saved at once
+    win._delete_schedule()
+    assert win.schedule is None and sc["id"] not in {s["id"] for s in N.all_schedules(N.load_notes())}
+    w._notes_win.close()
+    v2 = "PDMS_TEMPLATE_short_v2.docx"                                          # a template with the note tags
+    assert "No work schedule is chosen" in _generate_to_the_checks(w, v2)       # a Continue / Cancel warning, not a lock-out
+    assert "No work schedule is chosen" not in _generate_to_the_checks(w)       # a template without the tags: notes unused
+    w._ensure_notes_window().choose_schedule("offshore-7-12")
+    assert "No work schedule is chosen" not in _generate_to_the_checks(w, v2)

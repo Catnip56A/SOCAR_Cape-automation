@@ -85,7 +85,7 @@ from ctr_tools.parser import (
     parse_azn_pricebook, parse_usd_pricebook, parse_sage,
     parse_ctr_request, parse_equip_names_db, parse_encoding_info,
 )
-from ctr_tools.pdf_exporter import export_to_pdf
+from ctr_tools.pdf_exporter import export_docx_to_pdf, export_to_pdf
 from ctr_tools import pdms_notes
 from ctr_tools.pdms_notes_view import PdmsNotesWindow
 from ctr_tools import cbar_rates
@@ -313,9 +313,11 @@ class CTRWorker(QThread):
         if stop_here(1):
             return
         job.start(1)
-        self.progress.emit("Exporting PDMS PDF via LibreOffice…")
+        self.progress.emit("Exporting PDMS PDF (Word if installed, else LibreOffice)…")
         try:
-            produced.append(str(export_to_pdf(docx_path, out)))
+            pdf_path, engine = export_docx_to_pdf(docx_path, out)
+            log.info("CTRWorker: PDMS PDF written by %s: %s", engine, pdf_path)
+            produced.append(str(pdf_path))
             job.done(1)
         except RuntimeError as e:
             log.warning("CTRWorker: PDMS PDF export skipped: %s", e)
@@ -1978,12 +1980,14 @@ class CTRGeneratorWidget(QWidget):
         # Output templates + Combined DB — shared by both data-source sub-tabs below
         row4, self._azn_tpl_edit = _file_picker_row("AZN Template", "Excel (*.xlsx *.xls)")
         row5, self._usd_tpl_edit = _file_picker_row("USD Template", "Excel (*.xlsx *.xls)")
-        row_pd, self._pdms_tpl_edit = _file_picker_row("PDMS Template", "Word (*.docx)")
+        row_pd, self._pdms_tpl_edit = _file_picker_row("PDMS Template (short)", "Word (*.docx)")
+        row_pdl, self._pdms_tpl_long_edit = _file_picker_row("PDMS Template (long)", "Word (*.docx)")
         row6, self._combined_db_edit = _file_picker_row(
             "Combined DB (Names + Request)", "Excel (*.xlsx *.xls)")
         gl.addLayout(row4)
         gl.addLayout(row5)
         gl.addLayout(row_pd)
+        gl.addLayout(row_pdl)
         gl.addLayout(row6)
 
         sub_tabs = QTabWidget()
@@ -3778,7 +3782,16 @@ class CTRGeneratorWidget(QWidget):
         self._pdms_check.setToolTip(
             "Generates the PDMS proposal (.docx) from the PDMS Template, with the same "
             "calculated values. The AZN and USD Excel CTRs are not written.")
-        gl.addWidget(self._pdms_check)
+        self._pdms_kind_combo = QComboBox()
+        self._pdms_kind_combo.addItems(["Short proposal", "Long proposal"])
+        self._pdms_kind_combo.setToolTip(
+            "Short or long proposal from the same request: the short one is made from the PDMS Template (short), "
+            "the long one from the PDMS Template (long). Only the chosen one has to be selected.")
+        _pdms_line = QHBoxLayout()
+        _pdms_line.addWidget(self._pdms_check)
+        _pdms_line.addWidget(self._pdms_kind_combo)
+        _pdms_line.addStretch(1)
+        gl.addLayout(_pdms_line)
         row_prp, self._prp_edit      = _hdr_row("PRP No:")
         row_cu,  self._customer_edit = _hdr_row("Customer:", dflt["customer_name"])
         row_ci,  self._customer_city_edit = _hdr_row("Customer city:", dflt["customer_city"])
@@ -4082,6 +4095,7 @@ class CTRGeneratorWidget(QWidget):
             "azn_template":   self._azn_tpl_edit,
             "usd_template":   self._usd_tpl_edit,
             "pdms_template":  self._pdms_tpl_edit,
+            "pdms_template_long": self._pdms_tpl_long_edit,
             "azn_pricebook":  self._azn_pb_edit,
             "sage_export":    self._sage_edit,
             "usd_pricebook":  self._usd_pb_edit,
@@ -4098,6 +4112,7 @@ class CTRGeneratorWidget(QWidget):
             val = s.value(f"pdms/{key}", "")
             if val:
                 edit.setText(val)
+        self._pdms_kind_combo.setCurrentIndex(1 if str(s.value("pdms/kind", "short")) == "long" else 0)
         self._pdms_check.setChecked(str(s.value("pdms/enabled", "false")).lower() == "true")
         self._hotbed_incl_chk.setChecked(str(s.value(self.KEY_HOTBED_INCLUDE, "true")).lower() == "true")
 
@@ -4107,6 +4122,8 @@ class CTRGeneratorWidget(QWidget):
         s.setValue("paths/azn_template",  self._azn_tpl_edit.text())
         s.setValue("paths/usd_template",  self._usd_tpl_edit.text())
         s.setValue("paths/pdms_template", self._pdms_tpl_edit.text())
+        s.setValue("paths/pdms_template_long", self._pdms_tpl_long_edit.text())
+        s.setValue("pdms/kind", self._pdms_kind())
         for key, edit in self._pdms_remembered().items():
             s.setValue(f"pdms/{key}", edit.text())
         s.setValue("pdms/enabled", self._pdms_on())
@@ -4644,6 +4661,8 @@ class CTRGeneratorWidget(QWidget):
         for edit in (self._azn_tpl_edit, self._usd_tpl_edit):
             edit.setEnabled(not on)
         self._pdms_tpl_edit.setEnabled(on)
+        self._pdms_tpl_long_edit.setEnabled(on)
+        self._pdms_kind_combo.setEnabled(on)
         for w in self._hotbed_widgets:
             w.setVisible(on)
         self._fx_group.setVisible(on)
@@ -4684,9 +4703,19 @@ class CTRGeneratorWidget(QWidget):
         self._notes_win.set_auto(self._notes_auto())
         return self._notes_win
 
+    def _pdms_kind(self) -> str:
+        """"short" or "long": which proposal the selector next to the PDMS box asks for."""
+        combo = getattr(self, "_pdms_kind_combo", None)
+        return "long" if combo is not None and combo.currentIndex() == 1 else "short"
+
+    def _pdms_template_path(self) -> str:
+        """The template of the chosen proposal kind (the other one is not needed for this run)."""
+        edit = self._pdms_tpl_long_edit if self._pdms_kind() == "long" else self._pdms_tpl_edit
+        return edit.text().strip()
+
     def _template_has_note_tags(self) -> bool | None:
-        """True / False: does the PDMS Template set in the Generator have {{NOTES_…}} tags? None = no readable template."""
-        path = self._pdms_tpl_edit.text().strip()
+        """True / False: does the PDMS Template of the chosen kind have {{NOTES_…}} tags? None = no readable template."""
+        path = self._pdms_template_path()
         if not path or not Path(path).is_file():
             return None
         try:
@@ -6859,7 +6888,7 @@ class CTRGeneratorWidget(QWidget):
         usd_tpl    = self._usd_tpl_edit.text().strip()
         output_dir = self._out_dir_edit.text().strip()
         pdms_on    = self._pdms_on()
-        pdms_tpl   = self._pdms_tpl_edit.text().strip()
+        pdms_tpl   = self._pdms_template_path()
 
         # ── Required fields ────────────────────────────────────────────────────
         if not job_ref:
@@ -6869,9 +6898,9 @@ class CTRGeneratorWidget(QWidget):
 
         if pdms_on:
             if not pdms_tpl:
-                errors.append("PDMS Template not selected.")
+                errors.append(f"PDMS Template ({self._pdms_kind()}) not selected.")
             elif not Path(pdms_tpl).is_file():
-                errors.append(f"PDMS Template not found: {pdms_tpl}")
+                errors.append(f"PDMS Template ({self._pdms_kind()}) not found: {pdms_tpl}")
             if not self._prp_edit.text().strip():
                 errors.append("PRP No is required for a PDMS proposal.")
             _in_use = self._currencies_in_use()
@@ -6937,6 +6966,9 @@ class CTRGeneratorWidget(QWidget):
             if not self._notes_seen and self._warn_unseen_notes():
                 warnings.append("The notes of the proposal have not been looked at for this job (the Notes button is red) — "
                                 "the pre-ticked ones will be used.")
+            if self._template_has_note_tags() is not False and self._ensure_notes_window().schedule_needed():
+                warnings.append("No work schedule is chosen in the notes: the schedule notes use the standard values "
+                                "(location, working days, hours, overtime) instead of one of the schedules.")
             _left = self._ensure_notes_window().missing()
             if _left:
                 warnings.append("A note has a value that is still empty: " + ", ".join("{%s}" % n for n in _left)

@@ -23,7 +23,8 @@ File layout:
                  "places": {place key: {"pretick": bool, "order": int}}}],
      "values": {placeholder name: [remembered values, newest first]},
      "removed": [ids of shipped notes the user deleted],
-     "placeholders": {name: {"label", "default"}}}      # the user's own placeholders; a known one may have just a "default"
+     "placeholders": {name: {"label", "default"}},     # the user's own placeholders; a known one may have just a "default"
+     "schedules": [{"id", "label", "values": {SCHEDULE_KEYS: text}}]}   # the user's own work schedules (the four shipped ones are in the code)
 """
 
 from __future__ import annotations
@@ -59,14 +60,41 @@ PLACEHOLDERS = {
     "standby_coef":        {"label": "Standby coefficient", "default": "1"},
     "night_coef":          {"label": "Night shift coefficient", "default": "1.2"},
     "overtime_coef":       {"label": "Overtime / holiday coefficient", "default": "1"},
+    "overtime_days":       {"label": "Days paid at the overtime rate, before \"Overtime and holiday\" (e.g. \"Sunday, \")",
+                            "default": "", "optional": True},
     "markup_materials":    {"label": "Mark-up on materials, tools and equipment (%)", "default": "10", "auto": "Markup Rate box"},
     "markup_third_party":  {"label": "Mark-up on third party services (%)", "default": "5", "auto": "shared transport mark-up"},
     "validity_days":       {"label": "Prices valid for (days)", "default": "30"},
     "currency":            {"label": "Currency", "default": "AZN", "auto": "proposal currency"},
 }
 
+# The work schedules the user chooses from: one choice sets all of these placeholders (the standby and the night
+# coefficient are the same in all four, so they stay ordinary placeholders). The user can add schedules of their own.
+SCHEDULE_KEYS = ("location", "working_days", "hours", "overtime_days", "overtime_coef")
+SHIPPED_SCHEDULES = [
+    {"id": "offshore-7-12", "label": "Offshore, Monday to Sunday, 12 hours",
+     "values": {"location": "Offshore", "working_days": "Monday to Sunday", "hours": "12",
+                "overtime_days": "", "overtime_coef": "1"}},
+    {"id": "onshore-6-10", "label": "Onshore, Monday to Saturday, 10 hours",
+     "values": {"location": "Onshore", "working_days": "Monday to Saturday", "hours": "10",
+                "overtime_days": "Sunday, ", "overtime_coef": "1.5"}},
+    {"id": "onshore-7-12", "label": "Onshore, Monday to Sunday, 12 hours",
+     "values": {"location": "Onshore", "working_days": "Monday to Sunday", "hours": "12",
+                "overtime_days": "", "overtime_coef": "1"}},
+    {"id": "onshore-5-8", "label": "Onshore, Monday to Friday, 8 hours",
+     "values": {"location": "Onshore", "working_days": "Monday to Friday", "hours": "8",
+                "overtime_days": "Saturday, Sunday, ", "overtime_coef": "1.5"}},
+]
 _NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _PLACEHOLDER = re.compile(r"(?<!\{)\{([A-Za-z_][A-Za-z0-9_]*)\}(?!\})")
+
+
+_OVERTIME_TEXT = ("{overtime_days}Overtime and holiday hours/days will be calculated based on pro-rata with "
+                  "x{overtime_coef} coefficient.")
+# A shipped note whose wording changed: a saved copy that still has one of the old texts is brought to the new one
+# (a note the user edited is left alone).
+_SUPERSEDED = {"sched-overtime": ["Overtime, Holiday hours/days will be calculated based on pro-rata with "
+                                  "x{overtime_coef} coefficient."]}
 
 
 def _note(id_, text, kind, place, order, pretick=True):
@@ -119,7 +147,7 @@ def default_notes() -> dict:
               "bullet", "schedule", 3),
         _note("sched-night", "NightShift will be calculated based on x{night_coef} coefficient.", "bullet", "schedule", 4),
         _note("sched-overtime",
-              "Overtime, Holiday hours/days will be calculated based on pro-rata with x{overtime_coef} coefficient.",
+              _OVERTIME_TEXT,
               "bullet", "schedule", 5),
         _note("excl-container",
               "Office container, utilities such as electricity, water, gas, diesel and provision of office cleaning services.",
@@ -145,7 +173,8 @@ def default_notes() -> dict:
     ]
     for n in notes:
         n["hint"] = _HINTS.get(n["id"], "")
-    data = {"places": dict(DEFAULT_PLACES), "notes": notes, "values": {}, "removed": [], "placeholders": {}}
+    data = {"places": dict(DEFAULT_PLACES), "notes": notes, "values": {}, "removed": [], "placeholders": {},
+            "schedules": []}
     for nid, text, hint in _OPTIONAL:
         note = {"id": nid, "text": text, "kind": "numbered", "hint": hint, "places": {}}
         data["notes"].append(note)
@@ -167,6 +196,8 @@ def merge_shipped(data: dict) -> int:
     added = 0
     for n in shipped["notes"]:
         if n["id"] in have:
+            if have[n["id"]]["text"] in _SUPERSEDED.get(n["id"], []):
+                have[n["id"]]["text"] = n["text"]
             if n.get("hint") and not have[n["id"]].get("hint"):
                 have[n["id"]]["hint"] = n["hint"]
             continue
@@ -215,7 +246,18 @@ def _clean(data) -> dict:
     for name, spec in (data.get("placeholders") or {}).items():
         if _NAME.match(str(name)) and isinstance(spec, dict):
             custom[str(name)] = {"label": str(spec.get("label") or ""), "default": str(spec.get("default") or "")}
-    return {"places": places, "notes": notes, "values": values, "removed": removed, "placeholders": custom}
+    schedules, taken = [], {s["id"] for s in SHIPPED_SCHEDULES}
+    for sc in data.get("schedules") or []:
+        if not isinstance(sc, dict) or not str(sc.get("label", "")).strip() or not isinstance(sc.get("values"), dict):
+            continue
+        sid = str(sc.get("id") or "").strip()
+        if not sid or sid in taken:
+            sid = new_id(taken)
+        taken.add(sid)
+        schedules.append({"id": sid, "label": str(sc["label"]).strip(),
+                          "values": {k: str(sc["values"].get(k, "")) for k in SCHEDULE_KEYS}})
+    return {"places": places, "notes": notes, "values": values, "removed": removed, "placeholders": custom,
+            "schedules": schedules}
 
 
 def load_notes() -> dict:
@@ -399,13 +441,62 @@ def move_value(data: dict, name: str, value: str, delta: int) -> bool:
     return True
 
 
+def is_optional(name: str) -> bool:
+    """A placeholder that may stay empty (it is then replaced by nothing, not reported as missing)."""
+    return bool(PLACEHOLDERS.get(name, {}).get("optional"))
+
+
 def render(text: str, values: dict) -> str:
-    """The text with every {name} replaced by its value; a name without a value stays as it is."""
-    return _PLACEHOLDER.sub(lambda m: str(values[m.group(1)]) if values.get(m.group(1)) not in (None, "") else m.group(0), text)
+    """The text with every {name} replaced by its value; a name without a value stays as it is (an optional one
+    becomes nothing)."""
+    def one(m):
+        v = values.get(m.group(1))
+        if v not in (None, ""):
+            return str(v)
+        return "" if is_optional(m.group(1)) else m.group(0)
+    return _PLACEHOLDER.sub(one, text)
 
 
 def missing(text: str, values: dict) -> list[str]:
-    return [p for p in placeholders_of(text) if values.get(p) in (None, "")]
+    return [p for p in placeholders_of(text) if values.get(p) in (None, "") and not is_optional(p)]
+
+
+# ── work schedules ───────────────────────────────────────────────────────────
+
+def all_schedules(data: dict) -> list[dict]:
+    """The four shipped schedules, then the user's own."""
+    return [copy.deepcopy(s) for s in SHIPPED_SCHEDULES] + [copy.deepcopy(s) for s in data.get("schedules", [])]
+
+
+def schedule_by_id(data: dict, sid: str | None) -> dict | None:
+    return next((s for s in all_schedules(data) if s["id"] == sid), None)
+
+
+def is_shipped_schedule(sid: str) -> bool:
+    return any(s["id"] == sid for s in SHIPPED_SCHEDULES)
+
+
+def add_schedule(data: dict, label: str, values: dict) -> dict:
+    """A schedule of your own; returns it. Values are the SCHEDULE_KEYS (a missing one is empty)."""
+    label = label.strip()
+    if not label:
+        raise ValueError("A schedule needs a name.")
+    taken = {s["id"] for s in all_schedules(data)}
+    sc = {"id": new_id(taken), "label": label, "values": {k: str(values.get(k, "")) for k in SCHEDULE_KEYS}}
+    data.setdefault("schedules", []).append(sc)
+    return sc
+
+
+def delete_schedule(data: dict, sid: str) -> bool:
+    """Delete a schedule of your own (a shipped one cannot be deleted)."""
+    before = len(data.get("schedules", []))
+    data["schedules"] = [s for s in data.get("schedules", []) if s["id"] != sid]
+    return len(data["schedules"]) != before
+
+
+def uses_schedule(text: str) -> bool:
+    """Does a note text use a placeholder that a schedule sets (working days, hours, overtime …)?"""
+    return any(p in SCHEDULE_KEYS for p in placeholders_of(text))
 
 
 def initial_value(data: dict, name: str, auto: dict | None = None) -> str:

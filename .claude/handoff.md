@@ -1,40 +1,44 @@
-# Handoff — 2026-11-18
+# Handoff — 2026-11-19
 
 ## Goal
-CTR Generator / PDMS proposal, version 1.0.26 (not bumped): part 2 small fixes (committed by the user), part 3 = PDMS proposal notes (MA130), UNCOMMITTED.
+CTR Generator / PDMS proposal, version 1.0.26 (not bumped): short + long proposal from one request, work schedule choice, PDF through Word. UNCOMMITTED (together with the part 3 notes of the previous handoff, if not yet committed).
 
 ## Done
-- Transport lines share one mark-up; editing asks All lines / Only this line; exceptions (fuel 0 %) in italics; right-click changes status without a figure; shipped vehicle mark-up 5 % (incl. `_default`). `window.py` `_on_transport_markup_edited`, `_shared_third_party_markup`.
-- Settings > Template config > Merge shipped lists differences, takes ticked ones, warns before replacing, backup restorable (`config.py` `config_differences`, `settings_view._ConfigMergeDialog`).
-- PDMS notes: `ctr_tools/pdms_notes.py` (JSON list `pdms_notes.json`, places with pre-tick + order, placeholders, remembered values, search), `pdms_notes_view.py` (floating window, note editor, New placeholder, Manage values), `builder_pdms._fill_notes` + tags in `TEST_Files/CTR creator/PDMS_TEMPLATE_short_v2.docx`; Notes button red until opened (red again for a new CTR Request / Job Ref), Generate asks Continue/Cancel (Settings > Generate switch); 18 shipped optional notes in every place, never pre-ticked, with hints; Generate warns when the template has no note tags.
-- Verified: full offscreen suite 380 passed 0 failed; generated proposal old vs v2 rendered with LibreOffice (same text, numbering, 3 pages); window rendered offscreen. User confirmed notes work after selecting the v2 template.
+- Short/Long selector next to the PDMS tick box + two pickers "PDMS Template (short)" / "(long)", only the chosen one required (`window.py` `_pdms_kind`, `_pdms_template_path`); kind and both paths remembered. Offscreen tests (`test_pdms_kind.py`, incl. a real Generate for both kinds).
+- Work schedule choice in the notes window (`pdms_notes.SHIPPED_SCHEDULES`, `NewScheduleDialog`): 4 shipped + own, unselected until chosen, sets location/days/hours/`{overtime_days}`/coefficient, Generate warns when none is chosen; saved `sched-overtime` with the old text is updated on load. Tests in `test_pdms_notes*.py`.
+- Long template: `TEST_Files/CTR creator/PDMS_TEMPLATE_long.docx` = tagged copy of `PDMS_old/long proposal.docx` (tagging script was in the scratchpad, lost). Builder: Position/Shift columns, mark-up columns, own Table D, letters A-D, cover text boxes, optional summary table, clear error for an untagged proposal. `test_builder_pdms_long.py`; rendered with LibreOffice; user generated a long proposal and a CTR on Windows: works.
+- PDF by Word (`pdf_exporter.export_docx_to_pdf`): PowerShell/COM, falls back to LibreOffice; `CTR_PDF_ENGINE=libreoffice` forces LO (tests set it). Run for real from WSL (Word 22-25 s, fallbacks without Word / without PowerShell / on timeout checked by hand). User confirmed the PDF is good.
+- Suite: full run 393 passed 0 failed, then `-k pdms` 76 and `-k pdf` 3 passed after the last changes; the whole suite was NOT re-run after the final pdf_exporter edits.
 
 ## In progress / not fully done
-- MA130 at 50 %: notes block in the PDMS overview sheet (`pdms_overview.py` `add_overview_sheet`) not built; Settings row "PDMS notes" (Edit/Reset/Restore) not built (model: `source_choices` + `_saved_row`, `check_file()` exists); price remarks under the totals not yet a place; notes per category and scope filters undefined.
-- NOT verified: real Word rendering (only LibreOffice), Windows UI, window width at 1280 px.
-- MA242: colleagues' own `template_config.json` keeps 6.5 % until they use Merge shipped; not yet shared.
+- VERSION / CHANGELOG / README / USER_GUIDE / task log not updated (version question open). README test table has the new test files.
+- MA130 (from before): notes block in the PDMS overview sheet (`pdms_overview.py`), Settings row "PDMS notes", price remarks place — still not built.
+- Not verified: Word rendering of the long template layout beyond the user's check; Python running natively on Windows (path code untested); a machine with neither Word nor LibreOffice (old "PDF skipped" path).
+- Contents page numbers are updated only inside the PDF, not in the .docx (user must update the field in Word).
 
 ## Decisions (with reasoning)
-- Note kinds are only numbered | bullet: "header" had no visible effect (an old file's "header" loads as numbered).
-- Shipped notes merge into an existing list on load (`merge_shipped`); a deleted shipped note is tracked in `removed` and stays deleted. Hints (ONLY AZN, CHECK …) are shown, searched, never written to Word.
-- `{markup_third_party}` = the shared transport mark-up (empty when every line is an exception); `{markup_materials}` = Markup Rate box; a typed value wins over what the app fills.
-- Reload rebuilds transport lines from `transport_rates`; exceptions are re-derived (typed mark-ups lost, as before).
-- User's own wording kept ("it will calculated as a full day", trailing `;`).
+- Builder adapts to the tags a template has (`{{T_DESC}}` = own third-party table, `{{L_POSITION}}` = long labour table); no "kind" flag in the builder.
+- Terms and Conditions stay fixed text in the long template; "Dear Sir/Madam" fixed; "(Table A)" after schedule headings dropped (the user can add it to the `sched-head` note).
+- Table D Q-ty = quantity x duration (no duration column); consumables show price before mark-up + mark-up column; transport mark-up caption = most common line mark-up.
+- Word only started by us: on timeout stop only a new windowless WINWORD process; never kill others (the user runs Word/the app at the same time).
 
 ## Next
-Build the Settings row "PDMS notes" in `common/settings_view.py` (copy the Rechargeability choices row; use `copy_backup`, `pdms_notes.check_file`), then the overview-sheet block.
+Decide the version question, then update VERSION/CHANGELOG/README/USER_GUIDE, re-run the full suite, and commit.
 
 ## Open questions
-- Make the two price remarks under the totals ("indicative quotation", VAT) a fourth place?
-- "CHECK" note: third-party mark-up shows 5 % (was 10 % in the user's text) — correct?
-- How to give colleagues `PDMS_TEMPLATE_short_v2.docx` (TEST_Files is git-ignored)?
+- New release or continuation of 1.0.26?
+- Two price remarks ("indicative quotation", VAT) as a fourth notes place? "CHECK" note shows third-party mark-up 5 % (was 10 %) — correct?
+- How to give colleagues the templates (TEST_Files is git-ignored; the long one is ~10 MB)?
+- User's saved `sched-standby` note ends with a stray `{night_coef}` — remove?
 
 ## Parked
 - Alias support for near-identical descriptions; remembering the match mode in saved comparisons; stale "Join key" paragraph in USER_GUIDE Step 3.
 - Excel report / statistics with a proposal (SAGE cost empty for rows matched by Description) not checked.
 - MA124, MA128, MA129, MA133, MA194 stay until feature development ends.
+- Test progress in `tests/run_all.py`: count the tests first and print `[n/total]` (and a rough time left) on every line, so a long run can be followed even through a pipe.
 
 ## Windows checks
-- Generator PDMS mode: Notes button row (red, then normal), floating window wrapping/size/position after restart, typing in a placeholder box (popup must not steal focus), New placeholder / Manage values dialogs.
-- Transport table: question on a Mark Up % edit, italics, right-click menu, sorting/editing; Settings > Template config > Merge shipped dialog and Restore.
-- Disparities Choose for selected, Hotbed Include after restart, empty Output folder with stale paths.
+- Short/Long selector + both Browse rows with the window at normal size; kind and paths after a restart.
+- Notes window: Work schedule row (wrapping), Add/Delete schedule, red warning when none is chosen; Sunday/Saturday overtime line; short proposal overtime wording.
+- Long proposal in Word: cover boxes, Tables A-D (Total/Shift columns on one line), empty optional tables disappear, 8.2 notes, Provided by client; PDF layering and contents page.
+- PDF with Word closed and with another Word document open (it must stay open); on a PC without Word (LibreOffice fallback).

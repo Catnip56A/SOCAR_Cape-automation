@@ -210,3 +210,40 @@ def test_values_can_be_prepared_ahead_reordered_and_one_made_the_starting_value(
     assert N.label_of(d, "working_days") == "Working days"                                  # a known one keeps its label
     N.save_notes(d)
     assert N.load_notes()["placeholders"]["working_days"]["default"] == "Monday to Saturday"
+
+
+def test_the_four_work_schedules_set_the_overtime_wording_and_a_schedule_of_your_own_is_saved():
+    d = N.default_notes()
+    assert [s["id"] for s in N.all_schedules(d)] == ["offshore-7-12", "onshore-6-10", "onshore-7-12", "onshore-5-8"]
+    sat = N.schedule_by_id(d, "onshore-6-10")["values"]
+    assert sat == {"location": "Onshore", "working_days": "Monday to Saturday", "hours": "10",
+                   "overtime_days": "Sunday, ", "overtime_coef": "1.5"}
+    fri = N.schedule_by_id(d, "onshore-5-8")["values"]
+    over = next(n for n in d["notes"] if n["id"] == "sched-overtime")["text"]
+    assert N.render(over, sat) == "Sunday, Overtime and holiday hours/days will be calculated based on pro-rata with x1.5 coefficient."
+    assert N.render(over, fri).startswith("Saturday, Sunday, Overtime and holiday")
+    off = N.schedule_by_id(d, "offshore-7-12")["values"]
+    assert N.render(over, off) == "Overtime and holiday hours/days will be calculated based on pro-rata with x1 coefficient."
+    assert N.missing(over, off) == []                                  # an empty {overtime_days} is allowed, not "missing"
+    assert N.missing("Needs {crane_days}", off) == ["crane_days"]       # any other empty placeholder still is
+    mine = N.add_schedule(d, "Onshore, Monday to Saturday, 12 hours",
+                          {"location": "Onshore", "working_days": "Monday to Saturday", "hours": "12",
+                           "overtime_days": "Sunday, ", "overtime_coef": "1.5"})
+    assert N.schedule_by_id(d, mine["id"])["label"].startswith("Onshore, Monday to Saturday, 12")
+    N._NOTES_PATH = H.SANDBOX / "notes_schedules.json"
+    N.save_notes(d)
+    again = N.load_notes()
+    assert [s["id"] for s in N.all_schedules(again)][-1] == mine["id"] and len(N.all_schedules(again)) == 5
+    assert not N.delete_schedule(again, "offshore-7-12") and len(N.all_schedules(again)) == 5     # a shipped one stays
+    assert N.delete_schedule(again, mine["id"]) and len(N.all_schedules(again)) == 4
+
+
+def test_a_saved_overtime_note_with_the_old_text_is_updated_and_an_edited_one_is_left_alone():
+    d = N.default_notes()
+    note = next(n for n in d["notes"] if n["id"] == "sched-overtime")
+    note["text"] = "Overtime, Holiday hours/days will be calculated based on pro-rata with x{overtime_coef} coefficient."
+    N.merge_shipped(d)
+    assert next(n for n in d["notes"] if n["id"] == "sched-overtime")["text"].startswith("{overtime_days}Overtime and holiday")
+    note["text"] = "My own overtime wording x{overtime_coef}."
+    N.merge_shipped(d)
+    assert next(n for n in d["notes"] if n["id"] == "sched-overtime")["text"] == "My own overtime wording x{overtime_coef}."

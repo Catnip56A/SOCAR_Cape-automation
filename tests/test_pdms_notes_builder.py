@@ -103,3 +103,16 @@ def test_the_builder_helpers_find_the_places_of_the_template():
     _need()
     assert B.notes_places_in(docx.Document(str(V2))) == ["schedule", "exclusions", "price_basis"]
     assert B.notes_places_in(docx.Document(str(OLD))) == [] if OLD.is_file() else True
+
+
+def test_the_chosen_schedule_gives_the_sunday_and_saturday_overtime_wording_in_the_proposal():
+    _need()
+    def overtime(schedule):
+        notes = {"items": {"schedule": [{"text": n["text"], "kind": n["kind"]}
+                                        for n in N.notes_for(N.default_notes(), "schedule") if n["id"] == "sched-overtime"]},
+                 "values": dict(N.schedule_by_id(N.default_notes(), schedule)["values"], standby_coef="1")}
+        d = _build("ot_" + schedule, notes=notes)
+        return _after(d, "Schedule of Activities")[0].text.removeprefix("* ")
+    assert overtime("offshore-7-12") == "Overtime and holiday hours/days will be calculated based on pro-rata with x1 coefficient."
+    assert overtime("onshore-6-10").startswith("Sunday, Overtime and holiday") and "x1.5" in overtime("onshore-6-10")
+    assert overtime("onshore-5-8").startswith("Saturday, Sunday, Overtime and holiday")

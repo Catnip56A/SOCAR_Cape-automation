@@ -408,7 +408,8 @@ def collect_storage(win) -> list[dict]:
         src("Combined DB (names + request)", "_combined_db_edit", "_names_db_df")
         src("AZN Template", "_azn_tpl_edit")
         src("USD Template", "_usd_tpl_edit")
-        src("PDMS Template (shared by the department, not in git)", "_pdms_tpl_edit")
+        src("PDMS Template, short (shared by the department, not in git)", "_pdms_tpl_edit")
+        src("PDMS Template, long (shared by the department, not in git)", "_pdms_tpl_long_edit")
         src("Output folder", "_out_dir_edit", kind="dir")
 
     # CTR Tracker

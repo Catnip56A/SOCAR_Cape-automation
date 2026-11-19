@@ -23,6 +23,7 @@ for _env, _dir in (("XDG_CONFIG_HOME", "cfg"), ("XDG_DATA_HOME", "data"),
     (SANDBOX / _dir).mkdir()
     os.environ[_env] = str(SANDBOX / _dir)
 os.environ["QT_QPA_PLATFORM"] = "offscreen"
+os.environ["CTR_PDF_ENGINE"] = "libreoffice"     # the PDMS PDF in tests never starts the real Word (see pdf_exporter)
 sys.path.insert(0, str(ROOT))
 atexit.register(shutil.rmtree, SANDBOX, ignore_errors=True)
 print(f"[tests] sandbox (all writes go here): {SANDBOX}", file=sys.stderr)

@@ -44,6 +44,7 @@ from datetime import datetime
 from pathlib import Path
 
 import docx
+from docx.oxml.ns import qn
 from docx.table import Table, _Row
 from docx.text.paragraph import Paragraph
 
@@ -187,6 +188,13 @@ def _unit_prices(equip_rows, consump_rows, rates: dict, markup_rate: float, defa
     return equipment, consumables
 
 
+def _usual_markup(transport: list[dict]) -> str:
+    """The mark-up most transport lines carry, in percent ("5"); "" when there are none."""
+    from collections import Counter
+    counts = Counter(round(r["markup"] * 100, 4) for r in transport)
+    return f"{counts.most_common(1)[0][0]:g}" if counts else ""
+
+
 def _transport_lines(third_party_rows, rates: dict, defaults: dict) -> list[dict]:
     """Transport / hired-service lines for the end of the consumables table: only the description
     and what it costs — quantity × rate × duration, the rate converted to AZN first, then × (1 +
@@ -206,20 +214,25 @@ def _transport_lines(third_party_rows, rates: dict, defaults: dict) -> list[dict
         markup = _num(tp.get("markup")) or 0.0
         out.append({"description": str(what),
                     "total": _cents(qty * rate_azn * duration * (1 + markup)),
-                    "qty": qty, "duration": duration, "uom": str(tp.get("uom") or ""), "native": rate,
+                    "qty": qty, "duration": duration, "uom": str(tp.get("uom") or ""), "native": rate, "unit": rate_azn,
                     "cur": cur, "fx": fx, "markup": markup,
                     "f": {"qty": _pick(tp, "quantity", None), "native": _pick(tp, "rate_azn", None)}})
     return out
 
 
-def _labour_description(row: dict) -> str:
-    """"PA Level Foreman-National" + "Day Shift" -> "PA Level Foreman-Day shift"
-    (the nationality has its own column)."""
+def _labour_parts(row: dict) -> tuple[str, str]:
+    """"PA Level Foreman-National" + "Day Shift" -> ("PA Level Foreman", "Day shift")
+    (the nationality has its own column, in the long proposal the shift too)."""
     desc = row["description"].strip()
     nat = (row.get("nationality") or "").strip()
     if nat and desc.lower().endswith("-" + nat.lower()):
         desc = desc[: -(len(nat) + 1)]
-    shift = (row.get("comment") or "").replace("Shift", "shift").strip()
+    return desc, (row.get("comment") or "").replace("Shift", "shift").strip()
+
+
+def _labour_description(row: dict) -> str:
+    """"PA Level Foreman-National" + "Day Shift" -> "PA Level Foreman-Day shift"."""
+    desc, shift = _labour_parts(row)
     return f"{desc}-{shift}" if shift else desc
 
 
@@ -249,6 +262,11 @@ def _fill(text: str, values: dict) -> str:
 
 def _all_paragraphs(doc):
     yield from doc.paragraphs
+    # Text boxes (the long proposal's cover): their paragraphs are not in doc.paragraphs. Word keeps each text box
+    # twice (the drawing and its fallback); both are listed, so both are filled.
+    for el in doc.element.body.iter(qn("w:p")):
+        if any(a.tag == qn("w:txbxContent") for a in el.iterancestors()):
+            yield Paragraph(el, doc._body)
     for section in doc.sections:
         for part in (section.header, section.first_page_header, section.even_page_header,
                      section.footer, section.first_page_footer, section.even_page_footer):
@@ -352,6 +370,10 @@ def _fill_notes(doc, items: dict, values: dict) -> list[str]:
     return list(dict.fromkeys(unresolved))
 
 
+def _has_table_with(doc, tag: str) -> bool:
+    return any(tag in c.text for t in doc.tables for r in t.rows for c in r.cells)
+
+
 def _find_table(doc, tag: str) -> Table:
     for t in doc.tables:
         if any(tag in c.text for r in t.rows for c in r.cells):
@@ -418,7 +440,9 @@ def compute_pdms(
         cur = _currency_of(r, "manpower", defaults)
         fx = _to_azn(cur, rates)
         hourly = float(r["rate_azn"]) * fx
+        position, shift = _labour_parts(r)
         labour.append({"description": _labour_description(r), "nationality": r.get("nationality", ""),
+                       "position": position, "shift": shift,
                        "days": qty_hours / hours, "men": men, "rate": hourly * hours,
                        "total": _cents(men * qty_hours * hourly),
                        "native": float(r["rate_azn"]) * hours, "cur": cur, "fx": fx,
@@ -501,6 +525,10 @@ def build_pdms(
     sym, currency = cfg["currency_symbol"], cfg["currency"]
     defaults = {**cfg["category_currencies"], **(currencies or {})}
     doc = docx.Document(str(template_path))
+    if not (_has_table_with(doc, "{{L_DESC}}") or _has_table_with(doc, "{{L_POSITION}}")):
+        raise ValueError(f"{Path(template_path).name} is not a tagged PDMS template: its labour table has no {{{{L_DESC}}}} "
+                         "(short) or {{L_POSITION}} (long) tag. An original proposal document cannot be used as it is: "
+                         "choose the tagged template (for example PDMS_TEMPLATE_short_v2.docx or PDMS_TEMPLATE_long.docx).")
 
     d = compute_pdms(support_rows, other_rows, equip_rows, consump_rows, header, rates, markup_rate,
                      third_party_rows, hotbed, currencies)
@@ -511,14 +539,18 @@ def build_pdms(
     location = d["location"]
 
     # ── table numbering and the reference sentence ──
-    has_cons = bool(consumables or transport)       # transport sits in the consumables table
-    present = [("LABOUR", True), ("EQUIPMENT", bool(equipment)), ("CONSUMABLES", has_cons)]
+    # A template with its own third-party table ({{T_DESC}}, the long proposal) lists the transport lines there;
+    # otherwise they sit at the end of the consumables table.
+    separate_tp = _has_table_with(doc, "{{T_DESC}}")
+    has_tp = separate_tp and bool(transport)
+    has_cons = bool(consumables) if separate_tp else bool(consumables or transport)
+    present = [("LABOUR", True), ("EQUIPMENT", bool(equipment)), ("CONSUMABLES", has_cons), ("THIRD_PARTY", has_tp)]
     numbers, n = {}, 0
     for name, used in present:
         if used:
             n += 1
             numbers[name] = n
-    refs = [f"Table № {i}" for i in numbers.values()]
+    refs = [f"Table № {i}" for k, i in numbers.items() if k != "THIRD_PARTY"]
     tables_ref = refs[0] if len(refs) == 1 else ", ".join(refs[:-1]) + " and " + refs[-1]
 
     attention = header.get("attention_name", "")
@@ -539,22 +571,33 @@ def build_pdms(
         "{{NO_LABOUR}}":       str(numbers.get("LABOUR", "")),
         "{{NO_EQUIPMENT}}":    str(numbers.get("EQUIPMENT", "")),
         "{{NO_CONSUMABLES}}":  str(numbers.get("CONSUMABLES", "")),
+        "{{NO_THIRD_PARTY}}":  str(numbers.get("THIRD_PARTY", "")),
+        # the long proposal letters its tables (Table A, B …) in the same order
+        "{{LTR_LABOUR}}":      chr(64 + numbers["LABOUR"]),
+        "{{LTR_EQUIPMENT}}":   chr(64 + numbers["EQUIPMENT"]) if "EQUIPMENT" in numbers else "",
+        "{{LTR_CONSUMABLES}}": chr(64 + numbers["CONSUMABLES"]) if "CONSUMABLES" in numbers else "",
+        "{{LTR_THIRD_PARTY}}": chr(64 + numbers["THIRD_PARTY"]) if "THIRD_PARTY" in numbers else "",
+        "{{MARKUP_MATERIALS}}": f"{markup_rate * 100:g}",
+        "{{MARKUP_THIRD_PARTY}}": _usual_markup(transport),
     }
 
     # ── optional blocks (before the tables, so empty ones leave nothing) ──
-    for name, rows in (("EQUIPMENT", equipment), ("CONSUMABLES", has_cons)):
+    blocks = [("EQUIPMENT", equipment), ("CONSUMABLES", has_cons)] + ([("THIRD_PARTY", has_tp)] if separate_tp else [])
+    for name, rows in blocks:
         if rows:
             _drop_markers(doc, name)
         else:
             _remove_block(doc, name)
 
     # ── tables: the template holds the sample's own tables; rows are copies of its sample rows ──
-    labour_t = _find_table(doc, "{{L_DESC}}")
-    _fill_rows(labour_t, "{{L_DESC}}", [
-        {"{{L_DESC}}": r["description"], "{{L_NAT}}": r["nationality"], "{{L_LOC}}": location,
+    l_tag = "{{L_DESC}}" if _has_table_with(doc, "{{L_DESC}}") else "{{L_POSITION}}"   # the long one has Position and Shift columns
+    labour_t = _find_table(doc, l_tag)
+    _fill_rows(labour_t, l_tag, [
+        {"{{L_NO}}": str(i), "{{L_DESC}}": r["description"], "{{L_POSITION}}": r["position"], "{{L_SHIFT}}": r["shift"],
+         "{{L_NAT}}": r["nationality"], "{{L_LOC}}": location,
          "{{L_DAYS}}": _qty(r["days"]), "{{L_MEN}}": _qty(r["men"]),
          "{{L_RATE}}": _money(r["rate"], sym), "{{L_TOTAL}}": _money(r["total"], sym)}
-        for r in labour])
+        for i, r in enumerate(labour, 1)])
     if hotbed:      # always inserted; calculated only when both the rate and the days are given
         both = bool(hotbed.get("rate") and hotbed.get("days"))
         _fill_row(labour_t, _row_with(labour_t, "{{HOTBED_LABEL}}")._tr, {
@@ -569,33 +612,47 @@ def build_pdms(
     if equipment:
         t = _find_table(doc, "{{E_DESC}}")
         _fill_rows(t, "{{E_DESC}}", [
-            {"{{E_DESC}}": r["description"], "{{E_QTY}}": _qty(r["qty"]),
-             "{{E_DURATION}}": f"{_qty(r['days'])} Days", "{{E_UOM}}": r["uom"],
+            {"{{E_NO}}": str(i), "{{E_DESC}}": r["description"], "{{E_QTY}}": _qty(r["qty"]),
+             "{{E_DURATION}}": f"{_qty(r['days'])} Days", "{{E_DAYS}}": _qty(r["days"]), "{{E_UOM}}": r["uom"],
              "{{E_UNIT}}": _money(r["unit"], sym), "{{E_TOTAL}}": _money(r["total"], sym)}
-            for r in equipment])
+            for i, r in enumerate(equipment, 1)])
         _fill_row(t, _row_with(t, "{{E_SUM}}")._tr, {"{{E_SUM}}": _money(equip_total, sym)})
 
     if has_cons:
         t = _find_table(doc, "{{C_DESC}}")
         _fill_rows(t, "{{C_DESC}}", [
-            {"{{C_DESC}}": r["description"], "{{C_UOM}}": r["uom"], "{{C_QTY}}": _qty(r["qty"]),
-             "{{C_UNIT}}": _money(r["unit"], sym), "{{C_TOTAL}}": _money(r["total"], sym)}
-            for r in consumables
-        ] + [   # transport: the same row look, description and cost only
-            {"{{C_DESC}}": r["description"], "{{C_UOM}}": "", "{{C_QTY}}": "",
-             "{{C_UNIT}}": "", "{{C_TOTAL}}": _money(r["total"], sym)}
-            for r in transport])
-        _fill_row(t, _row_with(t, "{{C_SUM}}")._tr, {"{{C_SUM}}": _money(cons_total, sym)})
+            {"{{C_NO}}": str(i), "{{C_DESC}}": r["description"], "{{C_UOM}}": r["uom"], "{{C_QTY}}": _qty(r["qty"]),
+             "{{C_UNIT}}": _money(r["unit"], sym), "{{C_TOTAL}}": _money(r["total"], sym),
+             # the long proposal shows the price before the mark-up and the mark-up beside it
+             "{{C_PRICE}}": _money(r["native"] * r["fx"], sym), "{{C_MARKUP}}": f"{r['markup'] * 100:g}%"}
+            for i, r in enumerate(consumables, 1)
+        ] + ([] if separate_tp else [   # transport: the same row look, description and cost only
+            {"{{C_NO}}": "", "{{C_DESC}}": r["description"], "{{C_UOM}}": "", "{{C_QTY}}": "",
+             "{{C_UNIT}}": "", "{{C_PRICE}}": "", "{{C_MARKUP}}": "", "{{C_TOTAL}}": _money(r["total"], sym)}
+            for r in transport]))
+        cons_shown = sum(r["total"] for r in consumables) if separate_tp else cons_total
+        _fill_row(t, _row_with(t, "{{C_SUM}}")._tr, {"{{C_SUM}}": _money(cons_shown, sym)})
 
-    summary_t = _find_table(doc, "{{S_GRAND}}")
-    if not equipment:
-        _drop_row(summary_t, "{{S_MATERIAL}}")
-    if not has_cons:
-        _drop_row(summary_t, "{{S_CONSUMABLES}}")
-    for r in summary_t.rows:
-        _fill_row(summary_t, r._tr, {
-            "{{S_LABOUR}}": _money(labour_total, sym), "{{S_MATERIAL}}": _money(equip_total, sym),
-            "{{S_CONSUMABLES}}": _money(cons_total, sym), "{{S_GRAND}}": _money(grand_total, sym)})
+    if has_tp:
+        t = _find_table(doc, "{{T_DESC}}")
+        _fill_rows(t, "{{T_DESC}}", [
+            # quantity × duration of the line, at its unit rate and its own mark-up (the AZN CTR's formula)
+            {"{{T_NO}}": str(i), "{{T_DESC}}": r["description"], "{{T_UOM}}": r["uom"],
+             "{{T_QTY}}": _qty(r["qty"] * r["duration"]), "{{T_MARKUP}}": f"{r['markup'] * 100:g}%",
+             "{{T_UNIT}}": _money(r["unit"], sym), "{{T_TOTAL}}": _money(r["total"], sym)}
+            for i, r in enumerate(transport, 1)])
+        _fill_row(t, _row_with(t, "{{T_SUM}}")._tr, {"{{T_SUM}}": _money(sum(r["total"] for r in transport), sym)})
+
+    if _has_table_with(doc, "{{S_GRAND}}"):        # the long proposal has no summary table
+        summary_t = _find_table(doc, "{{S_GRAND}}")
+        if not equipment:
+            _drop_row(summary_t, "{{S_MATERIAL}}")
+        if not has_cons:
+            _drop_row(summary_t, "{{S_CONSUMABLES}}")
+        for r in summary_t.rows:
+            _fill_row(summary_t, r._tr, {
+                "{{S_LABOUR}}": _money(labour_total, sym), "{{S_MATERIAL}}": _money(equip_total, sym),
+                "{{S_CONSUMABLES}}": _money(cons_total, sym), "{{S_GRAND}}": _money(grand_total, sym)})
 
     # ── the notes (only a template that has the tags) ──
     if notes_places_in(doc):
