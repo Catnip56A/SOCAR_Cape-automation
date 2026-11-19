@@ -35,12 +35,12 @@ See [USER_GUIDE.md](USER_GUIDE.md) for full step-by-step usage of all three tool
 - Cost statistics for the loaded request (SAGE expected cost, rechargeable vs non-rechargeable); values the request does not state (quantities, days, rates, …) are never assumed — they stay blank and red, and Generate leaves those rows out after you confirm; the statistics can be saved as Excel
 - A **Go to value** button (next / pick from a list) for missing values and Stock Codes not in SAGE, and **Ctrl+F** find in every table
 - Remembers manual corrections ("Saved Renames") so the same CTR Request description matches automatically next time
-- Fills the AZN and USD CTR templates with all rows, totals, and header fields, and exports each to PDF via LibreOffice
+- Fills the AZN and USD CTR templates with all rows, totals, and header fields, and exports each to PDF via LibreOffice (a PDMS proposal's PDF is made by Word when it is installed, else by LibreOffice)
 - A **Settings** window (gear button at the left of the tab bar) for the remembered SAGE path, folders and saved aliases / renames / presets (each list can be reset, with a backup copy)
 - Presets for recurring project field combinations (client, location, scope, revision, job ref, output folder)
 - **Formulas** in every number cell and box (`=25/12`, `=(5+1.5)*2`): the cell shows the result, keeps the formula for editing, and a hover text says what the number means
 - **Reload all** and **Ctrl+Shift picks**: read the CTR Request file again for a whole table or for the rows × columns you picked (your edits are replaced after a question)
-- A **PDMS proposal** mode: the same values written into a Word proposal from a tagged template (PRP number instead of a contract number), with every price (in its own currency, per category or per cell) converted to AZN at the CBAR rate (the Manpower table shows days and a day rate, as the proposal does); **Reload CBAR** fetches the official rate, every fetched rate is kept in a log (checked for typos) and the Inspector's CBAR tab plots it and lists the documents that used each rate
+- A **PDMS proposal** mode: the same values written into a Word proposal — short or long, from the same request, each from its own tagged template — (PRP number instead of a contract number), with every price (in its own currency, per category or per cell) converted to AZN at the CBAR rate (the Manpower table shows days and a day rate, as the proposal does); **Reload CBAR** fetches the official rate, every fetched rate is kept in a log (checked for typos) and the Inspector's CBAR tab plots it and lists the documents that used each rate
 
 ### CTR Tracker
 - Reads a generated CTR's header fields and cost-breakdown totals straight off the file (client, CTR number, date, revision, description, value, currency, Location)
@@ -168,7 +168,7 @@ SOCAR_Cape-automation/
 │   ├── cbar_rates.py        # CBAR rates: fetch, log, validation, which documents used them
 │   ├── pdms_overview.py     # "PDMS overview" sheet of the statistics workbook (the proposal's figures with formulas)
 │   ├── parser.py            # CTR Request / Combined DB parsing
-│   ├── pdf_exporter.py      # LibreOffice-based xlsx → PDF export
+│   ├── pdf_exporter.py      # LibreOffice-based xlsx → PDF export; a PDMS Word proposal's PDF by Word when installed
 │   ├── config.py            # Loads template_config.json
 │   ├── tracker_window.py    # CTR Tracker tab
 │   ├── tracker.py           # CTR Tracker data model + CTR-file field extraction

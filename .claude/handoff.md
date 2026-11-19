@@ -11,7 +11,7 @@ CTR Generator / PDMS proposal, version 1.0.26 (not bumped): short + long proposa
 - Suite: full run 393 passed 0 failed, then `-k pdms` 76 and `-k pdf` 3 passed after the last changes; the whole suite was NOT re-run after the final pdf_exporter edits.
 
 ## In progress / not fully done
-- VERSION / CHANGELOG / README / USER_GUIDE / task log not updated (version question open). README test table has the new test files.
+- CHANGELOG (1.0.26 section, date kept 2026-11-15), README and USER_GUIDE updated for this work (version stays 1.0.26, decided by the user); task log updated (MA128 80 %, MA130 60 %, MA124 55 %). Docs not yet re-read in rendered form.
 - MA130 (from before): notes block in the PDMS overview sheet (`pdms_overview.py`), Settings row "PDMS notes", price remarks place — still not built.
 - Not verified: Word rendering of the long template layout beyond the user's check; Python running natively on Windows (path code untested); a machine with neither Word nor LibreOffice (old "PDF skipped" path).
 - Contents page numbers are updated only inside the PDF, not in the .docx (user must update the field in Word).
@@ -23,10 +23,9 @@ CTR Generator / PDMS proposal, version 1.0.26 (not bumped): short + long proposa
 - Word only started by us: on timeout stop only a new windowless WINWORD process; never kill others (the user runs Word/the app at the same time).
 
 ## Next
-Decide the version question, then update VERSION/CHANGELOG/README/USER_GUIDE, re-run the full suite, and commit.
+Commit (full suite 397 passed 0 failed just before), then the Windows checks below; no version bump.
 
 ## Open questions
-- New release or continuation of 1.0.26?
 - Two price remarks ("indicative quotation", VAT) as a fourth notes place? "CHECK" note shows third-party mark-up 5 % (was 10 %) — correct?
 - How to give colleagues the templates (TEST_Files is git-ignored; the long one is ~10 MB)?
 - User's saved `sched-standby` note ends with a stray `{night_coef}` — remove?
