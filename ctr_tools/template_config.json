@@ -164,7 +164,10 @@
     "scaffold_end_label":     "Total Plant & Equipment",
     "scaffold_desc_col":      "B",
     "scaffold_end_label_col": "C",
-    "scaffold_total_col":     "G"
+    "scaffold_total_col":     "G",
+    "scaffold_cons_start_label": "Consumables & Materials",
+    "scaffold_cons_end_label":   "Materials and Consumables:",
+    "scaffold_cons_total_col":   "F"
   },
 
   "ctr_tracker": {

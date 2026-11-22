@@ -57,6 +57,8 @@ class CTREntry:
     total_third_party:            float | None = None
     total_equipment:               float | None = None
     total_scaffold:                float | None = None  # scaffold lines inside total_equipment; the tracker moves them to its own column
+    total_scaffold_consumables:    float | None = None  # scaffold materials inside general_consumables: also moved to the scaffolding column
+    consumables_markup_rate:       float | None = None  # the CTR's own consumables mark-up as a fraction (0.1 = 10 %); None = not known
     general_consumables:          float | None = None
     consumables_markup_amount:    float | None = None
     transportation_customs:       float | None = None
@@ -190,20 +192,14 @@ def _find_activity_type(ws_calc, cfg: dict) -> str:
     return ""
 
 
-def _scaffold_total(wb_calc, cfg: dict) -> float | None:
-    """Sum of the scaffold lines in the USD CTR's Plant & Equipment block
-    (Pricing sheet), or None when there is no such block or no scaffold
-    line (an AZN CTR, or a USD one without scaffold)."""
-    sheet = cfg.get("scaffold_sheet", "Pricing")
-    if sheet not in wb_calc.sheetnames:
-        return None
-    ws = wb_calc[sheet]
+def _scaffold_in_block(ws, cfg: dict, start_label: str, end_label: str, end_col: str, total_col: str) -> float | None:
+    """Sum of the lines whose description (col scaffold_desc_col) mentions the scaffold keyword, between the row whose
+    description starts with start_label and the row whose end_col text starts with end_label; None when there is
+    no such line."""
     keyword = cfg.get("scaffold_keyword", "scaffold").lower()
-    start_label = cfg.get("scaffold_start_label", "General Equipment").lower()
-    end_label = cfg.get("scaffold_end_label", "Total Plant & Equipment").lower()
     desc_col = _col_idx(cfg.get("scaffold_desc_col", "B"))
-    end_col = _col_idx(cfg.get("scaffold_end_label_col", "C"))
-    total_col = _col_idx(cfg.get("scaffold_total_col", "G"))
+    end_idx, total_idx = _col_idx(end_col), _col_idx(total_col)
+    start_label, end_label = start_label.lower(), end_label.lower()
 
     def _text(row: int, col: int) -> str:
         v = ws.cell(row=row, column=col).value
@@ -215,14 +211,37 @@ def _scaffold_total(wb_calc, cfg: dict) -> float | None:
         if not in_block:
             in_block = _text(row, desc_col).startswith(start_label)
             continue
-        if _text(row, end_col).startswith(end_label):
+        if _text(row, end_idx).startswith(end_label):
             break
         if keyword in _text(row, desc_col):
-            value = ws.cell(row=row, column=total_col).value
+            value = ws.cell(row=row, column=total_idx).value
             if isinstance(value, (int, float)):
                 total += float(value)
                 found = True
     return total if found else None
+
+
+def _scaffold_total(wb_calc, cfg: dict) -> float | None:
+    """Sum of the scaffold lines in the USD CTR's Plant & Equipment block (Pricing sheet), or None when there is no
+    such block or no scaffold line (an AZN CTR, or a USD one without scaffold)."""
+    sheet = cfg.get("scaffold_sheet", "Pricing")
+    if sheet not in wb_calc.sheetnames:
+        return None
+    return _scaffold_in_block(
+        wb_calc[sheet], cfg, cfg.get("scaffold_start_label", "General Equipment"),
+        cfg.get("scaffold_end_label", "Total Plant & Equipment"), cfg.get("scaffold_end_label_col", "C"),
+        cfg.get("scaffold_total_col", "G"))
+
+
+def _scaffold_consumables_total(wb_calc, cfg: dict) -> float | None:
+    """The same for scaffold materials listed in the Consumables & Materials block."""
+    sheet = cfg.get("scaffold_sheet", "Pricing")
+    if sheet not in wb_calc.sheetnames:
+        return None
+    return _scaffold_in_block(
+        wb_calc[sheet], cfg, cfg.get("scaffold_cons_start_label", "Consumables & Materials"),
+        cfg.get("scaffold_cons_end_label", "Materials and Consumables:"), cfg.get("scaffold_end_label_col", "C"),
+        cfg.get("scaffold_cons_total_col", "F"))
 
 
 def extract_ctr_data(path: str | Path) -> CTREntry:
@@ -265,12 +284,17 @@ def extract_ctr_data(path: str | Path) -> CTREntry:
         cfg["value_result_col"], cfg["search_max_row"],
     )
 
+    consumables = _val(cfg["label_general_consumables"])
+    markup_amount = _val(cfg["label_consumables_markup"])
     total_scaffold = _scaffold_total(wb_calc, cfg)
+    total_scaffold_cons = _scaffold_consumables_total(wb_calc, cfg)
     activity_type = _find_activity_type(ws_calc, cfg)
     total_activities = _val(f"Total {activity_type} Activities") if activity_type else None
 
     wb_calc.close()
     wb_raw.close()
+
+    markup_rate = round(markup_amount / consumables, 6) if consumables and markup_amount is not None else None
 
     return CTREntry(
         source_path=str(path),
@@ -289,8 +313,10 @@ def extract_ctr_data(path: str | Path) -> CTREntry:
         total_third_party=_val(cfg["label_total_third_party"]),
         total_equipment=_val(cfg["label_total_equipment"]),
         total_scaffold=total_scaffold,
-        general_consumables=_val(cfg["label_general_consumables"]),
-        consumables_markup_amount=_val(cfg["label_consumables_markup"]),
+        total_scaffold_consumables=total_scaffold_cons,
+        consumables_markup_rate=markup_rate,
+        general_consumables=consumables,
+        consumables_markup_amount=markup_amount,
         transportation_customs=_val(cfg["label_transportation_customs"]),
         transportation_markup_amount=_val(cfg["label_transportation_markup"]),
     )

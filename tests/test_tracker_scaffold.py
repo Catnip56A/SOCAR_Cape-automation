@@ -151,3 +151,72 @@ def test_a_usd_ctr_with_manpower_gets_labor_unconverted_and_a_labour_free_one_no
                        tracker_location="Onshore", job_type="x", total_project_support=0.0, total_equipment=5.0)
     written, _s, _b, _n = TF.write_entries_fast(work2, [entry], make_backup=False)
     assert _cell(work2, cfg, written[0][2], "col_labor") is None
+
+
+# ── scaffold materials in the consumables block, and the CTR's own consumables mark-up ────────────────────
+
+def test_scaffold_materials_in_the_consumables_block_are_summed_apart_from_the_rest():
+    wb = _pricing_workbook()
+    ws = wb["Pricing"]
+    ws["B19"] = "Consumables & Materials"
+    for i, (name, total) in enumerate([("GLOVES", 1000.0), ("SCAFFOLD BOARD END BAND", 146.2), ("Scaffold tube", 53.8)]):
+        ws.cell(20 + i, 2, name)
+        ws.cell(20 + i, 6, total)
+    ws["C24"] = "Materials and Consumables:"
+    ws["B25"], ws["F25"] = "Scaffold below the block", 999.0
+    assert abs(T._scaffold_consumables_total(wb, CFG["ctr_extract"]) - 200.0) < 1e-9
+    assert T._scaffold_total(wb, CFG["ctr_extract"]) == 130.0           # the equipment block is unchanged
+    ws["B21"], ws["B22"] = "Other", "Other"
+    assert T._scaffold_consumables_total(wb, CFG["ctr_extract"]) is None
+
+
+def test_ctr_337_gives_its_scaffold_materials_and_its_own_ten_percent_markup():
+    src = H.ROOT / "TEST_Files" / "CTR tracker" / "337" / "337 ENCOTEC E900.177 - PSV Replacement at ACG Phase 1-3.xlsx"
+    if not src.exists():
+        raise H.Skip("CTR 337 is not in TEST_Files")
+    e = T.extract_ctr_data(src)
+    assert abs(e.total_scaffold_consumables - 146.2) < 1e-6 and abs(e.consumables_markup_rate - 0.1) < 1e-6, e
+
+
+def test_scaffold_from_both_blocks_goes_to_ao_and_out_of_equipment_and_consumables():
+    work, cfg, number, _ = _tracker_copy("tracker_scaffold_cons.xlsm")
+    entry = T.CTREntry(client="C", ctr_number=number, description="scaffold in both", value=500.0, currency="USD",
+                       tracker_location="Onshore", job_type="x", total_equipment=200.0, total_scaffold=130.0,
+                       general_consumables=100.0, total_scaffold_consumables=40.0, consumables_markup_rate=0.1)
+    written, _s, _b, _n = TF.write_entries_fast(work, [entry], make_backup=False)
+    row = written[0][2]
+    assert _cell(work, cfg, row, "col_equipment") == 70.0
+    assert _cell(work, cfg, row, "col_scaffolding") == 170.0                       # 130 + 40
+    assert _cell(work, cfg, row, "col_consumables_recharge") == 60.0
+    assert _cell(work, cfg, row, "col_consumables_markup") == f"=AT{row}*0.1"      # the CTR's own 10 %, not the standard 6.5 %
+
+
+def test_the_standard_markup_rate_is_used_when_the_ctr_gave_none():
+    work, cfg, number, _ = _tracker_copy("tracker_markup_default.xlsm")
+    entry = T.CTREntry(client="C", ctr_number=number, description="no markup known", value=5.0, currency="USD",
+                       tracker_location="Onshore", job_type="x", general_consumables=100.0)
+    written, _s, _b, _n = TF.write_entries_fast(work, [entry], make_backup=False)
+    assert _cell(work, cfg, written[0][2], "col_consumables_markup") == f"=AT{written[0][2]}*{cfg['consumables_markup_rate']}"
+
+
+def test_the_markup_box_is_filled_from_the_ctr_edited_and_blank_means_standard():
+    from ctr_tools.tracker_window import CTRTrackerWidget
+    w = CTRTrackerWidget()
+    w._apply_loaded_entry(T.CTREntry(client="C", ctr_number="CTR-26-1", currency="USD", consumables_markup_rate=0.1))
+    assert w._markup_edit.text() == "10"
+    w._site_combo.setCurrentIndex(1)
+    w._job_type_combo.setCurrentIndex(1)
+    w._markup_edit.setText("12,5")                                             # editable (a decimal comma is fine)
+    w._add_to_batch()
+    assert abs(w._batch[-1].consumables_markup_rate - 0.125) < 1e-9
+    w._site_combo.setCurrentIndex(1); w._job_type_combo.setCurrentIndex(1); w._ctr_no_edit.setText("CTR-26-2")
+    w._markup_edit.setText("")
+    w._add_to_batch()
+    assert w._batch[-1].consumables_markup_rate is None
+    n = len(w._batch)
+    H.msgs.clear()
+    w._site_combo.setCurrentIndex(1); w._job_type_combo.setCurrentIndex(1); w._ctr_no_edit.setText("CTR-26-3")
+    w._markup_edit.setText("abc")
+    w._add_to_batch()
+    assert len(w._batch) == n and any("Invalid mark-up" in m[1] for m in H.msgs)
+    w.deleteLater()

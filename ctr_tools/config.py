@@ -266,6 +266,11 @@ _DEFAULTS: dict = {
         "scaffold_desc_col":      "B",
         "scaffold_end_label_col": "C",
         "scaffold_total_col":     "G",
+        # Scaffold materials can also sit in the Consumables & Materials block (header in col B, lines with their
+        # Total in col F, closed by the "Materials and Consumables:" label in col C): they are counted as scaffold too.
+        "scaffold_cons_start_label":   "Consumables & Materials",
+        "scaffold_cons_end_label":     "Materials and Consumables:",
+        "scaffold_cons_total_col":     "F",
     },
 
     # CTR Tracker tab — a CTR is written into the existing tracker row whose
