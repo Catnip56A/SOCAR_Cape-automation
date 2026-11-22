@@ -354,6 +354,76 @@ class _ChoicesDialog(QDialog):
         return out
 
 
+class _CompaniesDialog(QDialog):
+    """Edit the CTR Tracker's company -> Project Code list. A CTR whose Client is one of these companies
+    always gets that Project Code, whatever its Location is."""
+
+    def __init__(self, parent, entries: dict[str, str]):
+        super().__init__(parent)
+        self.setWindowTitle("CTR Tracker company codes")
+        self.resize(560, 420)
+        lay = QVBoxLayout(self)
+        note = QLabel(
+            "A CTR whose Client is one of these companies always gets this Project Code in the CTR Tracker, "
+            "whatever Location is picked (it overrides the Location's code). The company name is compared "
+            "with the CTR's Client text ignoring capitals; it must otherwise match exactly.")
+        note.setWordWrap(True)
+        note.setStyleSheet(_MUTED)
+        lay.addWidget(note)
+        self._table = QTableWidget(0, 2)
+        self._table.setHorizontalHeaderLabels(["Company (the CTR's Client)", "Project Code"])
+        self._table.horizontalHeader().setStretchLastSection(True)
+        self._table.setColumnWidth(0, 300)
+        self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self._table.verticalHeader().setVisible(False)
+        lay.addWidget(self._table, 1)
+        for company, code in entries.items():
+            self._add(company, code)
+        row = QHBoxLayout()
+        add = QPushButton("Add")
+        add.clicked.connect(lambda: self._add("", "", edit=True))
+        rem = QPushButton("Remove selected")
+        rem.clicked.connect(self._remove)
+        ok = QPushButton("Save")
+        ok.clicked.connect(self.accept)
+        cancel = QPushButton("Cancel")
+        cancel.clicked.connect(self.reject)
+        row.addWidget(add)
+        row.addWidget(rem)
+        row.addStretch(1)
+        row.addWidget(ok)
+        row.addWidget(cancel)
+        lay.addLayout(row)
+
+    def _add(self, company: str, code: str, edit: bool = False) -> None:
+        r = self._table.rowCount()
+        self._table.insertRow(r)
+        self._table.setItem(r, 0, QTableWidgetItem(company))
+        self._table.setItem(r, 1, QTableWidgetItem(code))
+        if edit:
+            self._table.setCurrentCell(r, 0)
+            self._table.editItem(self._table.item(r, 0))
+
+    def _remove(self) -> None:
+        for r in sorted({i.row() for i in self._table.selectedIndexes()}, reverse=True):
+            self._table.removeRow(r)
+
+    def entries(self) -> dict[str, str]:
+        """Rows with both a company and a code; a company listed twice (ignoring capitals) keeps its last row."""
+        out: dict[str, str] = {}
+        seen: dict[str, str] = {}
+        for r in range(self._table.rowCount()):
+            company = (self._table.item(r, 0).text() if self._table.item(r, 0) else "").strip()
+            code = (self._table.item(r, 1).text() if self._table.item(r, 1) else "").strip()
+            if not (company and code):
+                continue
+            if company.lower() in seen:
+                out.pop(seen[company.lower()], None)
+            seen[company.lower()] = company
+            out[company] = code
+        return out
+
+
 class _TypesDialog(QDialog):
     """Edit the Stock Code types list: for every Stock Code, whether it is Equipment (priced from the
     USD Pricebook, per day) or a Consumable (priced from SAGE). Searchable, with each item's
@@ -566,6 +636,13 @@ class SettingsTab(QWidget):
                         self._edit_choices, self._reset_choices,
                         lambda: self._restore("Rechargeability choices", _choices._CHOICES_PATH),
                         open_text="Edit…")
+        self._saved_row(g2, "companies", "Tracker company codes",
+                        "Companies whose CTRs always get one Project Code in the CTR Tracker, whatever the Location "
+                        "(for example Turan Drilling). Stored in your template_config.json; Restore brings back an "
+                        "earlier copy of that file.",
+                        self._edit_companies, self._reset_companies,
+                        lambda: self._restore("Template config", _config._CONFIG_PATH),
+                        open_text="Edit…")
         self._saved_row(g2, "types", "Stock Code types",
                         "Which Stock Codes are Equipment and which are Consumables (used by Document price in the "
                         "MR vs CTR tab). Ships with the app; Merge adds the shipped codes you do not have yet, "
@@ -767,6 +844,7 @@ class SettingsTab(QWidget):
         self._counts["renames"].setText(f"{c['renames']} saved")
         self._counts["presets"].setText(f"{c['presets']} saved")
         self._counts["choices"].setText(f"{c.get('choices', 0)} saved")
+        self._counts["companies"].setText(f"{len(_config.CFG.get('ctr_tracker_companies', {}))} companies")
         t = _types.current_types()
         self._counts["types"].setText(
             f"{len(t['equipment'])} equipment · {len(t['consumable'])} consumable"
@@ -801,7 +879,7 @@ class SettingsTab(QWidget):
         for key, path in (("aliases", _aliases._ALIASES_PATH), ("renames", _renames._DESC_RENAMES_PATH),
                           ("presets", _presets._PRESETS_PATH), ("choices", _choices._CHOICES_PATH),
                           ("types", _types._TYPES_PATH), ("keywords", _kw._KEYWORDS_PATH),
-                          ("config", _config._CONFIG_PATH)):
+                          ("config", _config._CONFIG_PATH), ("companies", _config._CONFIG_PATH)):
             n = len(backups_for(path))
             btn = self._restore_btns[key]
             btn.setEnabled(n > 0)
@@ -949,6 +1027,8 @@ class SettingsTab(QWidget):
         QMessageBox.information(self, "Restored", f"{what.capitalize()} restored from {chosen.name}.")
         if Path(path) == Path(_kw._KEYWORDS_PATH):
             self._keywords_done()
+        elif Path(path) == Path(_config._CONFIG_PATH):
+            self._after_config_change()
         else:
             self.refresh()
 
@@ -980,6 +1060,41 @@ class SettingsTab(QWidget):
         except OSError as exc:
             log.exception("Saving the rechargeability choices failed")
             QMessageBox.critical(self, "Save failed", str(exc))
+            return
+        self.refresh()
+
+    def _edit_companies(self) -> None:
+        dlg = _CompaniesDialog(self, dict(_config.CFG.get("ctr_tracker_companies", {})))
+        accepted = dlg.exec() == QDialog.DialogCode.Accepted
+        entries = dlg.entries() if accepted else None
+        dlg.deleteLater()
+        if not accepted:
+            return
+        try:
+            check_writable(_config._CONFIG_PATH.parent)
+            copy_backup(_config._CONFIG_PATH)
+            _config.save_tracker_companies(entries)
+        except (OSError, ValueError) as exc:
+            log.exception("Saving the tracker company codes failed")
+            QMessageBox.critical(self, "Save failed", str(exc))
+            return
+        self.refresh()
+
+    def _reset_companies(self) -> None:
+        if QMessageBox.question(
+                self, "Reset company codes",
+                "Replace your company list with the one that ships with the app?\n\nYour other template settings are "
+                "kept; the current template_config.json is first saved next to it as “…bak-<date>-<time>…”.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel) != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            check_writable(_config._CONFIG_PATH.parent)
+            copy_backup(_config._CONFIG_PATH)
+            _config.save_tracker_companies(_config.shipped_tracker_companies())
+        except (OSError, ValueError) as exc:
+            log.exception("Reset of the tracker company codes failed")
+            QMessageBox.critical(self, "Reset failed", str(exc))
             return
         self.refresh()
 
@@ -1192,10 +1307,11 @@ class SettingsTab(QWidget):
             QMessageBox.information(self, "Template config", f"The folder is:\n\n{folder}")
 
     def _after_config_change(self) -> None:
-        try:
-            _config.reload_pdms_config()                 # the PDMS values apply at once; the template positions at the next start
-        except ValueError:
-            pass
+        for reload in (_config.reload_pdms_config, _config.reload_tracker_companies):
+            try:
+                reload()                 # the PDMS values and the company codes apply at once; the template positions at the next start
+            except ValueError:
+                pass
         self.refresh()
 
     def _merge_config(self) -> None:

@@ -56,6 +56,7 @@ class CTREntry:
     total_activities:              float | None = None  # the activity_type-matching "Total X Activities" figure
     total_third_party:            float | None = None
     total_equipment:               float | None = None
+    total_scaffold:                float | None = None  # scaffold lines inside total_equipment; the tracker moves them to its own column
     general_consumables:          float | None = None
     consumables_markup_amount:    float | None = None
     transportation_customs:       float | None = None
@@ -189,6 +190,41 @@ def _find_activity_type(ws_calc, cfg: dict) -> str:
     return ""
 
 
+def _scaffold_total(wb_calc, cfg: dict) -> float | None:
+    """Sum of the scaffold lines in the USD CTR's Plant & Equipment block
+    (Pricing sheet), or None when there is no such block or no scaffold
+    line (an AZN CTR, or a USD one without scaffold)."""
+    sheet = cfg.get("scaffold_sheet", "Pricing")
+    if sheet not in wb_calc.sheetnames:
+        return None
+    ws = wb_calc[sheet]
+    keyword = cfg.get("scaffold_keyword", "scaffold").lower()
+    start_label = cfg.get("scaffold_start_label", "General Equipment").lower()
+    end_label = cfg.get("scaffold_end_label", "Total Plant & Equipment").lower()
+    desc_col = _col_idx(cfg.get("scaffold_desc_col", "B"))
+    end_col = _col_idx(cfg.get("scaffold_end_label_col", "C"))
+    total_col = _col_idx(cfg.get("scaffold_total_col", "G"))
+
+    def _text(row: int, col: int) -> str:
+        v = ws.cell(row=row, column=col).value
+        return v.strip().lower() if isinstance(v, str) else ""
+
+    in_block = False
+    total, found = 0.0, False
+    for row in range(1, cfg.get("search_max_row", 400) + 1):
+        if not in_block:
+            in_block = _text(row, desc_col).startswith(start_label)
+            continue
+        if _text(row, end_col).startswith(end_label):
+            break
+        if keyword in _text(row, desc_col):
+            value = ws.cell(row=row, column=total_col).value
+            if isinstance(value, (int, float)):
+                total += float(value)
+                found = True
+    return total if found else None
+
+
 def extract_ctr_data(path: str | Path) -> CTREntry:
     """Read client/CTR number/date/revision/description/value/currency off
     a generated CTR output file. Fields that can't be read are left blank
@@ -229,6 +265,7 @@ def extract_ctr_data(path: str | Path) -> CTREntry:
         cfg["value_result_col"], cfg["search_max_row"],
     )
 
+    total_scaffold = _scaffold_total(wb_calc, cfg)
     activity_type = _find_activity_type(ws_calc, cfg)
     total_activities = _val(f"Total {activity_type} Activities") if activity_type else None
 
@@ -251,6 +288,7 @@ def extract_ctr_data(path: str | Path) -> CTREntry:
         total_activities=total_activities,
         total_third_party=_val(cfg["label_total_third_party"]),
         total_equipment=_val(cfg["label_total_equipment"]),
+        total_scaffold=total_scaffold,
         general_consumables=_val(cfg["label_general_consumables"]),
         consumables_markup_amount=_val(cfg["label_consumables_markup"]),
         transportation_customs=_val(cfg["label_transportation_customs"]),

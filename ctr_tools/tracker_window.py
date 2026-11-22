@@ -62,6 +62,14 @@ _BC_CLIENT, _BC_CTR_NO, _BC_DATE, _BC_LOCATION, _BC_PROJECT, \
     _BC_REMOVE = range(11)
 
 
+def _value_text(value) -> str:
+    """A CTR value as text, without losing digits ("{:g}" keeps only 6 significant ones, which turned
+    13619.76 into 13619.8) and without float noise (13619.759999999998 -> 13619.76)."""
+    if value is None:
+        return ""
+    return format(round(float(value), 6), "f").rstrip("0").rstrip(".")
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Background write worker
 # ─────────────────────────────────────────────────────────────────────────────
@@ -376,7 +384,7 @@ class CTRTrackerWidget(QWidget):
         self._date_edit.setText(entry.ctr_date.isoformat() if entry.ctr_date else "")
         self._revision_edit.setText(entry.revision)
         self._desc_edit.setText(entry.description)
-        self._value_edit.setText("" if entry.value is None else f"{entry.value:g}")
+        self._value_edit.setText(_value_text(entry.value))
         if entry.currency in ("AZN", "USD"):
             self._currency_combo.setCurrentText(entry.currency)
 
@@ -505,7 +513,7 @@ class CTRTrackerWidget(QWidget):
         tbl.setItem(r, _BC_PROJECT,  QTableWidgetItem(entry.project_code))
         tbl.setItem(r, _BC_JOB_TYPE, QTableWidgetItem(entry.job_type))
         tbl.setItem(r, _BC_DESC,     QTableWidgetItem(entry.description))
-        tbl.setItem(r, _BC_VALUE,    QTableWidgetItem("" if entry.value is None else f"{entry.value:g}"))
+        tbl.setItem(r, _BC_VALUE,    QTableWidgetItem(_value_text(entry.value)))
         tbl.setItem(r, _BC_CURRENCY, QTableWidgetItem(entry.currency))
         tbl.setItem(r, _BC_REVISION, QTableWidgetItem(entry.revision))
         tbl.setItem(r, _BC_REMOVE,   _ro_item(""))

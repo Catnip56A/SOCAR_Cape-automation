@@ -254,6 +254,18 @@ _DEFAULTS: dict = {
         # the tracker Location chosen in the UI before writing anything.
         "activity_labels":    ["Onshore Activities", "Offshore Activities"],
         "activity_label_col": "A",
+        # Scaffold lines inside the USD CTR's Plant & Equipment block on the
+        # Pricing sheet: rows from the "General Equipment" header down to the
+        # "Total Plant & Equipment" label, whose description (col B) mentions
+        # the keyword, summed from their Total column (G). Limited to that
+        # block because the labour rows ("Scaffolder-National") match too.
+        "scaffold_keyword":       "scaffold",
+        "scaffold_sheet":         "Pricing",
+        "scaffold_start_label":   "General Equipment",
+        "scaffold_end_label":     "Total Plant & Equipment",
+        "scaffold_desc_col":      "B",
+        "scaffold_end_label_col": "C",
+        "scaffold_total_col":     "G",
     },
 
     # CTR Tracker tab — a CTR is written into the existing tracker row whose
@@ -298,6 +310,10 @@ _DEFAULTS: dict = {
         ],
         # Total CTR value converted to USD — always rewritten with this
         "col_value_usd":     "AJ",
+        # Scaffolding cost (conventional/system scaffold, scaffold materials):
+        # taken out of col_equipment and written here, so it is not counted
+        # twice. Inside the total's SUM(AL:AW) range.
+        "col_scaffolding":   "AO",
         # formula (AC/S are that row's own currency/value columns) using
         # the row actually being written, e.g. row 8903 becomes:
         #   =IF(AC8903="USD", S8903, IF(AC8903="AZN", S8903/1.7, ""))
@@ -573,6 +589,49 @@ def reload_pdms_config() -> dict:
         raise ValueError(f"{_CONFIG_PATH.name} has no usable “pdms” section")
     CFG["pdms"] = {**_DEFAULTS.get("pdms", {}), **data.get("pdms", {})}
     return CFG["pdms"]
+
+
+# ── the CTR Tracker's company -> Project Code list (edited in Settings) ──────────────────────────────────────
+
+def shipped_tracker_companies() -> dict:
+    """The company list of the shipped file (the built-in default when it cannot be read)."""
+    try:
+        value = _read_config_file(_SHIPPED_CONFIG_PATH).get("ctr_tracker_companies")
+    except Exception:
+        value = None
+    return dict(value) if isinstance(value, dict) else dict(_DEFAULTS.get("ctr_tracker_companies", {}))
+
+
+def reload_tracker_companies() -> dict:
+    """Re-read "ctr_tracker_companies" of the user's copy into CFG, so an edit (or a restored file) applies at once.
+    Raises ValueError when the file cannot be read; CFG is then left as it was."""
+    try:
+        data = _read_config_file(_CONFIG_PATH)
+    except Exception as exc:
+        raise ValueError(f"{_CONFIG_PATH.name} could not be read ({exc})") from exc
+    value = data.get("ctr_tracker_companies")
+    CFG["ctr_tracker_companies"] = dict(value) if isinstance(value, dict) else dict(
+        _DEFAULTS.get("ctr_tracker_companies", {}))
+    return CFG["ctr_tracker_companies"]
+
+
+def save_tracker_companies(companies: dict) -> None:
+    """Write the company list into the user's template_config.json (every other setting kept, file replaced in one
+    step) and apply it at once. Raises ValueError if the file cannot be read (nothing is written) and OSError if it
+    cannot be saved."""
+    _seed_user_copy()
+    try:
+        data = _read_config_file(_CONFIG_PATH)
+    except Exception as exc:
+        raise ValueError(f"{_CONFIG_PATH.name} could not be read ({exc})") from exc
+    data["ctr_tracker_companies"] = {str(k): str(v) for k, v in companies.items()}
+    tmp = _CONFIG_PATH.with_name(_CONFIG_PATH.name + ".tmp")
+    try:
+        tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        tmp.replace(_CONFIG_PATH)
+    finally:
+        tmp.unlink(missing_ok=True)
+    CFG["ctr_tracker_companies"] = dict(data["ctr_tracker_companies"])
 
 
 # ── the user's copy: what differs from the shipped file, and the Settings buttons ────────────────────────────

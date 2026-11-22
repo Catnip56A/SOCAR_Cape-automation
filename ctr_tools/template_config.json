@@ -157,7 +157,14 @@
     "label_transportation_customs": "Transportation and Customs Clearance",
     "label_transportation_markup":  "Mark up (for services)",
     "activity_labels":    ["Onshore Activities", "Offshore Activities"],
-    "activity_label_col": "A"
+    "activity_label_col": "A",
+    "scaffold_keyword":       "scaffold",
+    "scaffold_sheet":         "Pricing",
+    "scaffold_start_label":   "General Equipment",
+    "scaffold_end_label":     "Total Plant & Equipment",
+    "scaffold_desc_col":      "B",
+    "scaffold_end_label_col": "C",
+    "scaffold_total_col":     "G"
   },
 
   "ctr_tracker": {
@@ -183,6 +190,7 @@
     "value_format_by_currency": {"AZN": "#,##0.00\\ [$₼-42C]", "USD": "\"$\"#,##0.00"},
     "col_labor":                "AM",
     "col_equipment":            "AN",
+    "col_scaffolding":          "AO",
     "col_third_party":          "AV",
     "col_customs_transport":    "AR",
     "col_consumables_recharge": "AT",

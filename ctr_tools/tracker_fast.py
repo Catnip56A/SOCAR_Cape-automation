@@ -252,6 +252,13 @@ def _set_numeric_cell(c_elem, value: float | int) -> None:
     v_elem.text = repr(value) if isinstance(value, float) else str(value)
 
 
+def _clear_cell(c_elem) -> None:
+    """Empty a cell's value/formula but keep its style (and its place in the row)."""
+    for child in list(c_elem):
+        c_elem.remove(child)
+    c_elem.attrib.pop("t", None)
+
+
 def _set_formula_cell(c_elem, formula: str) -> None:
     for child in list(c_elem):
         c_elem.remove(child)
@@ -357,6 +364,15 @@ def _ensure_duplicate_check_coverage(sheet_root, col_letter: str, row: int) -> N
 # fields are explicitly allowed to already have a value (a human often
 # pre-fills Client/Location/Project Code by hand when creating the row),
 # so whatever's already there is preserved unless allow_overwrite is on.
+# Columns emptied on the target row before an entry is written into it.
+# col_description is kept in _CORE_STRING_FIELDS (always written).
+_CLEARED_BEFORE_WRITE = (
+    "col_date", "col_value", "col_revision",
+    "col_labor", "col_equipment", "col_scaffolding", "col_third_party",
+    "col_customs_transport", "col_consumables_recharge",
+    "col_consumables_markup", "col_total_usd",
+)
+
 _CORE_STRING_FIELDS = {
     "col_description": "description",
     "col_currency":    "currency",
@@ -1121,6 +1137,17 @@ def write_entries_fast(
         def _cell(col_letter: str, _row=row, _cells=cells, _row_elem=row_elem):
             return _get_or_create_cell(_row_elem, _cells, _row, col_letter, default_styles)
 
+        # Whatever the row held before (a CTR loaded over leftovers) must not
+        # survive where the new CTR has nothing to say: empty the cost
+        # breakdown and the core CTR fields first, then write what this
+        # entry has. Soft fields (client, location, project code, job type)
+        # and every column not named here are left alone — a person may
+        # have filled them by hand.
+        for cfg_key in _CLEARED_BEFORE_WRITE:
+            letter = cfg.get(cfg_key)
+            if letter and f"{letter}{row}" in cells:
+                _clear_cell(cells[f"{letter}{row}"])
+
         for cfg_key, attr in _CORE_STRING_FIELDS.items():
             value = getattr(entry, attr)
             if value:
@@ -1159,39 +1186,54 @@ def write_entries_fast(
         _set_formula_cell(_cell(cfg["col_value_usd"]), formula)
 
         # Cost breakdown (AL:AX) — best-effort, "not all applicable" to
-        # every CTR. AZN CTRs (pure labor documents) only ever contribute
-        # Labor; USD CTRs (equipment/consumables/third-party documents)
-        # contribute the rest — see CFG["ctr_tracker"] for why Labor
-        # embeds a computed literal rather than a cross-workbook reference.
+        # every CTR; see CFG["ctr_tracker"] for why Labor embeds a computed
+        # literal rather than a cross-workbook reference.
         touched_breakdown = False
 
-        if entry.currency == "AZN":
+        # What a CTR contains is independent of its currency: an AZN CTR can
+        # carry equipment, third party and consumables (one all-in AZN
+        # document), a USD one can carry manpower. Every figure is read
+        # whatever the currency; the tracker's breakdown is in USD, so an
+        # AZN amount is divided by the AZN->USD rate (as Labor always was)
+        # and a USD amount is written as it is. Zero amounts are not written
+        # (the cell stays empty), except Labor of an AZN CTR, as before.
+        if entry.currency in ("AZN", "USD"):
+            is_azn = entry.currency == "AZN"
+            rate = cfg["azn_to_usd_rate"] if is_azn else 1
+
+            def _put(cfg_key: str, amount: float | None, _cell=_cell) -> bool:
+                if amount is None or abs(amount) < 1e-9:
+                    return False
+                amount = round(amount, 6)
+                cell = _cell(cfg[cfg_key])
+                if is_azn:
+                    _set_formula_cell(cell, f"{amount!r}/{rate}")
+                else:
+                    _set_numeric_cell(cell, amount)
+                return True
+
             if entry.total_project_support is not None or entry.total_activities is not None:
                 support = round(entry.total_project_support or 0.0, 2)
                 activities = round(entry.total_activities or 0.0, 2)
-                labor_formula = cfg["labor_formula"].format(
-                    support=support, activities=activities, rate=cfg["azn_to_usd_rate"],
-                )
-                _set_formula_cell(_cell(cfg["col_labor"]), labor_formula)
-                touched_breakdown = True
-
-        elif entry.currency == "USD":
+                if is_azn or support or activities:
+                    labor_formula = cfg["labor_formula"].format(
+                        support=support, activities=activities, rate=rate,
+                    )
+                    _set_formula_cell(_cell(cfg["col_labor"]), labor_formula)
+                    touched_breakdown = True
             if entry.total_equipment is not None:
-                _set_numeric_cell(_cell(cfg["col_equipment"]), entry.total_equipment)
-                touched_breakdown = True
-            if entry.total_third_party is not None:
-                _set_numeric_cell(_cell(cfg["col_third_party"]), entry.total_third_party)
-                touched_breakdown = True
+                # Scaffold is part of the CTR's equipment total but has its
+                # own tracker column: take it out of equipment, put it there.
+                scaffold = entry.total_scaffold or 0.0
+                touched_breakdown |= _put("col_equipment", entry.total_equipment - scaffold)
+                touched_breakdown |= _put("col_scaffolding", scaffold)
+            touched_breakdown |= _put("col_third_party", entry.total_third_party)
             if entry.transportation_customs is not None or entry.transportation_markup_amount is not None:
-                customs_total = (
-                    (entry.transportation_customs or 0.0)
-                    + (entry.transportation_markup_amount or 0.0)
+                touched_breakdown |= _put(
+                    "col_customs_transport",
+                    (entry.transportation_customs or 0.0) + (entry.transportation_markup_amount or 0.0),
                 )
-                _set_numeric_cell(_cell(cfg["col_customs_transport"]), customs_total)
-                touched_breakdown = True
-            if entry.general_consumables is not None:
-                _set_numeric_cell(_cell(cfg["col_consumables_recharge"]), entry.general_consumables)
-                touched_breakdown = True
+            touched_breakdown |= _put("col_consumables_recharge", entry.general_consumables)
 
         if touched_breakdown:
             markup_formula = cfg["consumables_markup_formula"].format(
