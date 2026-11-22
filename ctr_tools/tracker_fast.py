@@ -42,7 +42,7 @@ from __future__ import annotations
 import logging
 import re
 import zipfile
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 from lxml import etree
@@ -694,9 +694,70 @@ def _validated_base(entry: CTREntry) -> tuple[str | None, str]:
     return base, ""
 
 
+def _cell_display(c_elem, shared_strings: list[str], kind: str = "text") -> str:
+    """A cell as short display text; kind "date" turns an Excel serial into YYYY-MM-DD."""
+    text = _cell_text(c_elem, shared_strings).strip() if c_elem is not None else ""
+    if kind == "date" and text:
+        try:
+            return (date(1899, 12, 30) + timedelta(days=int(float(text)))).isoformat()
+        except (ValueError, OverflowError):
+            return text
+    return text
+
+
+def find_older_revisions(tracker_path: str | Path, entries: list[CTREntry]) -> dict[int, list[dict]]:
+    """Read-only: for each entry that is a NEW revision of a CTR (same CTR number and currency) the tracker already
+    has older revisions of, the rows it could replace — {entries index: [{"row", "revision", "description", "value",
+    "date", "order_ok"}, …]}, nearest older revision first. An entry with no older revision, or whose own revision is
+    already in the tracker (that row is overwritten in place, as always), is left out. order_ok is False when replacing
+    that row would leave the rows of this CTR out of ascending revision order."""
+    tracker_path = Path(tracker_path)
+    cfg = CFG["ctr_tracker"]
+    with zipfile.ZipFile(tracker_path, "r") as zin:
+        sheet_root = etree.fromstring(zin.read(_resolve_sheet_part(zin, cfg["sheet_name"])))
+        strings = _load_shared_strings(zin)
+    row_by_num = {int(r.get("r")): r for r in sheet_root.findall(f".//{_M}sheetData/{_M}row")}
+
+    out: dict[int, list[dict]] = {}
+    seen: set[tuple[str, str]] = set()
+    for idx, entry in enumerate(entries):
+        base, _reason = _validated_base(entry)
+        if base is None:
+            continue
+        pair = (base, (entry.currency or "").strip().upper())
+        if pair in seen:
+            continue                              # a second entry for the pair is refused by the write itself
+        seen.add(pair)
+        filled = _filled_revision_rows(row_by_num, strings, cfg, base, entry.currency, set())
+        wanted = (entry.revision or "").strip()
+        if not filled or any(text == wanted for _k, _r, text in filled):
+            continue
+        new_key = _revision_sort_key(wanted)
+        found = []
+        for key, row_num, text in filled:
+            if not key < new_key:
+                continue
+            others = [(k2, r2) for k2, r2, _t in filled if r2 != row_num]
+            order_ok = all((k2 >= new_key) if r2 > row_num else (k2 <= new_key) for k2, r2 in others)
+            cells = {c.get("r"): c for c in row_by_num[row_num].findall(f"{_M}c")}
+            found.append({
+                "row": row_num, "revision": text, "key": key, "order_ok": order_ok,
+                "description": _cell_display(cells.get(f"{cfg['col_description']}{row_num}"), strings),
+                "value": _cell_display(cells.get(f"{cfg['col_value']}{row_num}"), strings),
+                "date": _cell_display(cells.get(f"{cfg['col_date']}{row_num}"), strings, "date"),
+            })
+        if found:
+            found.sort(key=lambda d: d["key"], reverse=True)
+            for d in found:
+                d.pop("key")
+            out[idx] = found
+    return out
+
+
 def _plan_insertions(
     tracker_path: Path, cfg: dict, entries: list[CTREntry],
     allow_overwrite: bool, revision_mode: str,
+    replace_rows: dict[int, int] | None = None,
 ) -> tuple[list[tuple[int, str]], dict[int, int], dict[int, str], dict[int, int]]:
     """Read-only planning pass, against the file's *current* on-disk
     state, for the two situations that need a brand-new row inserted:
@@ -802,6 +863,20 @@ def _plan_insertions(
             )
             continue
         claimed_currency[currency_key] = idx
+
+        if replace_rows and idx in replace_rows:
+            # The user chose to replace this exact row with the new revision (see find_older_revisions): no
+            # insertion, no spare — just check it is still a filled row of this CTR number and currency.
+            target = replace_rows[idx]
+            filled_rows = {r for _k, r, _t in _filled_revision_rows(
+                probe_row_by_num, probe_strings, cfg, base, entry.currency, set())}
+            if target not in filled_rows:
+                pre_skip[idx] = (f"row {target} is no longer a filled row of {base} "
+                                 f"({entry.currency or 'no currency set'}) — the tracker changed since you chose it; write again")
+                continue
+            probe_used.add(target)
+            in_place_rows[idx] = target
+            continue
 
         kind, row, _, _ = _classify_target_row(
             probe_row_by_num, probe_strings, cfg, base, entry.currency, probe_used,
@@ -960,6 +1035,7 @@ def write_entries_fast(
     make_backup: bool = False,
     allow_overwrite: bool = True,
     revision_mode: str = "separate",
+    replace_rows: dict[int, int] | None = None,
 ) -> tuple[
     list[tuple[int, str, int]], list[tuple[int, str, str]], Path | None, list[str],
 ]:
@@ -1006,6 +1082,11 @@ def write_entries_fast(
     automation as above), right after whichever currency's block already
     exists so the two stay grouped together.
 
+    replace_rows {entries index: row number} (chosen by the user from find_older_revisions) makes those entries
+    replace exactly that already-filled row of their CTR number and currency with the new revision — its cost
+    columns, date, value and revision are rewritten — instead of getting a row of their own; no insertion, so
+    no Excel is needed. A row that no longer fits (the tracker changed) skips the entry with a reason.
+
     Any entry that carries a revision number (from the CTR file's own
     header field) gets it written to the dedicated Revision column (AI) —
     row order (and AI itself) is what marks a row as a revision, so
@@ -1022,8 +1103,9 @@ def write_entries_fast(
     # Always runs (not just when allow_overwrite is on) — a missing-currency
     # row needs creating regardless; _plan_insertions itself gates the
     # separate-revision-insertion logic behind allow_overwrite internally.
+    replace_rows = dict(replace_rows or {})
     to_insert, final_row_for_idx, pre_skip, spare_skipped = _plan_insertions(
-        tracker_path, cfg, entries, allow_overwrite, revision_mode,
+        tracker_path, cfg, entries, allow_overwrite, revision_mode, replace_rows,
     )
 
     if to_insert:
@@ -1034,9 +1116,14 @@ def write_entries_fast(
                 row_local_formulas=[tuple(pair) for pair in cfg.get("row_local_formulas", [])],
             )
         except (tracker_xlwings.ExcelAutomationUnavailable, RuntimeError) as exc:
+            # Nothing was inserted. An entry that replaces a chosen row needs no insertion: it goes ahead
+            # into that row (its number is the one on disk now, without any planned shift).
+            kept = {idx: replace_rows[idx] for idx in final_row_for_idx
+                    if idx in replace_rows and idx not in pre_skip}
             for idx in final_row_for_idx:
-                pre_skip[idx] = str(exc)
-            final_row_for_idx = {}
+                if idx not in kept:
+                    pre_skip[idx] = str(exc)
+            final_row_for_idx = kept
             spare_skipped = {}   # nothing was inserted — the spare stays the only free row
 
     with zipfile.ZipFile(tracker_path, "r") as zin:
@@ -1221,23 +1308,29 @@ def write_entries_fast(
                     )
                     _set_formula_cell(_cell(cfg["col_labor"]), labor_formula)
                     touched_breakdown = True
+            # Scaffold (conventional / system scaffold, scaffold materials) is part of the CTR's equipment total
+            # and of its consumables total but has its own tracker column: taken out of each, put there together.
+            scaffold_eq = entry.total_scaffold or 0.0
+            scaffold_cons = entry.total_scaffold_consumables or 0.0
             if entry.total_equipment is not None:
-                # Scaffold is part of the CTR's equipment total but has its
-                # own tracker column: take it out of equipment, put it there.
-                scaffold = entry.total_scaffold or 0.0
-                touched_breakdown |= _put("col_equipment", entry.total_equipment - scaffold)
-                touched_breakdown |= _put("col_scaffolding", scaffold)
+                touched_breakdown |= _put("col_equipment", entry.total_equipment - scaffold_eq)
+            touched_breakdown |= _put("col_scaffolding", scaffold_eq + scaffold_cons)
             touched_breakdown |= _put("col_third_party", entry.total_third_party)
             if entry.transportation_customs is not None or entry.transportation_markup_amount is not None:
                 touched_breakdown |= _put(
                     "col_customs_transport",
                     (entry.transportation_customs or 0.0) + (entry.transportation_markup_amount or 0.0),
                 )
-            touched_breakdown |= _put("col_consumables_recharge", entry.general_consumables)
+            if entry.general_consumables is not None:
+                touched_breakdown |= _put("col_consumables_recharge",
+                                          entry.general_consumables - (entry.total_scaffold_consumables or 0.0))
 
         if touched_breakdown:
+            # The CTR's own consumables mark-up (read from it, editable in the form); the configured rate only
+            # when the CTR did not give one.
+            markup_rate = entry.consumables_markup_rate
             markup_formula = cfg["consumables_markup_formula"].format(
-                row=row, rate=cfg["consumables_markup_rate"],
+                row=row, rate=cfg["consumables_markup_rate"] if markup_rate is None else markup_rate,
             )
             _set_formula_cell(_cell(cfg["col_consumables_markup"]), markup_formula)
             total_formula = cfg["total_usd_formula"].format(row=row)

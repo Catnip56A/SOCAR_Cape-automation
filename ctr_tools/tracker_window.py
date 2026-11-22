@@ -31,8 +31,8 @@ from datetime import date as _date
 
 from PySide6.QtCore import QSettings, QThread, QTimer, Qt, Signal
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QGroupBox, QHBoxLayout, QLabel,
-    QLineEdit, QMessageBox, QProgressDialog, QPushButton,
+    QApplication, QButtonGroup, QCheckBox, QComboBox, QDialog, QGroupBox, QHBoxLayout, QLabel,
+    QLineEdit, QMessageBox, QProgressDialog, QPushButton, QRadioButton,
     QScrollArea, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
@@ -40,7 +40,7 @@ from ctr_tools.tracker import (
     CTREntry, company_project_code, extract_ctr_data, job_type_options,
     location_options, match_site,
 )
-from ctr_tools.tracker_fast import IN_BATCH_CONFLICT_MARKER, write_entries_fast
+from ctr_tools.tracker_fast import IN_BATCH_CONFLICT_MARKER, find_older_revisions, write_entries_fast
 from ctr_tools.tasks import TASKS
 from ctr_tools.window import _file_picker_row, _group_css, _highlight_row, _make_table, _ro_item
 
@@ -85,11 +85,12 @@ class _WriteWorker(QThread):
     error       = Signal(str)
 
     def __init__(self, tracker_path: str, entries: list[CTREntry], make_backup: bool,
-                 parent=None):
+                 parent=None, replace_rows: dict[int, int] | None = None):
         super().__init__(parent)
         self._tracker_path = tracker_path
         self._entries = entries
         self._make_backup = make_backup
+        self._replace_rows = replace_rows or {}
         # One atomic task (a half-saved tracker is the worst outcome), so it
         # is shown in the Inspector but offers no "stop".
         self.job = TASKS.begin_job(
@@ -100,6 +101,7 @@ class _WriteWorker(QThread):
         try:
             written, skipped, backup_path, notes = write_entries_fast(
                 self._tracker_path, self._entries, make_backup=self._make_backup,
+                replace_rows=self._replace_rows,
             )
         except Exception as exc:
             log.exception("CTR Tracker write failed")
@@ -110,6 +112,69 @@ class _WriteWorker(QThread):
         self.job.done(0)
         self.job.finish()
         self.finished_ok.emit(written, skipped, backup_path, notes)
+
+
+class _RevisionChoiceDialog(QDialog):
+    """A CTR that is a new revision of one the tracker already has: replace one of the older rows, or give it a row of
+    its own. choice() is the row to replace, or None for a new row."""
+
+    def __init__(self, parent, entry: CTREntry, candidates: list[dict], allow_new: bool, backup_on: bool):
+        super().__init__(parent)
+        self.setWindowTitle("Older revision already in the tracker")
+        self.setMinimumWidth(680)
+        lay = QVBoxLayout(self)
+        lay.setSizeConstraint(QVBoxLayout.SizeConstraint.SetMinimumSize)      # tall enough for the wrapped red text
+        rev = entry.revision or "blank"
+        head = QLabel(f"<b>{entry.ctr_number}</b> ({entry.currency or 'no currency'}) is revision <b>{rev}</b>. "
+                      f"The tracker already has {'an older revision' if len(candidates) == 1 else 'older revisions'} of it:")
+        head.setWordWrap(True)
+        lay.addWidget(head)
+        self._group = QButtonGroup(self)
+        self._rows: list[int | None] = []
+        if allow_new:
+            self._add(lay, "Create a new row (keep every older revision)", None, checked=True)
+        for i, d in enumerate(candidates):
+            text = (f"Replace row {d['row']} — revision {d['revision'] or 'blank'}"
+                    + (f" · {d['date']}" if d["date"] else "") + (f" · {d['value']}" if d["value"] else "")
+                    + (f" · {d['description'][:45]}{'…' if len(d['description']) > 45 else ''}" if d["description"] else ""))
+            self._add(lay, text, d["row"], checked=(not allow_new and i == 0))
+            if not d["order_ok"]:
+                warn = QLabel("      ⚠ the rows of this CTR would no longer be in ascending revision order")
+                warn.setStyleSheet("color: #C62828; font-size: 11px;")
+                lay.addWidget(warn)
+        red = ("Replacing erases that row's old figures and revision — they remain only in the backup copy."
+               if backup_on else
+               "The backup is switched OFF: replacing erases that row's old figures and revision for good.")
+        note = QLabel(red)
+        note.setWordWrap(True)
+        note.setStyleSheet("color: #C62828; font-weight: bold;")
+        lay.addWidget(note)
+        buttons = QHBoxLayout()
+        buttons.addStretch(1)
+        ok = QPushButton("Continue")
+        ok.setDefault(True)
+        ok.clicked.connect(self.accept)
+        cancel = QPushButton("Cancel the write")
+        cancel.clicked.connect(self.reject)
+        buttons.addWidget(ok)
+        buttons.addWidget(cancel)
+        lay.addLayout(buttons)
+        self.adjustSize()
+
+    def _add(self, lay, text: str, row, checked: bool) -> None:
+        btn = QRadioButton(text)
+        btn.setChecked(checked)
+        self._group.addButton(btn, len(self._rows))
+        self._rows.append(row)
+        lay.addWidget(btn)
+
+    def choice(self) -> int | None:
+        i = self._group.checkedId()
+        return self._rows[i] if 0 <= i < len(self._rows) else None
+
+
+# Older-revision handling (the combo next to the backup box): remembered as these values.
+_OLDER_MODES = (("Ask me", "ask"), ("Always replace it", "replace"), ("Always create a new row", "new"))
 
 
 class _ExtractWorker(QThread):
@@ -223,7 +288,24 @@ class CTRTrackerWidget(QWidget):
         # shared tracker file.
         self._backup_check.setChecked(True)
         self._backup_check.setStyleSheet("font-size: 11px;")
-        gl.addWidget(self._backup_check)
+        backup_row = QHBoxLayout()
+        backup_row.addWidget(self._backup_check)
+        backup_row.addStretch(1)
+        older_lbl = QLabel("If an older revision is already there:")
+        older_lbl.setStyleSheet("font-size: 11px;")
+        self._older_combo = QComboBox()
+        for label, value in _OLDER_MODES:
+            self._older_combo.addItem(label, value)
+        self._older_combo.setToolTip(
+            "A CTR that is a NEW revision of one the tracker already has (same CTR number and currency):\n"
+            "• Ask me — choose each time: a new row, or replace one of the older rows.\n"
+            "• Always replace it — replace an older row without asking whether (you are asked which row when "
+            "there are several).\n"
+            "• Always create a new row — the revision always gets its own row, as before.\n"
+            "The same revision again always overwrites its own row.")
+        backup_row.addWidget(older_lbl)
+        backup_row.addWidget(self._older_combo)
+        gl.addLayout(backup_row)
 
         parent_layout.addWidget(grp)
 
@@ -263,6 +345,12 @@ class CTRTrackerWidget(QWidget):
         self._value_warning.setVisible(False)
         self._currency_combo   = QComboBox()
         self._currency_combo.addItems(["AZN", "USD"])
+        self._markup_edit      = QLineEdit()
+        self._markup_edit.setPlaceholderText("(blank = the tracker's standard rate)")
+        self._markup_edit.setToolTip(
+            "The consumables mark-up of this CTR, in %, read from the file (10 means 10 %). It is what the "
+            "tracker's Consumables mark-up column uses; change it if it is not right, or leave it blank to use "
+            "the tracker's standard rate.")
 
         self._site_combo = QComboBox()
         self._site_combo.addItem("(select a location)")
@@ -286,6 +374,7 @@ class CTRTrackerWidget(QWidget):
         gl.addLayout(vrow)
         gl.addWidget(self._value_warning)
         gl.addLayout(_hdr_row("Currency:", self._currency_combo))
+        gl.addLayout(_hdr_row("Consumables mark-up %:", self._markup_edit))
         gl.addLayout(_hdr_row("Location:", self._site_combo))
         gl.addLayout(_hdr_row("Project Code:", self._project_code_edit))
         gl.addLayout(_hdr_row("Tracker Location:", self._tracker_location_combo))
@@ -385,6 +474,8 @@ class CTRTrackerWidget(QWidget):
         self._revision_edit.setText(entry.revision)
         self._desc_edit.setText(entry.description)
         self._value_edit.setText(_value_text(entry.value))
+        self._markup_edit.setText("" if entry.consumables_markup_rate is None
+                                  else _value_text(entry.consumables_markup_rate * 100))
         if entry.currency in ("AZN", "USD"):
             self._currency_combo.setCurrentText(entry.currency)
 
@@ -459,6 +550,18 @@ class CTRTrackerWidget(QWidget):
                 QMessageBox.warning(self, "Invalid value", "Value must be a number.")
                 return
 
+        markup_rate = None
+        markup_txt = self._markup_edit.text().strip().rstrip("%").strip()
+        if markup_txt:
+            try:
+                markup_rate = float(markup_txt.replace(",", ".")) / 100.0
+            except ValueError:
+                QMessageBox.warning(self, "Invalid mark-up", "The consumables mark-up must be a number (10 means 10 %).")
+                return
+            if markup_rate < 0:
+                QMessageBox.warning(self, "Invalid mark-up", "The consumables mark-up cannot be negative.")
+                return
+
         base = self._current_entry or CTREntry()
         entry = replace(
             base,
@@ -473,6 +576,7 @@ class CTRTrackerWidget(QWidget):
             project_code=self._project_code_edit.text().strip(),
             tracker_location=self._tracker_location_combo.currentText(),
             job_type=self._job_type_combo.currentText(),
+            consumables_markup_rate=markup_rate,
         )
         self._batch.append(entry)
         self._append_batch_row(entry)
@@ -492,6 +596,7 @@ class CTRTrackerWidget(QWidget):
         self._revision_edit.setText("")
         self._desc_edit.setText("")
         self._value_edit.setText("")
+        self._markup_edit.setText("")
         self._value_warning.setVisible(False)
         self._currency_combo.setCurrentIndex(0)
         self._site_combo.setCurrentIndex(0)
@@ -570,6 +675,36 @@ class CTRTrackerWidget(QWidget):
         self._retry_round = 0
         self._start_write(skip_confirm=False)
 
+    def _ask_older_revisions(self, tracker_path: str, batch: list, mode: str, backup_on: bool):
+        """For each CTR of the batch that is a new revision of one the tracker already has: which older row to
+        replace (or a new row). Returns ({batch index: row}, {batch index: that row's details}), or None when the
+        user cancels. mode "replace" never offers a new row and only asks when there is more than one older row."""
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            found = find_older_revisions(tracker_path, batch)
+        except Exception:                                  # unreadable here: the write itself reports why
+            log.exception("Looking for older revisions failed")
+            found = {}
+        finally:
+            QApplication.restoreOverrideCursor()
+        rows: dict[int, int] = {}
+        details: dict[int, dict] = {}
+        for idx, candidates in sorted(found.items()):
+            if mode == "replace" and len(candidates) == 1:
+                pick = candidates[0]
+            else:
+                dlg = _RevisionChoiceDialog(self, batch[idx], candidates, allow_new=(mode == "ask"), backup_on=backup_on)
+                accepted = dlg.exec() == QDialog.DialogCode.Accepted
+                row = dlg.choice()
+                dlg.deleteLater()
+                if not accepted:
+                    return None
+                pick = next((d for d in candidates if d["row"] == row), None)
+            if pick is not None:
+                rows[idx] = pick["row"]
+                details[idx] = pick
+        return rows, details
+
     def _start_write(self, *, skip_confirm: bool):
         tracker_path = self._tracker_edit.text().strip()
         if not tracker_path:
@@ -592,6 +727,11 @@ class CTRTrackerWidget(QWidget):
                 "new revision gets its own row in revision order (a spare row is used only "
                 "if it keeps that order, otherwise a row is inserted — this needs Excel "
                 "installed on this machine)."
+                + {"ask": " If an older revision of a CTR is already there, you are asked next whether to "
+                          "replace it or create a new row.",
+                   "replace": " If an older revision of a CTR is already there, it is replaced (you choose "
+                              "which row when there are several).",
+                   "new": ""}.get(self._older_combo.currentData(), "")
             )
             reply = QMessageBox.question(
                 self, "Write to Tracker",
@@ -601,6 +741,15 @@ class CTRTrackerWidget(QWidget):
             )
             if reply != QMessageBox.StandardButton.Yes:
                 return
+
+        replace_rows: dict[int, int] = {}
+        replaced: dict[int, dict] = {}
+        mode = self._older_combo.currentData()
+        if not skip_confirm and mode != "new":      # an automatic retry never asks again
+            chosen = self._ask_older_revisions(tracker_path, list(self._batch), mode, make_backup)
+            if chosen is None:
+                return                                # cancelled
+            replace_rows, replaced = chosen
 
         dlg = QProgressDialog(
             "Writing to the tracker workbook…",
@@ -614,8 +763,9 @@ class CTRTrackerWidget(QWidget):
         self._write_btn.setEnabled(False)
         self._add_batch_btn.setEnabled(False)
 
+        batch = list(self._batch)
         worker = _WriteWorker(
-            tracker_path, list(self._batch), make_backup, parent=self,
+            tracker_path, batch, make_backup, parent=self, replace_rows=replace_rows,
         )
         self._workers.append(worker)
 
@@ -627,7 +777,12 @@ class CTRTrackerWidget(QWidget):
             n_written, n_total = len(written), len(written) + len(skipped)
             lines = [f"Wrote {n_written} of {n_total} CTR{'s' if n_total != 1 else ''}."]
             for _idx, ctr_number, row in written:
-                lines.append(f"  • {ctr_number} → row {row}")
+                if _idx in replaced:
+                    old = replaced[_idx]
+                    lines.append(f"  • {ctr_number} → row {row} (replaced revision "
+                                 f"{old['revision'] or 'blank'} with {batch[_idx].revision or 'blank'})")
+                else:
+                    lines.append(f"  • {ctr_number} → row {row}")
             if skipped:
                 lines.append("")
                 lines.append("Skipped (still in the batch — fix and retry):")
@@ -730,9 +885,11 @@ class CTRTrackerWidget(QWidget):
         if val:
             self._tracker_edit.setText(val)
         self._backup_check.setChecked(s.value("ctr_tracker/make_backup", True, type=bool))
+        self._older_combo.setCurrentIndex(max(0, self._older_combo.findData(str(s.value("ctr_tracker/older_revision", "ask")))))
         self._refresh_batch_state()
 
     def save_settings(self) -> None:
         s = self._settings()
         s.setValue("paths/ctr_tracker_workbook", self._tracker_edit.text())
         s.setValue("ctr_tracker/make_backup", self._backup_check.isChecked())
+        s.setValue("ctr_tracker/older_revision", self._older_combo.currentData())
