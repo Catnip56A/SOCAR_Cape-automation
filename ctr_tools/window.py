@@ -3023,16 +3023,16 @@ class CTRGeneratorWidget(QWidget):
                 "equipment": equipment, "scaffold": scaffold, "scaffold_included": with_scaffold,
                 "consumables": consumables, "markup": markup, "usd_total": usd_total, "left_out": left}
 
-    def _refresh_manpower_stats(self) -> None:
-        """The Manpower list under the statistics: the matched lines, in days and a day rate in PDMS mode."""
-        tbl, src = getattr(self, "_mp_stats_tbl", None), self._req_manpower_tbl
-        if tbl is None:
-            return
-        rows = [r for r in range(src.rowCount())
-                if src.item(r, _MP_STATUS) is not None and src.item(r, _MP_STATUS).text().startswith("✓")]
-        tbl.setRowCount(len(rows))
-        total = 0.0
-        for i, r in enumerate(rows):
+    def _manpower_stat_rows(self) -> tuple[list[tuple], float]:
+        """The matched (✓) manpower lines as (description, encoding, men, quantity, uom, rate, total) texts — in days
+        and a day rate in PDMS mode — and their total. Shared by the Manpower list under the statistics and the Excel."""
+        src = self._req_manpower_tbl
+        out, total = [], 0.0
+        for r in range(src.rowCount()):
+            st = src.item(r, _MP_STATUS)
+            if st is None or not st.text().startswith("✓"):
+                continue
+
             def txt(c, _r=r):
                 it = src.item(_r, c)
                 return it.text().strip() if it else ""
@@ -3044,8 +3044,19 @@ class CTRGeneratorWidget(QWidget):
                 total += float(txt(_MP_TOTAL))
             except ValueError:
                 pass
-            for c, text in enumerate((txt(_MP_DESC), txt(_MP_ENC), txt(_MP_NUMEMP), shown(_MP_QTY), shown(_MP_UOM),
-                                      shown(_MP_RATE), txt(_MP_TOTAL))):
+            out.append((txt(_MP_DESC), txt(_MP_ENC), txt(_MP_NUMEMP), shown(_MP_QTY), shown(_MP_UOM),
+                        shown(_MP_RATE), txt(_MP_TOTAL)))
+        return out, total
+
+    def _refresh_manpower_stats(self) -> None:
+        """The Manpower list under the statistics: the matched lines, in days and a day rate in PDMS mode."""
+        tbl = getattr(self, "_mp_stats_tbl", None)
+        if tbl is None:
+            return
+        rows, total = self._manpower_stat_rows()
+        tbl.setRowCount(len(rows))
+        for i, values in enumerate(rows):
+            for c, text in enumerate(values):
                 item = QTableWidgetItem(text)
                 item.setFlags(Qt.ItemFlag.ItemIsEnabled)
                 if c >= 2:
@@ -3056,6 +3067,20 @@ class CTRGeneratorWidget(QWidget):
         sign = "₼" if self._pdms_on() else "AZN"
         self._mp_stats_lbl.setText(f"Manpower — {len(rows)} matched line(s), {sign} {total:,.2f}. Not costed from SAGE, so "
                                    "it is not part of the rechargeable / non-rechargeable figures above.")
+
+    def _totals_report_frame(self) -> pd.DataFrame:
+        """The Price totals under the statistics as a sheet: Category, Currency, Amount (AZN and USD never added)."""
+        t = self.price_totals()
+        pdms = self._pdms_on()
+        rows = [("Manpower", "AZN", t["manpower"]), ("Transport (Third Party Activities)", "AZN", t["transport"])]
+        if pdms:
+            rows.append(("Hotbed (PDMS proposal)", "AZN", t["hotbed"]))
+        rows += [("AZN CTR total", "AZN", t["azn_total"]),
+                 ("Equipment" + ("" if t["scaffold_included"] else " (scaffold not included)"), "USD",
+                  t["equipment"] + (t["scaffold"] if t["scaffold_included"] else 0.0)),
+                 ("Consumables" + (f" (with {t['markup'] * 100:g}% markup)" if t["markup"] else ""), "USD", t["consumables"]),
+                 ("USD CTR total", "USD", t["usd_total"])]
+        return pd.DataFrame(rows, columns=["Category", "Currency", "Amount"])
 
     def _refresh_price_totals(self) -> None:
         """Show price_totals() under the statistics: one block per currency."""
@@ -3138,8 +3163,13 @@ class CTRGeneratorWidget(QWidget):
         self._stats_note_lbl.setText(
             f"{unmatched} line(s) are not matched yet and are not counted." if unmatched else "")
         if items.empty:
-            panel.clear("Load a CTR Request (and let its lines match) to see its cost statistics here.",
-                        "info")
+            if self._manpower_stat_rows()[0] or self._transport_tbl.rowCount():
+                panel.clear("This request has no matched equipment or consumable lines, so there is nothing to cost "
+                            "from SAGE. Its manpower and price totals are listed below and are saved by "
+                            "“Save statistics (Excel)”.", "info")
+            else:
+                panel.clear("Load a CTR Request (and let its lines match) to see its cost statistics here.",
+                            "info")
             return
         cost_map: dict[str, float] = {}
         for key in set(items["key"]):
@@ -3378,11 +3408,13 @@ class CTRGeneratorWidget(QWidget):
         before every save so it can be changed or simply approved."""
         self._refresh_stats()
         frames = self._stats_panel.report_frames()
-        if frames is None:
+        mp_rows, _mp_total = self._manpower_stat_rows()
+        has_other = bool(mp_rows) or bool(self._transport_tbl.rowCount())
+        if frames is None and not has_other:
             QMessageBox.information(
                 self, "Nothing to save",
                 "There are no statistics yet — load the files and a CTR Request first "
-                "(the box above must show figures).")
+                "(the box above must show figures, or the request must have matched manpower or transport lines).")
             return
         settings = self._settings()
         folder = str(settings.value(self._STATS_DIR_KEY, "") or "")
@@ -3405,8 +3437,11 @@ class CTRGeneratorWidget(QWidget):
         _items, unmatched = self._stats_items()
         n_missing_rows = len({(id(c["tbl"]), c["row"]) for c in self._incomplete_cells()})
         info = pd.DataFrame([
-            ("What this is", "SAGE expected cost of the loaded CTR Request (equipment & consumables), "
-                             "split by rechargeability. Not what the client is billed."),
+            ("What this is",
+             "SAGE expected cost of the loaded CTR Request (equipment & consumables), split by rechargeability. "
+             "Not what the client is billed." if frames is not None else
+             "The loaded CTR Request has no equipment or consumable lines to cost from SAGE, so this file holds "
+             "its manpower and its price totals only."),
             ("Job ref", job),
             ("Saved", f"{now:%Y-%m-%d %H:%M}"),
             ("CTR Request file", self._combined_db_edit.text().strip()),
@@ -3429,9 +3464,13 @@ class CTRGeneratorWidget(QWidget):
             from io import BytesIO
             buf = BytesIO()
             with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-                sheets = [(frames[0], "Statistics"), (frames[1], "Statistics Items")]
+                sheets = [(frames[0], "Statistics"), (frames[1], "Statistics Items")] if frames is not None else []
                 if pframes is not None:
                     sheets += [(pframes[0], "Price Statistics"), (pframes[1], "Price Items")]
+                if mp_rows:
+                    sheets.append((pd.DataFrame(mp_rows, columns=[
+                        "Description", "Encoding", "Men", "Quantity", "UOM", "Rate", "Total AZN"]), "Manpower"))
+                sheets.append((self._totals_report_frame(), "Price Totals"))
                 for df, name in (*sheets, (info, "Info")):
                     df.to_excel(writer, index=False, sheet_name=name)
                     ws = writer.sheets[name]
@@ -3787,6 +3826,7 @@ class CTRGeneratorWidget(QWidget):
         self._pdms_kind_combo.setToolTip(
             "Short or long proposal from the same request: the short one is made from the PDMS Template (short), "
             "the long one from the PDMS Template (long). Only the chosen one has to be selected.")
+        self._pdms_kind_combo.setVisible(False)          # shown in PDMS mode only (see _set_pdms_mode)
         _pdms_line = QHBoxLayout()
         _pdms_line.addWidget(self._pdms_check)
         _pdms_line.addWidget(self._pdms_kind_combo)
@@ -4091,7 +4131,27 @@ class CTRGeneratorWidget(QWidget):
     def restore_settings(self) -> None:
         """Load last-used paths from QSettings. Call after the widget is shown."""
         s = self._settings()
-        _edits = {
+        _edits = self._path_edits()
+        self._unavailable_paths = {}
+        for key, edit in _edits.items():
+            val = s.value(f"paths/{key}", "")
+            # A remembered path that is not on THIS PC (settings or a preset that came from another
+            # machine) is not shown: the box stays empty. It stays remembered, though (see _save_paths): a
+            # drive that is not connected today must not make the app forget the file for good.
+            if val and (Path(val).is_dir() if key == "output_dir" else Path(val).is_file()):
+                edit.setText(val)
+            elif val:
+                self._unavailable_paths[key] = val
+        for key, edit in self._pdms_remembered().items():
+            val = s.value(f"pdms/{key}", "")
+            if val:
+                edit.setText(val)
+        self._pdms_kind_combo.setCurrentIndex(1 if str(s.value("pdms/kind", "short")) == "long" else 0)
+        self._pdms_check.setChecked(str(s.value("pdms/enabled", "false")).lower() == "true")
+        self._hotbed_incl_chk.setChecked(str(s.value(self.KEY_HOTBED_INCLUDE, "true")).lower() == "true")
+
+    def _path_edits(self) -> dict:
+        return {
             "azn_template":   self._azn_tpl_edit,
             "usd_template":   self._usd_tpl_edit,
             "pdms_template":  self._pdms_tpl_edit,
@@ -4102,36 +4162,27 @@ class CTRGeneratorWidget(QWidget):
             "combined_db":    self._combined_db_edit,
             "output_dir":     self._out_dir_edit,
         }
-        for key, edit in _edits.items():
-            val = s.value(f"paths/{key}", "")
-            # A remembered path that is not on THIS PC (settings or a preset that came from another
-            # machine) is not shown: the box stays empty.
-            if val and (Path(val).is_dir() if key == "output_dir" else Path(val).is_file()):
-                edit.setText(val)
-        for key, edit in self._pdms_remembered().items():
-            val = s.value(f"pdms/{key}", "")
-            if val:
-                edit.setText(val)
-        self._pdms_kind_combo.setCurrentIndex(1 if str(s.value("pdms/kind", "short")) == "long" else 0)
-        self._pdms_check.setChecked(str(s.value("pdms/enabled", "false")).lower() == "true")
-        self._hotbed_incl_chk.setChecked(str(s.value(self.KEY_HOTBED_INCLUDE, "true")).lower() == "true")
+
+    def _save_paths(self) -> None:
+        """Remember the file / folder boxes. An empty box whose remembered path was only not shown (the file is not
+        on this PC right now) keeps that path; a box the user has filled in or changed saves what it holds."""
+        s = self._settings()
+        unavailable = getattr(self, "_unavailable_paths", {})
+        for key, edit in self._path_edits().items():
+            text = edit.text()
+            if not text and key in unavailable:
+                continue                                  # not shown today, not forgotten
+            unavailable.pop(key, None)
+            s.setValue(f"paths/{key}", text)
 
     def save_settings(self) -> None:
         """Persist current paths to QSettings. Call from the parent closeEvent."""
         s = self._settings()
-        s.setValue("paths/azn_template",  self._azn_tpl_edit.text())
-        s.setValue("paths/usd_template",  self._usd_tpl_edit.text())
-        s.setValue("paths/pdms_template", self._pdms_tpl_edit.text())
-        s.setValue("paths/pdms_template_long", self._pdms_tpl_long_edit.text())
+        self._save_paths()
         s.setValue("pdms/kind", self._pdms_kind())
         for key, edit in self._pdms_remembered().items():
             s.setValue(f"pdms/{key}", edit.text())
         s.setValue("pdms/enabled", self._pdms_on())
-        s.setValue("paths/azn_pricebook", self._azn_pb_edit.text())
-        s.setValue("paths/sage_export",   self._sage_edit.text())
-        s.setValue("paths/usd_pricebook", self._usd_pb_edit.text())
-        s.setValue("paths/combined_db",   self._combined_db_edit.text())
-        s.setValue("paths/output_dir",    self._out_dir_edit.text())
 
     # ── Presets ───────────────────────────────────────────────────────────────
 
@@ -4663,6 +4714,7 @@ class CTRGeneratorWidget(QWidget):
         self._pdms_tpl_edit.setEnabled(on)
         self._pdms_tpl_long_edit.setEnabled(on)
         self._pdms_kind_combo.setEnabled(on)
+        self._pdms_kind_combo.setVisible(on)
         for w in self._hotbed_widgets:
             w.setVisible(on)
         self._fx_group.setVisible(on)
@@ -4997,6 +5049,7 @@ class CTRGeneratorWidget(QWidget):
                 "Loaded for matching (no rows added to the CTR tables): "
                 + "; ".join(self._load_status)
             )
+        self._save_paths()                       # remembered now, not only at close: a crash must not lose them
         self.files_loaded.emit()                 # e.g. the MR vs CTR statistics recalculate from the fresh tables
 
     def _prune_workers(self) -> None:
@@ -5045,12 +5098,10 @@ class CTRGeneratorWidget(QWidget):
         self._comments_edit.setText(data.get("comments", ""))
         # PDMS proposal: the requester is the addressee. Written even when blank, like the comments.
         self._attention_edit.setText(attention_from_requester(data.get("requester", "")))
-        commencement = data.get("commencement_date")
-        if commencement:
-            try:
-                self._date_edit.setText(commencement.strftime("%Y-%m-%d"))
-            except AttributeError:
-                self._date_edit.setText(str(commencement))
+        # The CTR's Date is the day it is made (today, like the PDMS Letter date), not the request's estimated
+        # commencement date. Set again for every request loaded, so an app left open overnight does not keep
+        # yesterday's date; still editable afterwards.
+        self._date_edit.setText(_date.today().strftime("%Y-%m-%d"))
 
         self._clear_picks()
         for tbl in self._reload_tables().values():

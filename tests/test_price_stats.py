@@ -498,7 +498,8 @@ def test_the_generators_statistics_excel_has_the_price_sheets_too():
     files = sorted(out_dir.glob("*.xlsx"))
     assert files, "no statistics file written"
     wb = openpyxl.load_workbook(files[-1], data_only=True)
-    assert wb.sheetnames == ["Statistics", "Statistics Items", "Price Statistics", "Price Items", "Info"]
+    assert wb.sheetnames == ["Statistics", "Statistics Items", "Price Statistics", "Price Items",
+                             "Manpower", "Price Totals", "Info"]
     info = {r[0].value: r[1].value for r in wb["Info"].iter_rows(min_row=2)}
     assert "Price sheets" in info and "markup" in info["Price sheets"]
     head = [c.value for c in wb["Price Items"][1]]

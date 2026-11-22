@@ -42,8 +42,10 @@ def test_the_selector_and_both_pickers_are_only_enabled_in_pdms_mode():
     w = H.generator()
     w._pdms_check.setChecked(False)
     assert not w._pdms_kind_combo.isEnabled() and not w._pdms_tpl_edit.isEnabled() and not w._pdms_tpl_long_edit.isEnabled()
+    assert w._pdms_kind_combo.isHidden()                       # the Short / Long selector is only there in PDMS mode
     w._pdms_check.setChecked(True)
     try:
+        assert not w._pdms_kind_combo.isHidden()
         assert w._pdms_kind_combo.isEnabled() and w._pdms_tpl_edit.isEnabled() and w._pdms_tpl_long_edit.isEnabled()
     finally:
         w._pdms_check.setChecked(False)

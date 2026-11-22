@@ -47,6 +47,8 @@ See [USER_GUIDE.md](USER_GUIDE.md) for full step-by-step usage of all three tool
 - Batches up to 10 CTRs before writing, with a per-CTR editable review table
 - Writes each CTR into its pre-created row in the master tracker workbook, matched by CTR number and Location — rows are never created or shifted on the normal path
 - Revision handling: the same CTR + currency + revision overwrites its row in place; a different revision gets its own row in ascending revision order — a spare row sharing that CTR number if it keeps that order, otherwise a new one inserted via Excel automation
+- Cost breakdown in USD whatever the CTR's currency (AZN figures converted at the tracker's rate); scaffold in its own column; the figures of an earlier CTR are cleared from the row it is written into
+- Companies with one fixed Project Code are edited in Settings
 - Optional timestamped backup of the tracker workbook before every write
 
 ---
