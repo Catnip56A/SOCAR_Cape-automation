@@ -417,8 +417,8 @@ def collect_storage(win) -> list[dict]:
         src("Combined DB (names + request)", "_combined_db_edit", "_names_db_df")
         src("AZN Template", "_azn_tpl_edit")
         src("USD Template", "_usd_tpl_edit")
-        src("PDMS Template, short (shared by the department, not in git)", "_pdms_tpl_edit")
-        src("PDMS Template, long (shared by the department, not in git)", "_pdms_tpl_long_edit")
+        src("Word Proposal Template, short (shared by the department, not in git)", "_word_proposal_tpl_edit")
+        src("Word Proposal Template, long (shared by the department, not in git)", "_word_proposal_tpl_long_edit")
         src("Output folder", "_out_dir_edit", kind="dir")
 
     # CTR Tracker
@@ -1226,7 +1226,7 @@ class CbarTab(QWidget):
                                "Orange dots = days a document used that CBAR rate. "
                                "Hover a dot for details; click it to show its documents below.")
         else:
-            self._note.setText(f"No {code} rate has been fetched yet — press Reload in the PDMS header's CBAR rates.")
+            self._note.setText(f"No {code} rate has been fetched yet — press Reload in the Word proposal header's CBAR rates.")
 
     def _draw(self, hist, usage):
         chart = QChart()
@@ -1612,7 +1612,7 @@ def build_snapshot(win, dock=None) -> str:
         gen = getattr(win, "_ctr_gen", None)
         fx = getattr(gen, "_fx", None) if gen is not None else None
         if fx:
-            out.append("PDMS proposal mode: " + ("on" if gen._pdms_on() else "off")
+            out.append("Word proposal mode: " + ("on" if gen._word_proposal_on() else "off")
                        + f", mark-up {gen._markup_spin.value():g} %")
             out.append("Rates in the header (what a proposal would use):")
             for code, d in fx.items():

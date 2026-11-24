@@ -23,7 +23,7 @@ for _env, _dir in (("XDG_CONFIG_HOME", "cfg"), ("XDG_DATA_HOME", "data"),
     (SANDBOX / _dir).mkdir()
     os.environ[_env] = str(SANDBOX / _dir)
 os.environ["QT_QPA_PLATFORM"] = "offscreen"
-os.environ["CTR_PDF_ENGINE"] = "libreoffice"     # the PDMS PDF in tests never starts the real Word (see pdf_exporter)
+os.environ["CTR_PDF_ENGINE"] = "libreoffice"     # the Word proposal PDF in tests never starts the real Word (see pdf_exporter)
 sys.path.insert(0, str(ROOT))
 atexit.register(shutil.rmtree, SANDBOX, ignore_errors=True)
 print(f"[tests] sandbox (all writes go here): {SANDBOX}", file=sys.stderr)
@@ -133,13 +133,13 @@ _GEN: "W.CTRGeneratorWidget | None" = None
 
 def load_request(w) -> None:
     """(Re)load the test CTR Request into `w` — clears the tables first."""
-    w._pdms_check.setChecked(False)         # a test that ticked "PDMS proposal" must not leak into the next
+    w._word_proposal_check.setChecked(False)         # a test that ticked "Word proposal" must not leak into the next
     w._hotbed_days_edit.setText("")
-    w._hotbed_rate_edit.setText(f"{float(W.pdms_defaults()['hotbed_rate']):g}")
+    w._hotbed_rate_edit.setText(f"{float(W.word_proposal_defaults()['hotbed_rate']):g}")
     w._hotbed_incl_chk.setChecked(True)
-    w._hotbed_cur_combo.setCurrentText(W.pdms_defaults()["category_currencies"]["manpower"])
+    w._hotbed_cur_combo.setCurrentText(W.word_proposal_defaults()["category_currencies"]["manpower"])
     for key, combo in w._cat_combos.items():
-        combo.setCurrentText(W.pdms_defaults()["category_currencies"][key])
+        combo.setCurrentText(W.word_proposal_defaults()["category_currencies"][key])
     for t in (w._req_manpower_tbl, w._req_equip_tbl, w._req_cons_tbl, w._transport_tbl):
         t.setRowCount(0)
     w._stats_panel._manual.clear()

@@ -1,4 +1,4 @@
-"""PDMS mode: the Hotbed row's "Reload standard" button puts back the standard rate and currency from
+"""Word proposal mode: the Hotbed row's "Reload standard" button puts back the standard rate and currency from
 template_config.json (read again at that moment), never touches the days, and asks before it overwrites."""
 import json
 
@@ -16,24 +16,24 @@ def _hotbed(w, rate, cur, days):
 
 
 def _std():
-    d = W.pdms_defaults()
+    d = W.word_proposal_defaults()
     return f"{float(d['hotbed_rate']):g}", d["category_currencies"].get("hotbed", "AZN")
 
 
-def test_the_button_is_on_the_hotbed_row_in_pdms_mode_only():
+def test_the_button_is_on_the_hotbed_row_in_word_proposal_mode_only():
     w = H.generator()
     w.show()
     assert not w._hotbed_reload_btn.isVisibleTo(w)
-    w._pdms_check.setChecked(True)
+    w._word_proposal_check.setChecked(True)
     assert w._hotbed_reload_btn.isVisibleTo(w) and "days are not touched" in w._hotbed_reload_btn.toolTip()
-    w._pdms_check.setChecked(False)
+    w._word_proposal_check.setChecked(False)
     assert not w._hotbed_reload_btn.isVisibleTo(w)
 
 
 def test_it_puts_back_the_standard_rate_and_currency_after_a_question_and_keeps_the_days():
     w = H.generator()
     w.show()
-    w._pdms_check.setChecked(True)
+    w._word_proposal_check.setChecked(True)
     rate, cur = _std()
     _hotbed(w, "100", "USD", "5")
     helper = w._hotbed_rate_edit._formula_helper
@@ -52,48 +52,48 @@ def test_it_puts_back_the_standard_rate_and_currency_after_a_question_and_keeps_
     assert (w._hotbed_rate_edit.text(), w._hotbed_cur_combo.currentText(), w._hotbed_days_edit.text()) == (rate, cur, "5")
     assert helper.formula is None
     assert "days unchanged" in w._ctr_req_status.text()
-    w._pdms_check.setChecked(False)
+    w._word_proposal_check.setChecked(False)
 
 
 def test_when_it_is_already_the_standard_nothing_is_asked():
     w = H.generator()
     w.show()
-    w._pdms_check.setChecked(True)
+    w._word_proposal_check.setChecked(True)
     rate, cur = _std()
     _hotbed(w, rate, cur, "7")
     H.msgs.clear()
     w._reload_hotbed_standard()
     assert not [m for m in H.msgs if m[0] == "question"] and "already the standard" in w._ctr_req_status.text()
     assert w._hotbed_days_edit.text() == "7"
-    w._pdms_check.setChecked(False)
+    w._word_proposal_check.setChecked(False)
 
 
 def test_an_edit_of_the_config_file_applies_without_restarting_and_a_broken_file_changes_nothing():
     w = H.generator()
     w.show()
-    w._pdms_check.setChecked(True)
-    old_path, old_pdms = C._CONFIG_PATH, dict(C.CFG["pdms"])
+    w._word_proposal_check.setChecked(True)
+    old_path, old_word_proposal = C._CONFIG_PATH, dict(C.CFG["word_proposal"])
     sandbox = H.SANDBOX / "template_config_hotbed.json"
     try:
         data = json.loads(old_path.read_text(encoding="utf-8"))
-        data["pdms"]["hotbed_rate"] = 61.5                                   # the user edits the file ...
+        data["word_proposal"]["hotbed_rate"] = 61.5                                   # the user edits the file ...
         sandbox.write_text(json.dumps(data), encoding="utf-8")
         C._CONFIG_PATH = sandbox
         _hotbed(w, "100", "USD", "")
         w._reload_hotbed_standard()                                          # ... and the button reads it again (the dialog answers Yes)
-        assert w._hotbed_rate_edit.text() == "61.5" and C.CFG["pdms"]["hotbed_rate"] == 61.5
+        assert w._hotbed_rate_edit.text() == "61.5" and C.CFG["word_proposal"]["hotbed_rate"] == 61.5
         sandbox.write_text("{ this is not json", encoding="utf-8")           # a broken file: the values stay, a warning says why
         _hotbed(w, "100", "USD", "")
         H.msgs.clear()
         w._reload_hotbed_standard()
         assert w._hotbed_rate_edit.text() == "100" and w._hotbed_cur_combo.currentText() == "USD"
-        assert C.CFG["pdms"]["hotbed_rate"] == 61.5                          # CFG untouched by the failed read
+        assert C.CFG["word_proposal"]["hotbed_rate"] == 61.5                          # CFG untouched by the failed read
         assert any(m[0] == "warning" and "could not be read" in str(m[-1]) and "not changed" in str(m[-1]) for m in H.msgs), H.msgs
     finally:
         C._CONFIG_PATH = old_path
-        C.CFG["pdms"] = old_pdms
-        w._pdms_check.setChecked(False)
-    assert C.CFG["pdms"]["hotbed_rate"] == old_pdms["hotbed_rate"]
+        C.CFG["word_proposal"] = old_word_proposal
+        w._word_proposal_check.setChecked(False)
+    assert C.CFG["word_proposal"]["hotbed_rate"] == old_word_proposal["hotbed_rate"]
 
 
 def test_the_include_tick_is_remembered_between_runs_and_nothing_else_of_the_hotbed():
@@ -105,7 +105,7 @@ def test_the_include_tick_is_remembered_between_runs_and_nothing_else_of_the_hot
         fresh = H._new_generator()                         # a new window = the next run of the app
         fresh.restore_settings()
         assert not fresh._hotbed_incl_chk.isChecked()
-        assert fresh._hotbed_rate_edit.text() == f"{float(W.pdms_defaults()['hotbed_rate']):g}"
+        assert fresh._hotbed_rate_edit.text() == f"{float(W.word_proposal_defaults()['hotbed_rate']):g}"
         assert fresh._hotbed_days_edit.text() == ""
         w._hotbed_incl_chk.setChecked(True)
         again = H._new_generator()

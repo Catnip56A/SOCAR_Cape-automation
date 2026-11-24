@@ -1,6 +1,6 @@
 """A CTR Request with manpower (and transport) but no equipment or consumables: the statistics box says so, and
 Save statistics (Excel) writes the manpower and the price totals instead of refusing. The normal CTR Date is today
-after a request is loaded (the PDMS Letter date's rule), not the request's commencement date. Sandbox only."""
+after a request is loaded (the proposal Letter date's rule), not the request's commencement date. Sandbox only."""
 import datetime
 import openpyxl
 

@@ -1,4 +1,4 @@
-"""PDMS proposal (Word) in place of a CTR: the parser reads the items table, Compare matches it to an MR by
+"""Word proposal in place of a CTR: the parser reads the items table, Compare matches it to an MR by
 Description, and the Rate / Rechargeable check stays quiet for it. Reads the sample files only."""
 import pandas as pd
 
@@ -6,7 +6,7 @@ import harness as H
 from comparator.proposal_parser import _number, parse_proposal
 from comparator.sheet_parser import parse_workbook
 
-D = H.ROOT / "TEST_Files" / "MRvsCTR" / "PDMS MR vs CTR"
+D = H.ROOT / "TEST_Files" / "MRvsCTR" / "Word Proposal MR vs CTR"
 
 
 def _files():
@@ -14,7 +14,7 @@ def _files():
     docx = next((f for f in sorted(D.glob("*.docx")) if not f.name.startswith("~$")), None)
     xlsm = next((f for f in sorted(D.glob("*.xlsm")) if not f.name.startswith("~$")), None)
     if not docx or not xlsm:
-        raise H.Skip("PDMS sample files missing")
+        raise H.Skip("Word proposal sample files missing")
     return docx, xlsm
 
 

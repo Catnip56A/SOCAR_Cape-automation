@@ -1,5 +1,5 @@
 """Transport lines share one mark-up: editing it on a line asks whether the others change too; a line can be an
-exception (fuel at 0 %) and is then left alone; the notes of the PDMS proposal quote the shared value."""
+exception (fuel at 0 %) and is then left alone; the notes of the Word proposal quote the shared value."""
 import harness as H
 from harness import W
 from PySide6.QtWidgets import QMessageBox

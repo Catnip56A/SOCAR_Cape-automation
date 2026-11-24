@@ -1,5 +1,5 @@
 """
-ctr_tools/pdms_notes.py — the notes of the PDMS proposal (Word): the list, its places, the placeholders.
+ctr_tools/word_proposal_notes.py — the notes of the Word proposal: the list, its places, the placeholders.
 
 A note is a short text such as "Prices Validity - all prices are valid for {validity_days} days." It can
 appear in one, several or no *places* — a place is a section of the proposal that has a tag in the
@@ -12,10 +12,10 @@ chooses (location, working days, hours, coefficients, mark-ups, validity, curren
 user types is remembered, so it can be chosen again; the closest remembered values to what is being
 typed are offered first (`suggest`), and one can be forgotten (`forget`).
 
-Stored as JSON in `pdms_notes.json` in the per-user data folder (see paths.py), like the other saved
+Stored as JSON in `word_proposal_notes.json` in the per-user data folder (see paths.py), like the other saved
 lists. Without the file the built-in standard notes are used ("Reset" = delete the file).
 
-Nothing here touches Word or Qt: builder_pdms.py writes the paragraphs, the window shows the list.
+Nothing here touches Word or Qt: builder_word_proposal.py writes the paragraphs, the window shows the list.
 
 File layout:
     {"places": {key: label},
@@ -39,7 +39,7 @@ from ctr_tools.paths import user_data_dir
 
 log = logging.getLogger(__name__)
 
-_NOTES_PATH = user_data_dir() / "pdms_notes.json"
+_NOTES_PATH = user_data_dir() / "word_proposal_notes.json"
 
 KINDS = ("numbered", "bullet")          # a numbered item (3.1) or a "* " line under the one before; an older "header" counts as numbered
 MAX_REMEMBERED = 40                                # remembered values per placeholder
@@ -136,7 +136,7 @@ _HINTS = {"price-invoice": "ONLY REIMBURSABLE PROPOSAL"}
 
 
 def default_notes() -> dict:
-    """The standard texts of the PDMS proposal, as they were fixed in the template."""
+    """The standard texts of the Word proposal, as they were fixed in the template."""
     notes = [
         _note("sched-head", "{location} Work Schedule:", "numbered", "schedule", 0),
         _note("sched-days", "Normal Working schedule for {location} is based on {working_days} with {hours} working hours.",

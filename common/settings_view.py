@@ -695,11 +695,11 @@ class SettingsTab(QWidget):
                             ("Export…", self._export_keywords, "Write the list to a file."),
                         ]))
         self._saved_row(g2, "config", "Template config",
-                        "The template layout positions, the PDMS defaults (customer, signer, Hotbed rate …) and the "
+                        "The template layout positions, the Word proposal defaults (customer, signer, Hotbed rate …) and the "
                         "transport rates (template_config.json). Your copy in the data folder is what the app reads — "
                         "in the installed program too. A file with a JSON error is ignored (the shipped one is used). "
                         "Template positions apply at the next start; the Hotbed's “Reload standard” button re-reads the "
-                        "PDMS values at once. Merge shipped lists what differs from the shipped file and takes the settings you tick "
+                        "Word proposal values at once. Merge shipped lists what differs from the shipped file and takes the settings you tick "
                         "(new ones are ticked; a value you changed is not, and a warning comes before it is replaced); "
                         "Reset replaces your whole copy with the shipped file.",
                         self._open_config, self._reset_config,
@@ -746,17 +746,17 @@ class SettingsTab(QWidget):
             lambda on: self._gen._settings().setValue(self._gen.KEY_WARN_EMPTY_MANPOWER, bool(on)))
         gg.addWidget(self._warn_mp_chk)
         self._warn_notes_chk = QCheckBox("Remind me to look at the proposal's notes before generating")
-        self._warn_notes_chk.setToolTip("On: in PDMS mode, Generate asks Continue / Cancel while the Notes button is still red. "
+        self._warn_notes_chk.setToolTip("On: in Word proposal mode, Generate asks Continue / Cancel while the Notes button is still red. "
                                         "Off: it generates without asking.")
         self._warn_notes_chk.toggled.connect(
             lambda on: self._gen._settings().setValue(self._gen.KEY_WARN_UNSEEN_NOTES, bool(on)))
         gg.addWidget(self._warn_notes_chk)
         lay.addWidget(grp_g)
 
-        # ── CBAR currencies (PDMS proposal) ──────────────────────────────────
-        grp4 = QGroupBox("CBAR currencies (PDMS proposal)")
+        # ── CBAR currencies (Word proposal) ──────────────────────────────────
+        grp4 = QGroupBox("CBAR currencies (Word proposal)")
         g4 = QVBoxLayout(grp4)
-        hint4 = QLabel("The currencies a PDMS proposal can use. Each one that is ticked gets its own "
+        hint4 = QLabel("The currencies a Word proposal can use. Each one that is ticked gets its own "
                        "rate line (and Reload button) under CBAR rates in the CTR header, and is offered "
                        "in the price cells' currency drop-downs. AZN is always on (rate 1). USD, EUR and GBP are on "
                        "unless you change it.")
@@ -1364,9 +1364,9 @@ class SettingsTab(QWidget):
             QMessageBox.information(self, "Template config", f"The folder is:\n\n{folder}")
 
     def _after_config_change(self) -> None:
-        for reload in (_config.reload_pdms_config, _config.reload_tracker_companies, _config.reload_po_companies):
+        for reload in (_config.reload_word_proposal_config, _config.reload_tracker_companies, _config.reload_po_companies):
             try:
-                reload()                 # the PDMS values and the company codes apply at once; the template positions at the next start
+                reload()                 # the Word proposal values and the company codes apply at once; the template positions at the next start
             except ValueError:
                 pass
         self.refresh()

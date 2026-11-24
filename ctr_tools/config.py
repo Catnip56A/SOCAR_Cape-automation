@@ -625,8 +625,8 @@ def load_config() -> dict:
 CFG: dict = load_config()
 
 
-def reload_pdms_config() -> dict:
-    """Re-read the "pdms" block of template_config.json into CFG (an edit of the file applies without restarting).
+def reload_word_proposal_config() -> dict:
+    """Re-read the "word_proposal" block of template_config.json into CFG (an edit of the file applies without restarting).
     Only that block changes; the template positions stay as loaded. Raises ValueError when the file cannot be read,
     and CFG is then left exactly as it was."""
     try:
@@ -634,10 +634,10 @@ def reload_pdms_config() -> dict:
             data = json.load(fh)
     except Exception as exc:
         raise ValueError(f"{_CONFIG_PATH.name} could not be read ({exc})") from exc
-    if not isinstance(data, dict) or not isinstance(data.get("pdms", {}), dict):
-        raise ValueError(f"{_CONFIG_PATH.name} has no usable “pdms” section")
-    CFG["pdms"] = {**_DEFAULTS.get("pdms", {}), **data.get("pdms", {})}
-    return CFG["pdms"]
+    if not isinstance(data, dict) or not isinstance(data.get("word_proposal", {}), dict):
+        raise ValueError(f"{_CONFIG_PATH.name} has no usable “word_proposal” section")
+    CFG["word_proposal"] = {**_DEFAULTS.get("word_proposal", {}), **data.get("word_proposal", {})}
+    return CFG["word_proposal"]
 
 
 # ── the CTR Tracker's company -> Project Code list (edited in Settings) ──────────────────────────────────────

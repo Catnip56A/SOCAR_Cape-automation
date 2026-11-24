@@ -1,4 +1,4 @@
-"""The "PDMS overview" sheet of the statistics workbook: same figures as the Word proposal, with the arithmetic in cells."""
+"""The "Word proposal overview" sheet of the statistics workbook: same figures as the Word proposal, with the arithmetic in cells."""
 import shutil
 import subprocess
 
@@ -6,8 +6,8 @@ import openpyxl
 
 import harness as H
 import ctr_tools.cbar_rates as C
-from ctr_tools import builder_pdms as B
-from ctr_tools.pdms_overview import SHEET_NAME, add_overview_sheet
+from ctr_tools import builder_word_proposal as B
+from ctr_tools.word_proposal_overview import SHEET_NAME, add_overview_sheet
 
 MAN = [{"comment": "Day Shift", "num_employees": 1, "description": "PA Level Foreman-National", "quantity": 720,
         "uom": "Hours", "rate_azn": 37.14, "nationality": "National", "hours_per_shift": 12, "encoding": "NS-NAT-OFF-12"},
@@ -26,7 +26,7 @@ RATES = {"USD": 1.7, "GBP": 2.25, "EUR": 1.98}
 
 
 def _sheet(hotbed=None, equip=EQ, cons=CO, tr=TR):
-    data = B.compute_pdms(MAN, [], equip, cons, HDR, RATES, 0.1, tr, hotbed, None)
+    data = B.compute_word_proposal(MAN, [], equip, cons, HDR, RATES, 0.1, tr, hotbed, None)
     wb = openpyxl.Workbook()
     wb.active.title = "Statistics"
     addr = add_overview_sheet(wb, data, HDR, {"USD": "2026-10-26", "GBP": None, "EUR": "2026-10-26"})
@@ -49,7 +49,7 @@ def _recalculated(wb, name):
 
 def test_the_sheet_is_first_and_laid_out_like_the_request_sheet():
     wb, data, addr = _sheet(hotbed={"rate": 59.0, "days": 5, "currency": "AZN"})
-    assert wb.sheetnames[0] == SHEET_NAME == "PDMS overview"
+    assert wb.sheetnames[0] == SHEET_NAME == "Word proposal overview"
     ws = wb[SHEET_NAME]
     texts = {c.value for r in ws.iter_rows() for c in r if isinstance(c.value, str)}
     for must in ("Table 1 — Labour rates", "Table 2 — Equipment rates", "Table 3 — Consumables costs",
@@ -70,7 +70,7 @@ def test_the_sheet_is_first_and_laid_out_like_the_request_sheet():
 
 
 def test_each_rate_shows_when_it_was_last_checked_or_changed_and_by_what():
-    data = B.compute_pdms(MAN, [], EQ, CO, HDR, RATES, 0.1, TR, None, None)
+    data = B.compute_word_proposal(MAN, [], EQ, CO, HDR, RATES, 0.1, TR, None, None)
     wb = openpyxl.Workbook()
     add_overview_sheet(wb, data, HDR, {
         "USD": {"day": "2026-10-26", "stamp": "2026-10-27 09:15", "action": "Fetched from CBAR"},
@@ -106,7 +106,7 @@ def test_stock_codes_and_the_encoding_are_shown_next_to_their_lines():
     assert list(heads)[:2] == ["Material Description", "Stock code"]
     assert [ws.cell(row=r0 + 2 + i, column=heads["Stock code"]).value for i in range(2)] == ["PP8201000009", "PP8201000010"]
     # the Word proposal is client-facing and stays as in the sample: no code column there
-    d = B.compute_pdms(MAN, [], EQ, CO, HDR, RATES, 0.1, TR, None, None)
+    d = B.compute_word_proposal(MAN, [], EQ, CO, HDR, RATES, 0.1, TR, None, None)
     assert d["equipment"][0]["code"] == "SCAF-CONV" and d["consumables"][1]["code"] == "PP8201000010"
     assert d["labour"][0]["encoding"] == "NS-NAT-OFF-12"
 
@@ -151,7 +151,7 @@ def test_changing_a_rate_changes_the_totals_in_the_sheet():
     assert abs(calc[SHEET_NAME][addr["labour_total"]].value - expected) < 0.005
 
 
-def test_statistics_export_in_pdms_mode_has_the_sheet_first():
+def test_statistics_export_in_word_proposal_mode_has_the_sheet_first():
     from PySide6.QtWidgets import QMessageBox
     from ctr_tools import window as W
     _fresh = H.SANDBOX / "ov_export"
@@ -159,7 +159,7 @@ def test_statistics_export_in_pdms_mode_has_the_sheet_first():
     C._CURRENCIES_PATH = H.SANDBOX / "ov_currencies.json"
     w = H.generator()
     w.show()
-    w._pdms_check.setChecked(True)
+    w._word_proposal_check.setChecked(True)
     w._prp_edit.setText("PRP-26-321")
     H.resolve_disparities(w)
 
@@ -179,25 +179,25 @@ def test_statistics_export_in_pdms_mode_has_the_sheet_first():
     files = sorted(_fresh.glob("CTR_Statistics_*.xlsx"))
     assert files, H.msgs
     wb = openpyxl.load_workbook(files[-1])
-    assert wb.sheetnames[0] == "PDMS overview" and "Statistics" in wb.sheetnames and "Info" in wb.sheetnames
-    assert wb["PDMS overview"]["B1"].value == "PDMS overview — PRP-26-321"
-    ov = wb["PDMS overview"]
+    assert wb.sheetnames[0] == "Word proposal overview" and "Statistics" in wb.sheetnames and "Info" in wb.sheetnames
+    assert wb["Word proposal overview"]["B1"].value == "Word proposal overview — PRP-26-321"
+    ov = wb["Word proposal overview"]
     assert ov["K4"].value == "Last checked / changed" and ov["L4"].value == "Last action"
     assert all(ov.cell(row=r, column=12).value for r in range(5, 9))                  # every rate says what last happened to it
     # the normal CTR keeps its workbook as before (the file name has the minute in it: same minute = same file)
-    w._pdms_check.setChecked(False)
+    w._word_proposal_check.setChecked(False)
     W._SaveLocationDialog = _Dialog
     try:
         w._save_stats_excel()
     finally:
         W._SaveLocationDialog = real
     names = openpyxl.load_workbook(sorted(_fresh.glob("CTR_Statistics_*.xlsx"))[-1]).sheetnames
-    assert "PDMS overview" not in names and names[0] == "Statistics"
+    assert "Word proposal overview" not in names and names[0] == "Statistics"
 
 
 def test_days_that_do_not_divide_evenly_still_give_the_same_cents_as_the_word_proposal():
     rows = [{**MAN[0], "quantity": q, "num_employees": 1 + (q % 3)} for q in (100, 101, 137, 250, 333, 41)]
-    data = B.compute_pdms(rows, [], [], [], HDR, RATES, 0.1, [], None, None)
+    data = B.compute_word_proposal(rows, [], [], [], HDR, RATES, 0.1, [], None, None)
     wb = openpyxl.Workbook()
     addr = add_overview_sheet(wb, data, HDR, {})
     calc = _recalculated(wb, "uneven")
@@ -217,7 +217,7 @@ def test_a_failing_overview_sheet_does_not_lose_the_normal_statistics_sheets():
     C._CURRENCIES_PATH = H.SANDBOX / "ovf_currencies.json"
     w = H.generator()
     w.show()
-    w._pdms_check.setChecked(True)
+    w._word_proposal_check.setChecked(True)
     w._prp_edit.setText("PRP-26-322")
     H.resolve_disparities(w)
     eq = w._req_equip_tbl
@@ -243,14 +243,14 @@ def test_a_failing_overview_sheet_does_not_lose_the_normal_statistics_sheets():
     saved = [m for m in H.msgs if m[0] == "information" and "Statistics saved" in str(m[-1])]
     assert saved and "NOT added" in str(saved[-1][-1]) and "No CBAR rate for GBP" in str(saved[-1][-1])
     names = openpyxl.load_workbook(sorted(out.glob("CTR_Statistics_*.xlsx"))[-1]).sheetnames
-    assert "PDMS overview" not in names and names[0] == "Statistics" and "Info" in names   # the rest is there
+    assert "Word proposal overview" not in names and names[0] == "Statistics" and "Info" in names   # the rest is there
 
 
 def test_the_header_block_lists_the_word_rows_and_the_ctr_header_fields_and_the_tables_follow_it():
     hdr = {**HDR, "client": "SOCAR", "sub_client": "Sub Co", "customer_city": "Baku, Azerbaijan", "job_ref": "217",
            "revision": "2", "contract_no_azn": "4410030127", "contract_no_usd": "4410030190",
            "signer_name": "Rufat Badalov", "signer_title": "Deputy General Director", "comments": "Accommodation required"}
-    data = B.compute_pdms(MAN, [], EQ, CO, hdr, RATES, 0.1, TR, None, None)
+    data = B.compute_word_proposal(MAN, [], EQ, CO, hdr, RATES, 0.1, TR, None, None)
     wb = openpyxl.Workbook()
     add_overview_sheet(wb, data, hdr, {"USD": "2026-10-26"})
     ws = wb[SHEET_NAME]
@@ -270,22 +270,22 @@ def test_the_header_block_lists_the_word_rows_and_the_ctr_header_fields_and_the_
     assert title_row >= last_info + 2
     # a header without the optional fields still gives the block (blank values, the defaults for the letter's rows)
     wb2 = openpyxl.Workbook()
-    add_overview_sheet(wb2, B.compute_pdms(MAN, [], EQ, CO, HDR, RATES, 0.1, TR, None, None), HDR, {})
+    add_overview_sheet(wb2, B.compute_word_proposal(MAN, [], EQ, CO, HDR, RATES, 0.1, TR, None, None), HDR, {})
     ws2 = wb2[SHEET_NAME]
     vals = {ws2.cell(row=r, column=2).value: ws2.cell(row=r, column=3).value for r in range(4, 24)}
     assert vals["Client"] in (None, "") and vals["Signer"] == "Rufat Badalov" and vals["Customer city"] == "Baku, Azerbaijan"
 
 
-def test_the_window_gives_the_overview_the_ctr_header_fields_and_keeps_their_rows_in_pdms_mode():
+def test_the_window_gives_the_overview_the_ctr_header_fields_and_keeps_their_rows_in_word_proposal_mode():
     w = H.generator()
     w.show()
-    w._pdms_check.setChecked(True)
+    w._word_proposal_check.setChecked(True)
     for edit, text in ((w._client_edit, "SOCAR"), (w._sub_client_edit, "AzNeft"), (w._revision_edit, "3"),
                        (w._contract_no_azn_edit, "44-AZN"), (w._contract_no_usd_edit, "44-USD"),
                        (w._comments_edit, "Accommodation required")):
         edit.setText(text)
-        assert edit.isVisibleTo(w)                                   # the CTR rows stay visible in PDMS mode
-    hdr = w._pdms_payload()["header"]
+        assert edit.isVisibleTo(w)                                   # the CTR rows stay visible in Word proposal mode
+    hdr = w._word_proposal_payload()["header"]
     assert (hdr["client"], hdr["sub_client"], hdr["revision"], hdr["contract_no_azn"], hdr["contract_no_usd"],
             hdr["comments"]) == ("SOCAR", "AzNeft", "3", "44-AZN", "44-USD", "Accommodation required")
-    w._pdms_check.setChecked(False)
+    w._word_proposal_check.setChecked(False)

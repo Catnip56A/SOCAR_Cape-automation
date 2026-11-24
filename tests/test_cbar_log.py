@@ -95,7 +95,7 @@ def test_every_turned_on_currency_has_its_own_line_and_reloads_on_its_own():
     _fake(datetime(2026, 10, 26), _xml_many())
     w = H._new_generator()
     w.show()
-    w._pdms_check.setChecked(True)
+    w._word_proposal_check.setChecked(True)
     assert list(w._fx) == ["USD", "EUR", "GBP"]
     for c in w._fx:
         w._fx[c]["edit"].setText("9.99")
@@ -133,7 +133,7 @@ def _suspicious_rate_body():
     _fake(datetime(2026, 10, 26), _xml_many())
     w = H._new_generator()
     w.show()
-    w._pdms_check.setChecked(True)
+    w._word_proposal_check.setChecked(True)
     w._reload_cbar(["USD"])
     assert H.wait(lambda: w._fx["USD"]["btn"].isEnabled() and w._fx["USD"]["date"], 30)
     assert w._fx["USD"]["edit"].text() == "1.7000" and w._fx["USD"]["date"] == "2026-10-26"
@@ -293,7 +293,7 @@ def test_a_priced_cell_holds_a_number_and_a_currency_shown_as_its_sign():
     assert normal == {"manpower": "Rate AZN", "equipment": "Rate/Day USD", "consumables": "Unit Price USD",
                       "transport": "Rate AZN"}
     assert w._groups["equipment"].title() == "Plant & Equipment — USD"
-    w._pdms_check.setChecked(True)
+    w._word_proposal_check.setChecked(True)
     for key, tbl, col in w._money_columns():                                   # no fixed currency in the Rate headers
         assert not any(c in tbl.horizontalHeaderItem(col).text() for c in ("AZN", "USD"))
     assert eq.horizontalHeaderItem(W._EQ_TOTAL).text() == "Total AZN"           # totals are in manats
@@ -339,10 +339,10 @@ def test_a_priced_cell_holds_a_number_and_a_currency_shown_as_its_sign():
     assert eq.item(r, W._EQ_TOTAL).text() == "0.00" and "No CBAR rate for EUR" in eq.item(r, W._EQ_TOTAL).toolTip()
     # the sums are in manats too, and the normal CTR look comes back untouched
     assert "₼" in w._usd_equip_lbl.text()
-    w._pdms_check.setChecked(False)
+    w._word_proposal_check.setChecked(False)
     assert eq.horizontalHeaderItem(W._EQ_RATE).text() == "Rate/Day USD" and eq.horizontalHeaderItem(W._EQ_TOTAL).text() == "Total USD"
     assert eq.item(r, W._EQ_TOTAL).text() == f"{2 * 10 * 3:.2f}" and "$" in w._usd_equip_lbl.text()
-    assert delegate.parts(idx) == ("10", "$")                                     # outside PDMS mode the category's own currency
+    assert delegate.parts(idx) == ("10", "$")                                     # outside Word proposal mode the category's own currency
     assert w._groups["equipment"].title() == "Plant & Equipment — USD"
 
 
@@ -354,14 +354,14 @@ def test_signs_of_currencies():
 def test_a_cell_in_another_currency_needs_its_rate_and_reaches_the_proposal():
     import docx
     from ctr_tools import window as W
-    template = H.INPUTS / "PDMS_TEMPLATE_short.docx"
+    template = H.INPUTS / "Word_Proposal_Template_short.docx"
     if not template.is_file():
-        raise H.Skip("PDMS_TEMPLATE_short.docx is not in TEST_Files/CTR creator")
+        raise H.Skip("Word_Proposal_Template_short.docx is not in TEST_Files/CTR creator")
     _fresh("e2e")
     C._CURRENCIES_PATH = H.SANDBOX / "e2e_currencies.json"
     w = H.generator()
     w.show()
-    w._pdms_check.setChecked(True)
+    w._word_proposal_check.setChecked(True)
     eq = w._req_equip_tbl
     r = next(i for i in range(eq.rowCount()) if eq.item(i, W._EQ_STATUS).text().startswith("✓")
              and not eq.item(i, W._EQ_DESC).data(W._SCAFFOLD_ROLE))
@@ -370,9 +370,9 @@ def test_a_cell_in_another_currency_needs_its_rate_and_reaches_the_proposal():
         eq.item(r, col).setText(val)
     eq.item(r, W._EQ_RATE).setData(W._CUR_ROLE, "GBP")
     w._fx["GBP"]["edit"].setText("")
-    out = H.SANDBOX / "out" / "pdms_gbp"
+    out = H.SANDBOX / "out" / "word_proposal_gbp"
     out.mkdir(parents=True, exist_ok=True)
-    w._pdms_tpl_edit.setText(str(template))
+    w._word_proposal_tpl_edit.setText(str(template))
     w._out_dir_edit.setText(str(out))
     w._job_ref_edit.setText("999")
     w._prp_edit.setText("PRP-26-888")
@@ -419,13 +419,13 @@ def test_hotbed_in_the_price_totals_one_click_currency_and_the_non_rechargeable_
     C._CURRENCIES_PATH = H.SANDBOX / "hb_currencies.json"
     w = H.generator()
     w.show()
-    w._pdms_check.setChecked(True)
+    w._word_proposal_check.setChecked(True)
     H.pump(3)
     for code, rate in (("USD", "1.7000"), ("GBP", "2.2500")):
         w._fx[code]["edit"].setText(rate)
     # -- Hotbed in the price totals, under Transport; the manpower-only sums say they do not hold it
     base = w.price_totals()
-    assert base["hotbed"] == 0 and "Hotbed (PDMS proposal)" in w._price_totals_lbl.text()
+    assert base["hotbed"] == 0 and "Hotbed (Word proposal)" in w._price_totals_lbl.text()
     w._hotbed_rate_edit.setText("59")
     w._hotbed_days_edit.setText("10")
     t = w.price_totals()
@@ -438,9 +438,9 @@ def test_hotbed_in_the_price_totals_one_click_currency_and_the_non_rechargeable_
     w._hotbed_days_edit.setText("")                                              # no days: left out everywhere
     assert w.price_totals()["hotbed"] == 0 and "without the Hotbed line" not in w._price_totals_lbl.text()
     assert "Hotbed not included" not in w._azn_total_lbl.text()
-    w._pdms_check.setChecked(False)
-    assert "Hotbed (PDMS proposal)" not in w._price_totals_lbl.text()
-    w._pdms_check.setChecked(True)
+    w._word_proposal_check.setChecked(False)
+    assert "Hotbed (Word proposal)" not in w._price_totals_lbl.text()
+    w._word_proposal_check.setChecked(True)
     # -- one click: the right half opens the drop-down, picking a currency stores it at once and closes the editor
     eq = w._req_equip_tbl
     r = next(i for i in range(eq.rowCount()) if eq.item(i, W._EQ_STATUS).text().startswith("✓"))
@@ -480,7 +480,7 @@ def test_hotbed_in_the_price_totals_one_click_currency_and_the_non_rechargeable_
     assert max(word_cols) - min(word_cols) > 70                                   # a word, wider than a number
     assert min(word_cols) < 14                                                    # it starts at the LEFT edge of the cell
     assert delegate.NON_RECHARGEABLE == "NON-RECHARGEABLE"                        # in capitals
-    w._pdms_check.setChecked(False)                                               # the same in the normal CTR tables
+    w._word_proposal_check.setChecked(False)                                               # the same in the normal CTR tables
     assert min(_dark_columns(delegate, idx, eq)) < 14 and max(_dark_columns(delegate, idx, eq)) - min(_dark_columns(delegate, idx, eq)) > 70
 
 
@@ -489,7 +489,7 @@ def test_the_hotbed_include_box_decides_only_for_an_incomplete_line():
     C._CURRENCIES_PATH = H.SANDBOX / "hbbox_currencies.json"
     w = H.generator()
     w.show()
-    w._pdms_check.setChecked(True)
+    w._word_proposal_check.setChecked(True)
     box = w._hotbed_incl_chk
     assert box.isChecked()                                                         # on by default
     w._hotbed_rate_edit.setText("59")
@@ -514,23 +514,23 @@ def test_the_hotbed_include_box_decides_only_for_an_incomplete_line():
     assert "GBP" not in w._currencies_in_use()
 
 
-def test_markup_is_ten_percent_in_pdms_mode_and_the_ctr_value_otherwise():
+def test_markup_is_ten_percent_in_word_proposal_mode_and_the_ctr_value_otherwise():
     from ctr_tools import window as W
     w = H.generator()
     w.show()
     normal = W._DEFAULT_MARKUP_PCT
     assert normal == 6.5 and w._markup_spin.value() == normal
-    w._pdms_check.setChecked(True)
-    assert w._markup_spin.value() == 10.0 and w._markup_rate() == 0.10          # PDMS: usually 10 %
+    w._word_proposal_check.setChecked(True)
+    assert w._markup_spin.value() == 10.0 and w._markup_rate() == 0.10          # Word proposal: usually 10 %
     assert "10.00% markup" in w._usd_cons_lbl.text()
     w._markup_spin.setValue(8.0)                                                  # it varies: changed by hand
     assert w._markup_rate() == 0.08
-    w._pdms_check.setChecked(False)
+    w._word_proposal_check.setChecked(False)
     assert w._markup_spin.value() == normal                                      # back to the CTR's 6.5 %
     w._markup_spin.setValue(7.0)                                                  # a CTR value typed by hand is kept too
-    w._pdms_check.setChecked(True)
+    w._word_proposal_check.setChecked(True)
     assert w._markup_spin.value() == 10.0
-    w._pdms_check.setChecked(False)
+    w._word_proposal_check.setChecked(False)
     assert w._markup_spin.value() == 7.0
     w._markup_spin.setValue(normal)
 
@@ -540,7 +540,7 @@ def test_the_reload_all_buttons_explain_the_consequences_and_only_go_on_after_a_
     from ctr_tools import window as W
     w = H.generator()
     w.show()
-    w._pdms_check.setChecked(True)
+    w._word_proposal_check.setChecked(True)
     calls = []
     w._start_reload = lambda cat, rows, cols, everything: calls.append((cat, everything))   # what the Yes would run
     real = QMessageBox.question
@@ -557,35 +557,35 @@ def test_the_reload_all_buttons_explain_the_consequences_and_only_go_on_after_a_
         assert calls == [("equipment", True)]                         # Yes: it runs, for everything
         asked.clear()
         QMessageBox.question = staticmethod(lambda parent, title, text, *a, **k: (asked.append(text), QMessageBox.StandardButton.No)[1])
-        w._pdms_check.setChecked(False)
+        w._word_proposal_check.setChecked(False)
         w._ask_reload_all("manpower")
-        assert "currency" not in asked[0] and "shift length" in asked[0]    # the PDMS line only in PDMS mode
+        assert "currency" not in asked[0] and "shift length" in asked[0]    # the Word proposal line only in Word proposal mode
     finally:
         QMessageBox.question = real
     assert w._rematch_note().text().startswith("Reload all reads")
 
 
-def test_the_storage_list_and_the_snapshot_know_the_pdms_template_and_the_cbar_files():
+def test_the_storage_list_and_the_snapshot_know_the_word_proposal_template_and_the_cbar_files():
     from ctr_tools import inspector as I
     _fresh("snap")
     C._CURRENCIES_PATH = H.SANDBOX / "snap_currencies.json"
     w = H.generator()
     w.show()
-    w._pdms_check.setChecked(True)
-    w._pdms_tpl_edit.setText(str(H.INPUTS / "PDMS_TEMPLATE_short.docx"))
+    w._word_proposal_check.setChecked(True)
+    w._word_proposal_tpl_edit.setText(str(H.INPUTS / "Word_Proposal_Template_short.docx"))
     w._fx["USD"]["edit"].setText("1.7000")
     w._on_fx_typed("USD")
 
     class _Win:                                                      # the parts of the main window the lists read
         _ctr_gen = w
     labels = {e["label"] for e in I.collect_storage(_Win())}
-    assert any(l.startswith("PDMS Template") for l in labels)
+    assert any(l.startswith("Word Proposal Template") for l in labels)
     assert {"CBAR rates (saved, what the app starts from)", "CBAR rate log", "CBAR currencies turned on",
             "CBAR document-usage log"} <= labels
     C.save_rates_json(datetime(2026, 10, 26), C.parse_rates(_xml_many()), C.DEFAULT_CURRENCIES)
     C.log_usage("PRP-26-001 Secret job.docx", "PRP-26-001", {"USD": (1.7, "2026-10-26")})
     text = I.build_snapshot(_Win(), None)
-    assert "PDMS proposal mode: on" in text and "USD: 1.7000" in text and "Typed by hand" in text
+    assert "Word proposal mode: on" in text and "USD: 1.7000" in text and "Typed by hand" in text
     assert "Default currencies:" in text and "PRP-26-001" not in text and "Secret job" not in text   # no document names
 
 
@@ -594,11 +594,11 @@ def test_a_rate_that_was_never_fetched_is_logged_as_the_default_not_as_typed():
     C._CURRENCIES_PATH = H.SANDBOX / "dflt_currencies.json"
     w = H.generator()
     w.show()
-    w._pdms_check.setChecked(True)
+    w._word_proposal_check.setChecked(True)
     assert w._fx["USD"]["action"] == "Default value, not fetched yet" and w._fx["USD"]["date"] is None
-    assert w._pdms_payload()["rates_used"]["USD"] == (1.7, None, "default")
+    assert w._word_proposal_payload()["rates_used"]["USD"] == (1.7, None, "default")
     w._on_fx_typed("USD")                                                      # once typed over, it is "typed" again
-    assert w._pdms_payload()["rates_used"]["USD"][2] is None
+    assert w._word_proposal_payload()["rates_used"]["USD"][2] is None
     # the usage log and the Inspector keep the difference
     C.log_usage("a.docx", "P1", {"USD": (1.7, None, "default"), "EUR": (1.98, None), "GBP": (2.25, "2026-10-26")})
     entry = C.load_usage()[-1]
@@ -615,7 +615,7 @@ def test_a_hotbed_whose_currency_has_no_rate_says_so_in_the_price_totals():
     C._CURRENCIES_PATH = H.SANDBOX / "hbfx_currencies.json"
     w = H.generator()
     w.show()
-    w._pdms_check.setChecked(True)
+    w._word_proposal_check.setChecked(True)
     w._hotbed_rate_edit.setText("20")
     w._hotbed_days_edit.setText("3")
     w._hotbed_cur_combo.setCurrentText("GBP")

@@ -1,25 +1,25 @@
-"""The long PDMS proposal (PDMS_TEMPLATE_long.docx, a tagged copy of the long proposal): Position and Shift columns,
+"""The long Word proposal (Word_Proposal_Template_long.docx, a tagged copy of the long proposal): Position and Shift columns,
 mark-up columns, its own third-party table, tables lettered A-D in the order present, the cover's text boxes, the notes
 (schedule, 8.2 pricing notes, Provided by client), an empty optional table or place leaving no trace. Fixture rows."""
 import docx
 from docx.oxml.ns import qn
 
 import harness as H
-from ctr_tools import builder_pdms as B
-from ctr_tools import pdms_notes as N
-import test_builder_pdms as TB
+from ctr_tools import builder_word_proposal as B
+from ctr_tools import word_proposal_notes as N
+import test_builder_word_proposal as TB
 
-LONG = H.INPUTS / "PDMS_TEMPLATE_long.docx"
+LONG = H.INPUTS / "Word_Proposal_Template_long.docx"
 
 
 def _need():
     if not LONG.is_file():
-        raise H.Skip("PDMS_TEMPLATE_long.docx is not in TEST_Files/CTR creator")
+        raise H.Skip("Word_Proposal_Template_long.docx is not in TEST_Files/CTR creator")
     N._NOTES_PATH = H.SANDBOX / "notes_long_none.json"
 
 
 def _build(tag, equip=TB.EQUIP, cons=TB.CONS, transport=TB.TRANSPORT, hotbed=None, **kw):
-    out = B.build_pdms(TB.MAN, [], equip, cons, LONG, H.SANDBOX / f"pdmsl_{tag}", dict(TB.HEADER, project_type="Onshore"),
+    out = B.build_word_proposal(TB.MAN, [], equip, cons, LONG, H.SANDBOX / f"word_proposall_{tag}", dict(TB.HEADER, project_type="Onshore"),
                        rates={"USD": 1.7}, markup_rate=0.1, third_party_rows=transport, hotbed=hotbed, **kw)
     return docx.Document(str(out))
 
@@ -110,21 +110,21 @@ def test_the_long_proposal_notes_take_the_chosen_schedule_pricing_notes_and_clie
 
 
 def test_an_untagged_proposal_is_refused_with_a_message_that_says_so():
-    orig = H.INPUTS / "PDMS_old" / "long proposal.docx"
+    orig = H.INPUTS / "Word_Proposal_old" / "long proposal.docx"
     if not orig.is_file():
-        raise H.Skip("the original long proposal is not in TEST_Files/CTR creator/PDMS_old")
+        raise H.Skip("the original long proposal is not in TEST_Files/CTR creator/Word_Proposal_old")
     try:
-        B.build_pdms(TB.MAN, [], TB.EQUIP, TB.CONS, orig, H.SANDBOX / "pdmsl_untagged", TB.HEADER,
+        B.build_word_proposal(TB.MAN, [], TB.EQUIP, TB.CONS, orig, H.SANDBOX / "word_proposall_untagged", TB.HEADER,
                      rates={"USD": 1.7}, markup_rate=0.1)
     except ValueError as exc:
-        assert "not a tagged PDMS template" in str(exc) and "long proposal.docx" in str(exc)
+        assert "not a tagged Word proposal template" in str(exc) and "long proposal.docx" in str(exc)
     else:
         raise AssertionError("an untagged proposal was accepted")
 
 
 def test_the_long_proposal_without_manpower_or_third_party_has_no_empty_table():
     _need()
-    d = B.build_pdms([], [], TB.EQUIP, TB.CONS, LONG, H.SANDBOX / "pdmsl_nolabour", dict(TB.HEADER, project_type="Onshore"),
+    d = B.build_word_proposal([], [], TB.EQUIP, TB.CONS, LONG, H.SANDBOX / "word_proposall_nolabour", dict(TB.HEADER, project_type="Onshore"),
                      rates={"USD": 1.7}, markup_rate=0.1, third_party_rows=[])
     d = docx.Document(str(d))
     text = _all_text(d)

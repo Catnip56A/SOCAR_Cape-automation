@@ -1,4 +1,4 @@
-"""The notes in the PDMS Word proposal: a {{NOTES_<PLACE>}} paragraph of the template is the model copied once per
+"""The notes in the Word proposal: a {{NOTES_<PLACE>}} paragraph of the template is the model copied once per
 note (style, indent and Word numbering), a bullet note gets "* ", an empty place loses its heading, a template without
 the tags is unaffected. Fixture rows; the tagged copy of the template is read, the output goes to the sandbox."""
 import copy
@@ -7,22 +7,22 @@ import docx
 from docx.oxml.ns import qn
 
 import harness as H
-from ctr_tools import builder_pdms as B
-from ctr_tools import pdms_notes as N
-import test_builder_pdms as TB
+from ctr_tools import builder_word_proposal as B
+from ctr_tools import word_proposal_notes as N
+import test_builder_word_proposal as TB
 
-V2 = H.INPUTS / "PDMS_TEMPLATE_short_v2.docx"
-OLD = H.INPUTS / "PDMS_TEMPLATE_short.docx"
+V2 = H.INPUTS / "Word_Proposal_Template_short_v2.docx"
+OLD = H.INPUTS / "Word_Proposal_Template_short.docx"
 
 
 def _need():
     if not V2.is_file():
-        raise H.Skip("PDMS_TEMPLATE_short_v2.docx is not in TEST_Files/CTR creator")
+        raise H.Skip("Word_Proposal_Template_short_v2.docx is not in TEST_Files/CTR creator")
     N._NOTES_PATH = H.SANDBOX / "notes_builder_none.json"        # no saved list: the standard notes
 
 
 def _build(tag, template=V2, **kw):
-    out = B.build_pdms(TB.MAN, [], TB.EQUIP, TB.CONS, template, H.SANDBOX / f"pdmsn_{tag}", TB.HEADER,
+    out = B.build_word_proposal(TB.MAN, [], TB.EQUIP, TB.CONS, template, H.SANDBOX / f"word_proposaln_{tag}", TB.HEADER,
                        rates={"USD": 1.7}, markup_rate=0.1, **kw)
     return docx.Document(str(out))
 
@@ -84,7 +84,7 @@ def test_chosen_notes_values_and_order_are_used_and_an_empty_place_loses_its_hea
 def test_a_template_without_the_tags_is_unaffected_and_a_bullet_without_its_own_model_still_works():
     _need()
     if not OLD.is_file():
-        raise H.Skip("PDMS_TEMPLATE_short.docx is not in TEST_Files/CTR creator")
+        raise H.Skip("Word_Proposal_Template_short.docx is not in TEST_Files/CTR creator")
     plain = [p.text for p in _build("old1", template=OLD).paragraphs]
     given = [p.text for p in _build("old2", template=OLD, notes={"items": {"schedule": [{"text": "x", "kind": "numbered"}]},
                                                                   "values": {}}).paragraphs]

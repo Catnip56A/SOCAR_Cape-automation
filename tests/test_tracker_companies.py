@@ -7,7 +7,7 @@ from PySide6.QtWidgets import QMessageBox
 import harness as H
 import ctr_tools.config as C
 
-SHIPPED = {"ctr_tracker_companies": {"Turan Drilling": "AZE0104", "CDC": "AZE0129"}, "pdms": {"hotbed_rate": 59.0}}
+SHIPPED = {"ctr_tracker_companies": {"Turan Drilling": "AZE0104", "CDC": "AZE0129"}, "word_proposal": {"hotbed_rate": 59.0}}
 
 
 def _setup(tag, user=None):
@@ -84,13 +84,13 @@ def test_loading_a_ctr_of_a_company_gives_its_code_even_though_the_site_sets_one
 
 
 def test_saving_the_list_keeps_other_settings_and_applies_at_once():
-    ship, mine, old = _setup("save", user={"ctr_tracker_companies": {"Old Co": "X1"}, "pdms": {"hotbed_rate": 77.0}})
+    ship, mine, old = _setup("save", user={"ctr_tracker_companies": {"Old Co": "X1"}, "word_proposal": {"hotbed_rate": 77.0}})
     try:
         from ctr_tools.tracker import company_project_code
         assert company_project_code("old co") == "X1"
         C.save_tracker_companies({"New Co": "N9"})
         data = json.loads(mine.read_text(encoding="utf-8"))
-        assert data["ctr_tracker_companies"] == {"New Co": "N9"} and data["pdms"]["hotbed_rate"] == 77.0
+        assert data["ctr_tracker_companies"] == {"New Co": "N9"} and data["word_proposal"]["hotbed_rate"] == 77.0
         assert company_project_code("New Co") == "N9" and company_project_code("Old Co") is None
         assert not list(mine.parent.glob("*.tmp"))
         mine.write_text("{ broken", encoding="utf-8")
@@ -107,7 +107,7 @@ def test_saving_the_list_keeps_other_settings_and_applies_at_once():
 
 def test_the_settings_row_edits_resets_and_lists_the_companies():
     from common import settings_view as SVW
-    ship, mine, old = _setup("row", user={"ctr_tracker_companies": {"Old Co": "X1"}, "pdms": {"hotbed_rate": 77.0}})
+    ship, mine, old = _setup("row", user={"ctr_tracker_companies": {"Old Co": "X1"}, "word_proposal": {"hotbed_rate": 77.0}})
     real_exec, real_q = SVW._CompaniesDialog.exec, QMessageBox.question
     try:
         w = H.generator()
@@ -129,7 +129,7 @@ def test_the_settings_row_edits_resets_and_lists_the_companies():
         QMessageBox.question = staticmethod(lambda *a, **k: QMessageBox.StandardButton.Yes)
         tab._reset_companies()
         data = json.loads(mine.read_text(encoding="utf-8"))
-        assert data["ctr_tracker_companies"] == SHIPPED["ctr_tracker_companies"] and data["pdms"]["hotbed_rate"] == 77.0
+        assert data["ctr_tracker_companies"] == SHIPPED["ctr_tracker_companies"] and data["word_proposal"]["hotbed_rate"] == 77.0
         assert tab._counts["companies"].text() == "2 companies"
     finally:
         SVW._CompaniesDialog.exec, QMessageBox.question = real_exec, real_q

@@ -9,7 +9,7 @@ from PySide6.QtWidgets import QMessageBox
 import harness as H
 import ctr_tools.config as C
 
-SHIPPED = {"pdms": {"hotbed_rate": 59.0, "customer_name": "Shipped Customer"}, "transport_rates": {"_default": [{"rate_azn": 1}]},
+SHIPPED = {"word_proposal": {"hotbed_rate": 59.0, "customer_name": "Shipped Customer"}, "transport_rates": {"_default": [{"rate_azn": 1}]},
            "scaffold": {"label": "Conventional Scaffold"}}
 
 
@@ -18,14 +18,14 @@ def _setup(tag):
     d.mkdir(exist_ok=True)
     ship, mine = d / "shipped.json", d / "user" / "template_config.json"
     ship.write_text(json.dumps(SHIPPED, indent=2), encoding="utf-8")
-    old = (C._SHIPPED_CONFIG_PATH, C._CONFIG_PATH, dict(C.CFG["pdms"]))
+    old = (C._SHIPPED_CONFIG_PATH, C._CONFIG_PATH, dict(C.CFG["word_proposal"]))
     C._SHIPPED_CONFIG_PATH, C._CONFIG_PATH = ship, mine
     return ship, mine, old
 
 
 def _restore(old):
     C._SHIPPED_CONFIG_PATH, C._CONFIG_PATH = old[0], old[1]
-    C.CFG["pdms"] = old[2]
+    C.CFG["word_proposal"] = old[2]
 
 
 def test_first_use_copies_the_shipped_file_and_the_app_reads_the_users_copy():
@@ -34,12 +34,12 @@ def test_first_use_copies_the_shipped_file_and_the_app_reads_the_users_copy():
         assert not mine.exists()
         cfg = C.load_config()
         assert mine.exists() and mine.read_bytes() == ship.read_bytes()      # an exact copy, created on first use
-        assert cfg["pdms"]["hotbed_rate"] == 59.0
+        assert cfg["word_proposal"]["hotbed_rate"] == 59.0
         data = json.loads(mine.read_text(encoding="utf-8"))                   # the user edits THEIR copy ...
-        data["pdms"]["hotbed_rate"] = 70.0
+        data["word_proposal"]["hotbed_rate"] = 70.0
         mine.write_text(json.dumps(data), encoding="utf-8")
-        assert C.load_config()["pdms"]["hotbed_rate"] == 70.0                 # ... and that is what is read (no rebuild)
-        assert json.loads(ship.read_text(encoding="utf-8"))["pdms"]["hotbed_rate"] == 59.0   # the shipped file is untouched
+        assert C.load_config()["word_proposal"]["hotbed_rate"] == 70.0                 # ... and that is what is read (no rebuild)
+        assert json.loads(ship.read_text(encoding="utf-8"))["word_proposal"]["hotbed_rate"] == 59.0   # the shipped file is untouched
     finally:
         _restore(old)
 
@@ -50,7 +50,7 @@ def test_a_damaged_copy_falls_back_to_the_shipped_file_and_is_reported():
         C.load_config()
         assert C.check_user_config() is None
         mine.write_text("{ not json", encoding="utf-8")
-        assert C.load_config()["pdms"]["customer_name"] == "Shipped Customer"
+        assert C.load_config()["word_proposal"]["customer_name"] == "Shipped Customer"
         assert C.check_user_config()                                          # says why (shown in Settings)
         assert C.differs_from_shipped() == (0, 0)
     finally:
@@ -63,13 +63,13 @@ def test_what_differs_merge_shipped_and_reset():
         C.load_config()
         assert C.differs_from_shipped() == (0, 0)
         data = json.loads(mine.read_text(encoding="utf-8"))
-        data["pdms"]["hotbed_rate"] = 70.0                                    # my edit
+        data["word_proposal"]["hotbed_rate"] = 70.0                                    # my edit
         del data["scaffold"]                                                  # a setting my copy lacks (as after an upgrade)
         mine.write_text(json.dumps(data), encoding="utf-8")
         assert C.differs_from_shipped() == (1, 1)
         assert C.merge_shipped_config() == 1                                  # adds what is missing, keeps my value
         after = json.loads(mine.read_text(encoding="utf-8"))
-        assert after["pdms"]["hotbed_rate"] == 70.0 and after["scaffold"]["label"] == "Conventional Scaffold"
+        assert after["word_proposal"]["hotbed_rate"] == 70.0 and after["scaffold"]["label"] == "Conventional Scaffold"
         assert C.differs_from_shipped() == (1, 0) and C.merge_shipped_config() == 0
         C.reset_to_shipped_config()
         assert mine.read_bytes() == ship.read_bytes() and C.differs_from_shipped() == (0, 0)
@@ -82,9 +82,9 @@ def test_the_hotbed_button_reads_the_users_copy():
     try:
         C.load_config()
         data = json.loads(mine.read_text(encoding="utf-8"))
-        data["pdms"]["hotbed_rate"] = 66.0
+        data["word_proposal"]["hotbed_rate"] = 66.0
         mine.write_text(json.dumps(data), encoding="utf-8")
-        assert C.reload_pdms_config()["hotbed_rate"] == 66.0
+        assert C.reload_word_proposal_config()["hotbed_rate"] == 66.0
     finally:
         _restore(old)
 
@@ -100,7 +100,7 @@ def test_the_settings_row_shows_the_state_opens_the_file_merges_and_resets():
         tab = SVW.SettingsTab(w)
         assert tab._counts["config"].text() == "same as the shipped file"
         data = json.loads(mine.read_text(encoding="utf-8"))
-        data["pdms"]["customer_name"] = "My Customer"
+        data["word_proposal"]["customer_name"] = "My Customer"
         del data["scaffold"]
         mine.write_text(json.dumps(data), encoding="utf-8")
         tab.refresh()
@@ -118,7 +118,7 @@ def test_the_settings_row_shows_the_state_opens_the_file_merges_and_resets():
         assert "differ from the shipped file" in tab._counts["config"].text() and "to merge" not in tab._counts["config"].text()
         QMessageBox.question = staticmethod(lambda *a, **k: QMessageBox.StandardButton.Cancel)
         tab._reset_config()
-        assert json.loads(mine.read_text(encoding="utf-8"))["pdms"]["customer_name"] == "My Customer"   # Cancel: kept
+        assert json.loads(mine.read_text(encoding="utf-8"))["word_proposal"]["customer_name"] == "My Customer"   # Cancel: kept
         QMessageBox.question = staticmethod(lambda *a, **k: QMessageBox.StandardButton.Yes)
         tab._reset_config()
         assert mine.read_bytes() == ship.read_bytes() and tab._counts["config"].text() == "same as the shipped file"
@@ -136,22 +136,22 @@ def test_the_differences_list_and_taking_chosen_settings():
     try:
         C.load_config()
         data = json.loads(mine.read_text(encoding="utf-8"))
-        data["pdms"]["hotbed_rate"] = 70.0                                    # my own value
+        data["word_proposal"]["hotbed_rate"] = 70.0                                    # my own value
         data["transport_rates"]["_default"] = [{"rate_azn": 5}]               # another one
         del data["scaffold"]                                                  # a new setting for my copy
-        data["pdms"]["_comment"] = "a note of mine"                           # notes are no settings
+        data["word_proposal"]["_comment"] = "a note of mine"                           # notes are no settings
         mine.write_text(json.dumps(data), encoding="utf-8")
         d = {x["path"]: x for x in C.config_differences()}
-        assert set(d) == {("pdms", "hotbed_rate"), ("transport_rates", "_default"), ("scaffold", "label")}
-        assert d[("scaffold", "label")]["kind"] == "new" and d[("pdms", "hotbed_rate")]["mine"] == 70.0
+        assert set(d) == {("word_proposal", "hotbed_rate"), ("transport_rates", "_default"), ("scaffold", "label")}
+        assert d[("scaffold", "label")]["kind"] == "new" and d[("word_proposal", "hotbed_rate")]["mine"] == 70.0
         assert d[("transport_rates", "_default")]["shipped"] == [{"rate_azn": 1}]        # a list is one setting
         assert C.merge_shipped_config([("transport_rates", "_default")]) == 1             # exactly the chosen one
         after = json.loads(mine.read_text(encoding="utf-8"))
         assert after["transport_rates"]["_default"] == [{"rate_azn": 1}]
-        assert after["pdms"]["hotbed_rate"] == 70.0 and "scaffold" not in after            # the others are untouched
-        assert C.merge_shipped_config([("pdms", "hotbed_rate"), ("scaffold", "label"), ("nope", "x")]) == 2
+        assert after["word_proposal"]["hotbed_rate"] == 70.0 and "scaffold" not in after            # the others are untouched
+        assert C.merge_shipped_config([("word_proposal", "hotbed_rate"), ("scaffold", "label"), ("nope", "x")]) == 2
         again = json.loads(mine.read_text(encoding="utf-8"))
-        assert again["pdms"]["hotbed_rate"] == 59.0 and again["scaffold"]["label"] == "Conventional Scaffold"
+        assert again["word_proposal"]["hotbed_rate"] == 59.0 and again["scaffold"]["label"] == "Conventional Scaffold"
         assert C.config_differences() == []
     finally:
         _restore(old)
@@ -165,7 +165,7 @@ def test_merge_shipped_ticks_new_ones_warns_before_replacing_and_can_be_restored
     try:
         C.load_config()
         data = json.loads(mine.read_text(encoding="utf-8"))
-        data["pdms"]["hotbed_rate"] = 70.0
+        data["word_proposal"]["hotbed_rate"] = 70.0
         del data["scaffold"]
         mine.write_text(json.dumps(data), encoding="utf-8")
         w = H.generator()
@@ -182,13 +182,13 @@ def test_merge_shipped_ticks_new_ones_warns_before_replacing_and_can_be_restored
         QMessageBox.warning = staticmethod(lambda p, t, text, *a, **k: (shown.append(text), QMessageBox.StandardButton.Cancel)[1])
         tab._merge_config()
         assert shown and "REPLACED" in shown[0] and "hotbed_rate" in shown[0] and "70.0" in shown[0] and "59.0" in shown[0]
-        assert json.loads(mine.read_text(encoding="utf-8"))["pdms"]["hotbed_rate"] == 70.0
+        assert json.loads(mine.read_text(encoding="utf-8"))["word_proposal"]["hotbed_rate"] == 70.0
         assert "scaffold" not in json.loads(mine.read_text(encoding="utf-8"))
         # Yes: replaced, with a backup that brings the old value back
         QMessageBox.warning = staticmethod(lambda p, t, text, *a, **k: QMessageBox.StandardButton.Yes)
         before = mine.read_text(encoding="utf-8")
         tab._merge_config()
-        assert json.loads(mine.read_text(encoding="utf-8"))["pdms"]["hotbed_rate"] == 59.0
+        assert json.loads(mine.read_text(encoding="utf-8"))["word_proposal"]["hotbed_rate"] == 59.0
         baks = SVW.backups_for(mine)
         assert baks and baks[0].read_text(encoding="utf-8") == before                      # the old copy is restorable
     finally:

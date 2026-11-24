@@ -1,8 +1,8 @@
 """
-ctr_tools/pdms_overview.py
+ctr_tools/word_proposal_overview.py
 
-The "PDMS overview" sheet of the CTR statistics workbook: the same figures as the PDMS proposal
-(Word), laid out like the PDMS request's own pricing sheet — labour, equipment, consumables with
+The "Word proposal overview" sheet of the CTR statistics workbook: the same figures as the Word proposal,
+laid out like the request's own pricing sheet — labour, equipment, consumables with
 the transport lines, and the summary — but with the arithmetic left in the cells, so a rate or a
 quantity can be changed and the totals follow. Unlike the (client-facing) Word document it also
 shows each line's Stock Code, and the Encoding of a manpower line.
@@ -10,7 +10,7 @@ shows each line's Stock Code, and the Encoding of a manpower line.
 Every price keeps its own currency; a CBAR-rate block at the top holds the conversion rates, how
 each was last checked or changed, and each line looks its rate up there (VLOOKUP on the currency
 code). Amounts in manats use the sheet's own number format. The figures come from
-builder_pdms.compute_pdms(), so the sheet and the Word document cannot disagree.
+builder_word_proposal.compute_word_proposal(), so the sheet and the Word document cannot disagree.
 """
 
 from __future__ import annotations
@@ -18,10 +18,10 @@ from __future__ import annotations
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
-from ctr_tools.builder_pdms import letter_date, pdms_defaults
+from ctr_tools.builder_word_proposal import letter_date, word_proposal_defaults
 
-SHEET_NAME = "PDMS overview"
-_AZN = '#,##0.00\\ [$₼-42C]'          # the manat format of the PDMS request's own sheet
+SHEET_NAME = "Word proposal overview"
+_AZN = '#,##0.00\\ [$₼-42C]'          # the manat format of the request's own sheet
 _NUM = '#,##0.00'
 _FX = '0.0000'
 _THIN = Side(style="thin", color="999999")
@@ -99,27 +99,27 @@ class _Table:
 def add_overview_sheet(wb, data: dict, header: dict, rate_days: dict | None = None,
                        index: int = 0) -> dict:
     """
-    Add the "PDMS overview" sheet to workbook `wb` (at position `index`) and return the addresses
+    Add the "Word proposal overview" sheet to workbook `wb` (at position `index`) and return the addresses
     of its totals (for tests / callers): {"labour_total", "equipment_total", "materials_total",
     "grand_total"} as cell addresses (equipment / materials only when there is such a section),
     plus "rates" (the CBAR block's range).
 
-    data: builder_pdms.compute_pdms() result.
+    data: builder_word_proposal.compute_word_proposal() result.
     header: the proposal's header fields (prp_number, date, customer_name, attention_name, scope,
         project_type …).
     rate_days: {currency code: {"day": CBAR day "YYYY-MM-DD" or None when typed, "stamp": when the rate
         was last checked or changed, "action": what did it} for the Source and history columns (a plain
         {code: day} also works).
     """
-    cfg = pdms_defaults()
+    cfg = word_proposal_defaults()
     ws = wb.create_sheet(SHEET_NAME, index)
     ws.sheet_view.showGridLines = False
     sh = _Sheet(ws)
     for i, width in enumerate(_WIDTHS, start=1):
         ws.column_dimensions[get_column_letter(i)].width = width
 
-    sh.put(1, 2, f"PDMS overview — {header.get('prp_number', '')}", bold=True, size=14, border=False)
-    sh.put(2, 2, "The same figures as the PDMS proposal (Word), with the arithmetic in the cells: change a "
+    sh.put(1, 2, f"Word proposal overview — {header.get('prp_number', '')}", bold=True, size=14, border=False)
+    sh.put(2, 2, "The same figures as the Word proposal, with the arithmetic in the cells: change a "
                  "rate or a quantity and the totals follow. Prices are in their own currency and are "
                  "converted to manats with the CBAR rates below; a total is rounded to "
                  "2 decimals. Stock codes and Encodings are shown here only, not in the proposal.",

@@ -1,7 +1,7 @@
 """
 comparator/proposal_parser.py
 
-Reads a PDMS proposal (the Word "REQUEST FOR QUOTATION" document) into the same table dicts as
+Reads a Word proposal (the Word "REQUEST FOR QUOTATION" document) into the same table dicts as
 sheet_parser.parse_workbook, so a proposal can stand in for the CTR in Compare.
 
 The items table has a header row with a Description, a UOM / Unit, a Qty and a cost column

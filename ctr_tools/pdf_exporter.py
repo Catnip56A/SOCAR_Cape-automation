@@ -6,7 +6,7 @@ Looks for soffice on PATH first, then falls back to the standard install
 locations per OS — LibreOffice's own installer does not add itself to PATH
 on Windows, so relying on PATH alone misses most real installs there.
 
-A Word proposal (PDMS) is exported with Word itself when it is installed (export_docx_to_pdf): Word draws
+A Word proposal is exported with Word itself when it is installed (export_docx_to_pdf): Word draws
 its own file as designed, LibreOffice places the anchored shapes of the long proposal slightly differently.
 Any problem with Word (not installed, a dialog, a timeout) falls back to LibreOffice.
 """
@@ -114,7 +114,7 @@ def export_to_pdf(xlsx_path: str | Path, output_dir: str | Path) -> Path:
     return pdf_path
 
 
-# ── Word (PDMS proposal) ──────────────────────────────────────────────────────
+# ── Word (Word proposal) ──────────────────────────────────────────────────────
 
 def _powershell() -> str | None:
     """powershell.exe on Windows, and from WSL (Windows interop); None elsewhere."""

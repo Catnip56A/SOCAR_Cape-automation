@@ -1,14 +1,14 @@
 """
-ctr_tools/pdms_notes_view.py — the floating window of the PDMS proposal's notes.
+ctr_tools/word_proposal_notes_view.py — the floating window of the Word proposal's notes.
 
 A window of its own (not modal: it can stay open beside the Generator while the proposal is filled in). It shows
 the notes by place with a tick each (the ticked ones go into the proposal, in the order shown), a search bar, ↑ ↓
 to reorder inside a place, Edit / Add / Delete for the notes themselves, and one box per placeholder used by a
 ticked note ({working_days}, {hours} …). A placeholder box remembers what was typed, offers the closest earlier
 values first while typing and can forget one. Everything that changes the list — a text, the places of a note, its
-order, a remembered value — is saved at once (pdms_notes.py); what is ticked and the values belong to the proposal.
+order, a remembered value — is saved at once (word_proposal_notes.py); what is ticked and the values belong to the proposal.
 
-The data and the rules are in pdms_notes.py; builder_pdms.py writes the paragraphs.
+The data and the rules are in word_proposal_notes.py; builder_word_proposal.py writes the paragraphs.
 """
 
 from __future__ import annotations
@@ -20,11 +20,11 @@ from PySide6.QtWidgets import (
     QPlainTextEdit, QPushButton, QScrollArea, QStyledItemDelegate, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
-from ctr_tools import pdms_notes as N
+from ctr_tools import word_proposal_notes as N
 
 _MUTED = "color: #757575; font-size: 11px;"
 _ROLE = Qt.ItemDataRole.UserRole
-_GEOMETRY_KEY = "pdms/notes_window_geometry"
+_GEOMETRY_KEY = "word_proposal/notes_window_geometry"
 _KIND_LABELS = {"numbered": "Numbered item (3.1, 3.2 …)", "bullet": "“* ” line under the item before"}
 _PREFIX = {"bullet": "•  ", "numbered": ""}
 
@@ -453,14 +453,14 @@ class NoteEditor(QDialog):
         return note
 
 
-class PdmsNotesWindow(QWidget):
+class WordProposalNotesWindow(QWidget):
     """The floating notes window of one Generator. `changed` fires when a tick, a value or the list changes."""
 
     changed = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent, Qt.WindowType.Window)
-        self.setWindowTitle("PDMS proposal — notes")
+        self.setWindowTitle("Word proposal — notes")
         self.data = N.load_notes()
         self.ticks: dict[str, set[str]] = {}
         self.values: dict[str, str] = {}
@@ -569,13 +569,13 @@ class PdmsNotesWindow(QWidget):
         self.changed.connect(self._schedule_state)
 
     def set_template_has_tags(self, has: bool | None) -> None:
-        """Say so when the PDMS Template set in the Generator has no note tags: then these notes are not used."""
+        """Say so when the Word Proposal Template set in the Generator has no note tags: then these notes are not used."""
         bad = has is False
         self.template_note.setVisible(bad)
         if bad:
-            self.template_note.setText("The PDMS Template chosen in the Generator has no note tags, so these notes are NOT "
+            self.template_note.setText("The Word Proposal Template chosen in the Generator has no note tags, so these notes are NOT "
                                        "written into the proposal (its fixed texts are used). Choose a template with the "
-                                       "tags, for example PDMS_TEMPLATE_short_v2.docx.")
+                                       "tags, for example Word_Proposal_Template_short_v2.docx.")
 
     # ── what the proposal gets ───────────────────────────────────────────────
 
@@ -609,7 +609,7 @@ class PdmsNotesWindow(QWidget):
         return [n for n in N.notes_for(self.data, place) if n["id"] in self.ticks.get(place, set())]
 
     def payload(self) -> dict:
-        """{"items": {place: [{"text", "kind"}]}, "values": {name: value}} for builder_pdms.build_pdms."""
+        """{"items": {place: [{"text", "kind"}]}, "values": {name: value}} for builder_word_proposal.build_word_proposal."""
         return {"items": {p: [{"text": n["text"], "kind": n["kind"]} for n in self.ticked_notes(p)]
                           for p in self.data["places"]},
                 "values": dict(self.values)}

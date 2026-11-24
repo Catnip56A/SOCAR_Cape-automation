@@ -1,4 +1,4 @@
-"""The PDF of a PDMS proposal: made by Word when it can be, else by LibreOffice. Nothing here starts Word or
+"""The PDF of a Word proposal: made by Word when it can be, else by LibreOffice. Nothing here starts Word or
 LibreOffice: the two engines are replaced by stand-ins; the real Word run is a manual check."""
 import base64
 import os

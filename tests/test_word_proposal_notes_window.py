@@ -1,12 +1,12 @@
-"""The PDMS notes in the Generator: the Notes button (red until opened, red again for a new job), the floating window
+"""The Word proposal notes in the Generator: the Notes button (red until opened, red again for a new job), the floating window
 (ticks, order, editing, placeholder values that are remembered / forgotten / suggested closest first), the values the
 app fills itself, the Generate reminder (not a lock-out) and its Settings switch. Sandboxed settings and notes file."""
 import harness as H
 from harness import W
 from PySide6.QtWidgets import QMessageBox
 
-from ctr_tools import pdms_notes as N
-from ctr_tools.pdms_notes_view import NoteEditor, PdmsNotesWindow
+from ctr_tools import word_proposal_notes as N
+from ctr_tools.word_proposal_notes_view import NoteEditor, WordProposalNotesWindow
 
 
 def _gen():
@@ -31,8 +31,8 @@ def test_the_button_is_red_until_the_notes_are_opened_and_red_again_for_a_new_jo
     w = _gen()
     w.show()
     H.pump(3)
-    assert w._notes_btn.isHidden() or not w._notes_btn.isVisibleTo(w)             # only in PDMS mode
-    w._pdms_check.setChecked(True)
+    assert w._notes_btn.isHidden() or not w._notes_btn.isVisibleTo(w)             # only in Word proposal mode
+    w._word_proposal_check.setChecked(True)
     assert w._notes_btn.isVisibleTo(w)
     assert "#B71C1C" in w._notes_btn.styleSheet() and "look at them" in w._notes_btn.text()
     w._open_notes_window()
@@ -47,7 +47,7 @@ def test_the_button_is_red_until_the_notes_are_opened_and_red_again_for_a_new_jo
     w._reset_notes_for_task()                                                      # (what a new CTR Request does)
     assert not w._notes_seen
     w._notes_win.close()
-    w._pdms_check.setChecked(False)
+    w._word_proposal_check.setChecked(False)
 
 
 def test_ticks_order_and_what_the_proposal_gets():
@@ -144,10 +144,10 @@ class _Stop(Exception):
     pass
 
 
-def _generate_to_the_checks(w, tpl="PDMS_TEMPLATE_short.docx"):
-    """Press Generate in PDMS mode up to the warning dialog; the answer is Cancel, so nothing is written."""
-    w._pdms_check.setChecked(True)
-    w._pdms_tpl_edit.setText(str(H.INPUTS / tpl))
+def _generate_to_the_checks(w, tpl="Word_Proposal_Template_short.docx"):
+    """Press Generate in Word proposal mode up to the warning dialog; the answer is Cancel, so nothing is written."""
+    w._word_proposal_check.setChecked(True)
+    w._word_proposal_tpl_edit.setText(str(H.INPUTS / tpl))
     w._out_dir_edit.setText(str(H.SANDBOX / "out" / "notes_ui"))
     w._job_ref_edit.setText("999")
     w._prp_edit.setText("PRP-26-888")
@@ -160,7 +160,7 @@ def _generate_to_the_checks(w, tpl="PDMS_TEMPLATE_short.docx"):
         w._generate()
     finally:
         QMessageBox.warning = real
-        w._pdms_check.setChecked(False)
+        w._word_proposal_check.setChecked(False)
     return H.all_text(H.msgs)
 
 
@@ -193,12 +193,12 @@ def test_the_settings_switch_follows_and_changes_the_setting():
 
 
 def _generate_for_real(w, tpl, name):
-    """Generate the PDMS proposal through the window (warnings answered Yes by the harness); returns the docx."""
+    """Generate the Word proposal through the window (warnings answered Yes by the harness); returns the docx."""
     import docx
-    w._pdms_check.setChecked(True)
+    w._word_proposal_check.setChecked(True)
     out = H.SANDBOX / "out" / name
     out.mkdir(parents=True, exist_ok=True)
-    w._pdms_tpl_edit.setText(str(tpl))
+    w._word_proposal_tpl_edit.setText(str(tpl))
     w._out_dir_edit.setText(str(out))
     w._job_ref_edit.setText("999")
     w._prp_edit.setText("PRP-26-" + name[-3:])
@@ -209,14 +209,14 @@ def _generate_for_real(w, tpl, name):
     assert not any(m[0] == "critical" for m in H.msgs), H.msgs
     docs = list(out.glob("*.docx"))
     assert len(docs) == 1, list(out.iterdir())
-    w._pdms_check.setChecked(False)
+    w._word_proposal_check.setChecked(False)
     return docx.Document(str(docs[0])), H.all_text(H.msgs)
 
 
 def test_an_edited_and_a_new_note_reach_the_generated_proposal_and_an_old_template_says_it_ignores_them():
-    v2, old = H.INPUTS / "PDMS_TEMPLATE_short_v2.docx", H.INPUTS / "PDMS_TEMPLATE_short.docx"
+    v2, old = H.INPUTS / "Word_Proposal_Template_short_v2.docx", H.INPUTS / "Word_Proposal_Template_short.docx"
     if not v2.is_file() or not old.is_file():
-        raise H.Skip("the PDMS templates are not in TEST_Files/CTR creator")
+        raise H.Skip("the Word proposal templates are not in TEST_Files/CTR creator")
     w = _gen()
     win = w._ensure_notes_window()
     note = next(n for n in win.data["notes"] if n["id"] == "excl-lunch")
@@ -238,7 +238,7 @@ def test_an_edited_and_a_new_note_reach_the_generated_proposal_and_an_old_templa
     assert "have not been looked at" not in text and "no note tags" not in text
     d2, text2 = _generate_for_real(w, old, "notes_e2e_old_002")                     # the old template: told, not silently ignored
     assert "has no note tags" in text2 and "A new exclusion about the crane." not in [p.text for p in d2.paragraphs]
-    w._pdms_tpl_edit.setText(str(old))
+    w._word_proposal_tpl_edit.setText(str(old))
     assert w._template_has_note_tags() is False
     w._open_notes_window()
     assert not w._notes_win.template_note.isHidden()
@@ -265,7 +265,7 @@ def test_a_hint_is_shown_in_the_list_not_written_and_the_optional_notes_are_not_
 
 
 def test_new_placeholders_and_prepared_values_through_the_dialogs():
-    from ctr_tools.pdms_notes_view import NewPlaceholderDialog, PlaceholderManager
+    from ctr_tools.word_proposal_notes_view import NewPlaceholderDialog, PlaceholderManager
     w = _gen()
     win = w._ensure_notes_window()
     # a new placeholder from the window
@@ -347,7 +347,7 @@ def test_a_schedule_of_your_own_is_added_chosen_saved_and_deleted_and_generate_w
     win._delete_schedule()
     assert win.schedule is None and sc["id"] not in {s["id"] for s in N.all_schedules(N.load_notes())}
     w._notes_win.close()
-    v2 = "PDMS_TEMPLATE_short_v2.docx"                                          # a template with the note tags
+    v2 = "Word_Proposal_Template_short_v2.docx"                                          # a template with the note tags
     assert "No work schedule is chosen" in _generate_to_the_checks(w, v2)       # a Continue / Cancel warning, not a lock-out
     assert "No work schedule is chosen" not in _generate_to_the_checks(w)       # a template without the tags: notes unused
     w._ensure_notes_window().choose_schedule("offshore-7-12")

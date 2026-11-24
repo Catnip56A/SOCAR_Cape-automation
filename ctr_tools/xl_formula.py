@@ -2,7 +2,7 @@
 xl_formula.py — a cell typed as a formula in the Generator ("=25/12") is written to Excel as that formula.
 
 A row dict may carry "formulas": {field: "=expr"} for the cells whose number came from a formula (in the units the
-CTR holds: hours and an hourly rate); the builders write the formula instead of the number. The PDMS overview sheet
+CTR holds: hours and an hourly rate); the builders write the formula instead of the number. The Word proposal overview sheet
 shows days and a day rate, so a manpower row also carries "formulas_days" (the same fields in those units).
 """
 

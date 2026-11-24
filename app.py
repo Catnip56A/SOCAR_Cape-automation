@@ -963,7 +963,7 @@ class ParseWorker(QThread):
                              i, len(payloads))
                     break
                 job.start(i)
-                if name.lower().endswith(".docx"):                # a PDMS proposal (Word) in place of a CTR
+                if name.lower().endswith(".docx"):                # a Word proposal in place of a CTR
                     results.extend(parse_proposal(BytesIO(data), filename=name))
                 else:
                     results.extend(parse_workbook(BytesIO(data), filename=name,
@@ -1195,10 +1195,10 @@ class MainWindow(QMainWindow):
         _match_lbl.setStyleSheet(f"color: {MUTED}; font-size: 11px;")
         hint_row = QHBoxLayout()
         hint_row.setSpacing(6)
-        # Proposal mode: a PDMS proposal (Word) is loaded in the CTR's place.
+        # Proposal mode: a Word proposal is loaded in the CTR's place.
         self._proposal_chk = QCheckBox("Proposal mode")
         self._proposal_chk.setToolTip(
-            "Compare an MR with a PDMS proposal (a Word file) instead of a CTR.\n"
+            "Compare an MR with a Word proposal (a Word file) instead of a CTR.\n"
             "The CTR side then accepts a .docx proposal as well as CTR Excel files.\n"
             "A proposal has no Stock Codes: it is matched by Description (the default mode does that).\n"
             "Its prices are shown, not compared.")
@@ -2480,7 +2480,7 @@ class MainWindow(QMainWindow):
         if clicked is remove:
             return "remove"
         if clicked is locate:
-            flt = ("Word files (*.docx)" if str(name).lower().endswith(".docx")      # a PDMS proposal
+            flt = ("Word files (*.docx)" if str(name).lower().endswith(".docx")      # a Word proposal
                    else "Excel files (*.xlsx *.xls *.xlsm)")
             found, _ = QFileDialog.getOpenFileName(self, f"Locate {name}", str(Path(path).parent), flt)
             return found or "keep"

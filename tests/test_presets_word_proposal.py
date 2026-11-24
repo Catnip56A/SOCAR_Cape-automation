@@ -1,10 +1,10 @@
-"""CTR presets also keep the PDMS proposal's header: Customer, Customer city, Signer, Signer title (Client was always saved)."""
+"""CTR presets also keep the Word proposal's header: Customer, Customer city, Signer, Signer title (Client was always saved)."""
 import harness as H
 from ctr_tools import window as W
 from ctr_tools.presets import _PRESET_FIELDS
 
 
-def test_the_pdms_header_is_saved_in_a_preset_and_loaded_back():
+def test_the_word_proposal_header_is_saved_in_a_preset_and_loaded_back():
     w = H.generator()
     w.show()
     for edit, text in ((w._client_edit, "SOCAR"), (w._customer_edit, "Example Customer Ltd"),
@@ -21,7 +21,7 @@ def test_the_pdms_header_is_saved_in_a_preset_and_loaded_back():
                                w._signer_title_edit)] == ["SOCAR", "Example Customer Ltd", "Baku, Azerbaijan", "Jane Roe", "Director"]
 
 
-def test_an_older_preset_without_the_pdms_header_leaves_those_boxes_alone():
+def test_an_older_preset_without_the_word_proposal_header_leaves_those_boxes_alone():
     w = H.generator()
     w.show()
     for edit, text in ((w._customer_edit, "Kept Customer"), (w._customer_city_edit, "Kept City"),
@@ -38,7 +38,7 @@ def test_an_older_preset_without_the_pdms_header_leaves_those_boxes_alone():
 def test_the_presets_label_names_the_new_fields():
     for f in ("customer_name", "customer_city", "signer_name", "signer_title"):
         assert f in _PRESET_FIELDS
-    assert "PDMS Customer" in W._PRESET_SAVES and "PDMS Signer title" in W._PRESET_SAVES
+    assert "Proposal Customer" in W._PRESET_SAVES and "Proposal Signer title" in W._PRESET_SAVES
 
 
 def test_a_folder_or_file_that_is_not_on_this_pc_is_not_shown():

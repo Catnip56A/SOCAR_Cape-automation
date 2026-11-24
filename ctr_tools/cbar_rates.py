@@ -256,7 +256,7 @@ def fetch_usd_rate() -> tuple[float, str, list[str]]:
 
 
 # ── Several currencies ────────────────────────────────────────────────────────
-# The CBAR list holds ~40 currencies; the log keeps all of them. Which ones the PDMS proposal
+# The CBAR list holds ~40 currencies; the log keeps all of them. Which ones the Word proposal
 # offers is the user's choice (Settings): USD, EUR and GBP by default, AZN always (rate 1).
 
 CURRENCY_SIGNS = {"AZN": "₼", "USD": "$", "EUR": "€", "GBP": "£", "TRY": "₺", "RUB": "₽",

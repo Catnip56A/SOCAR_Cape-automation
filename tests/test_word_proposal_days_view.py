@@ -1,4 +1,4 @@
-"""PDMS mode shows the manpower table in days and a day rate (the proposal's own figures) while the cells keep
+"""Word proposal mode shows the manpower table in days and a day rate (the proposal's own figures) while the cells keep
 hours and the hourly rate: header / UOM labels, hours / shift length, rate x shift length, 2 decimals, editing in
 days stores hours, a row with no shift length stays in hours and gets a red "!" with the reason."""
 from PySide6.QtCore import Qt
@@ -36,7 +36,7 @@ def test_days_and_day_rate_are_shown_but_hours_stay_stored():
     r = _row(w, "NS-NAT-OFF-12", "25", "10")
     assert (_shown(w, r, W._MP_QTY), _shown(w, r, W._MP_RATE), _shown(w, r, W._MP_UOM)) == ("25", "10", "Hours")
     normal = {c: tbl.horizontalHeaderItem(c).text() for c in (W._MP_QTY, W._MP_RATE)}
-    w._pdms_check.setChecked(True)
+    w._word_proposal_check.setChecked(True)
     assert tbl.horizontalHeaderItem(W._MP_QTY).text() == "Quantity (Days)"
     assert tbl.horizontalHeaderItem(W._MP_RATE).text() == "Rate/Day"
     assert _shown(w, r, W._MP_QTY) == "2.08"                         # 25 / 12, not rounded to a whole number
@@ -45,7 +45,7 @@ def test_days_and_day_rate_are_shown_but_hours_stay_stored():
     assert (tbl.item(r, W._MP_QTY).text(), tbl.item(r, W._MP_RATE).text(), tbl.item(r, W._MP_UOM).text()) \
         == ("25", "10", "Hours")                                      # stored: unchanged
     assert tbl.item(r, W._MP_TOTAL).text() == "250.00"                      # the total never depends on the view
-    w._pdms_check.setChecked(False)
+    w._word_proposal_check.setChecked(False)
     assert {c: tbl.horizontalHeaderItem(c).text() for c in (W._MP_QTY, W._MP_RATE)} == normal
     assert _shown(w, r, W._MP_QTY) == "25" and _shown(w, r, W._MP_UOM) == "Hours"
 
@@ -55,7 +55,7 @@ def test_editing_in_days_stores_hours_and_an_untouched_editor_writes_nothing():
     w.show()
     tbl = w._req_manpower_tbl
     r = _row(w, "NS-NAT-OFF-12", "25", "10")
-    w._pdms_check.setChecked(True)
+    w._word_proposal_check.setChecked(True)
     for col, typed, stored in ((W._MP_QTY, "3", "36"), (W._MP_RATE, "60", "5")):
         dg = tbl.itemDelegateForColumn(col)
         idx = tbl.model().index(r, col)
@@ -76,7 +76,7 @@ def test_a_row_without_a_shift_length_stays_in_hours_with_a_red_exclamation_mark
     w.show()
     tbl = w._req_manpower_tbl
     r = _row(w, "", "25", "10")
-    w._pdms_check.setChecked(True)
+    w._word_proposal_check.setChecked(True)
     assert (_shown(w, r, W._MP_QTY), _shown(w, r, W._MP_RATE), _shown(w, r, W._MP_UOM)) == ("25", "10", "Hours")
     v = w._days_view(tbl.model().index(r, W._MP_QTY))
     assert v["problem"] and "no Encoding" in v["problem"] and "shift length" in v["problem"]
@@ -104,10 +104,10 @@ def test_a_row_without_a_shift_length_stays_in_hours_with_a_red_exclamation_mark
     tbl.item(r, W._MP_ENC).setText("NS-NAT-OFF-12")                    # fixed: converted, no mark
     assert w._days_view(tbl.model().index(r, W._MP_QTY))["problem"] is None
     assert _shown(w, r, W._MP_QTY) == "2.08"
-    w._pdms_check.setChecked(False)
+    w._word_proposal_check.setChecked(False)
 
 
-def test_a_row_without_a_shift_length_is_skipped_in_pdms_mode_after_a_warning():
+def test_a_row_without_a_shift_length_is_skipped_in_word_proposal_mode_after_a_warning():
     from PySide6.QtWidgets import QMessageBox
     w = H.generator()
     w.show()
@@ -118,7 +118,7 @@ def test_a_row_without_a_shift_length_is_skipped_in_pdms_mode_after_a_warning():
     tbl.item(bad, W._MP_SHIFT).setText("Day")                              # everything else is filled in: only the hours are missing
     tbl.item(bad, W._MP_SHIFTTYPE).setText("Normal")
     tbl.item(bad, W._MP_NUMEMP).setText("1")
-    w._pdms_check.setChecked(True)
+    w._word_proposal_check.setChecked(True)
     bad = {(id(c["tbl"]), c["row"]) for c in w._incomplete_cells()}         # rows with a missing value are left out first
     rows = w._collect_rows(True, bad)
     skipped = rows["no_shift"]
@@ -129,12 +129,12 @@ def test_a_row_without_a_shift_length_is_skipped_in_pdms_mode_after_a_warning():
     assert "Row without hours" in [r["description"] for r in normal["support_rows"] + normal["other_rows"]]
     assert normal["no_shift"] == []
     # Generate warns (Yes / Cancel) and lists the row; Cancel stops before anything is written
-    tpl = H.INPUTS / "PDMS_TEMPLATE_short.docx"
+    tpl = H.INPUTS / "Word_Proposal_Template_short.docx"
     if not tpl.is_file():
-        raise H.Skip("PDMS_TEMPLATE_short.docx is not in TEST_Files/CTR creator")
+        raise H.Skip("Word_Proposal_Template_short.docx is not in TEST_Files/CTR creator")
     out = H.SANDBOX / "out" / "noshift"
     out.mkdir(parents=True, exist_ok=True)
-    w._pdms_tpl_edit.setText(str(tpl))
+    w._word_proposal_tpl_edit.setText(str(tpl))
     w._out_dir_edit.setText(str(out))
     w._job_ref_edit.setText("998")
     w._prp_edit.setText("PRP-26-998")
@@ -149,7 +149,7 @@ def test_a_row_without_a_shift_length_is_skipped_in_pdms_mode_after_a_warning():
         assert not list(out.glob("*.docx"))
     finally:
         QMessageBox.question = real
-    w._pdms_check.setChecked(False)
+    w._word_proposal_check.setChecked(False)
 
 
 def test_manpower_is_listed_in_the_cost_statistics_box_but_not_costed_like_the_sage_lines():
@@ -166,7 +166,7 @@ def test_manpower_is_listed_in_the_cost_statistics_box_but_not_costed_like_the_s
             tbl.item(r, W._MP_DESC).text(), tbl.item(r, W._MP_ENC).text(), tbl.item(r, W._MP_QTY).text(),
             "Hours", tbl.item(r, W._MP_RATE).text(), tbl.item(r, W._MP_TOTAL).text()]
     assert "Not costed from SAGE" in w._mp_stats_lbl.text() and f"{len(matched)} matched" in w._mp_stats_lbl.text()
-    w._pdms_check.setChecked(True)                                                # PDMS mode: days and a day rate, as in the table
+    w._word_proposal_check.setChecked(True)                                                # Word proposal mode: days and a day rate, as in the table
     w._refresh_stats()
     H.pump(5)
     r = matched[0]
@@ -175,4 +175,4 @@ def test_manpower_is_listed_in_the_cost_statistics_box_but_not_costed_like_the_s
     assert lst.item(0, 3).text() == f"{float(tbl.item(r, W._MP_QTY).text()) / ph:.2f}"
     assert lst.item(0, 5).text() == f"{float(tbl.item(r, W._MP_RATE).text()) * ph:.2f}"
     assert "₼" in w._mp_stats_lbl.text()
-    w._pdms_check.setChecked(False)
+    w._word_proposal_check.setChecked(False)

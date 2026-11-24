@@ -1,9 +1,9 @@
-"""PDMS notes (ctr_tools/pdms_notes.py): the list, places with their own pre-tick and order, placeholders,
+"""Word proposal notes (ctr_tools/word_proposal_notes.py): the list, places with their own pre-tick and order, placeholders,
 remembered values with closest-first suggestions. Pure data: nothing of Word or Qt; a sandboxed file."""
 import json
 
 import harness as H
-from ctr_tools import pdms_notes as N
+from ctr_tools import word_proposal_notes as N
 
 
 def _fresh(tag):

@@ -106,14 +106,14 @@ def test_a_formula_in_a_days_cell_is_in_days_and_the_cell_keeps_hours():
     w.show()
     tbl = w._req_manpower_tbl
     r = _row(w)
-    w._pdms_check.setChecked(True)
+    w._word_proposal_check.setChecked(True)
     _type(w, r, W._MP_QTY, "=5/2")                                        # 2.5 days at 12 h/shift = 30 h
     assert tbl.item(r, W._MP_QTY).text() == "30"
     _type(w, r, W._MP_RATE, "=60*2")                                      # 120 per day = 10 per hour
     assert tbl.item(r, W._MP_RATE).text() == "10"
     assert _type(w, r, W._MP_QTY, "=5/2") == "=5/2"                       # reopened in days: the formula
     idx = tbl.model().index(r, W._MP_QTY)
-    w._pdms_check.setChecked(False)                                       # hours again: the value, with a note
+    w._word_proposal_check.setChecked(False)                                       # hours again: the value, with a note
     assert _type(w, r, W._MP_QTY, "30") == "30"
     hint = w._cell_hint(idx, tbl.item(r, W._MP_QTY).data(W._FORMULA_ROLE), None)
     live = tbl.item(r, W._MP_QTY).data(W._FORMULA_ROLE)
@@ -128,12 +128,12 @@ def test_the_hover_says_what_the_days_view_means():
     w.show()
     tbl = w._req_manpower_tbl
     r = _row(w)
-    w._pdms_check.setChecked(True)
+    w._word_proposal_check.setChecked(True)
     q = w._cell_hint(tbl.model().index(r, W._MP_QTY), None, "days")
     assert "25" in q and "12 h per shift" in q and "2.08" in q
     t = w._cell_hint(tbl.model().index(r, W._MP_RATE), None, "days")
     assert "per day" in t and "120.00" in t
-    w._pdms_check.setChecked(False)
+    w._word_proposal_check.setChecked(False)
 
 
 def test_a_formula_typed_with_the_keyboard_works_in_every_number_cell():
@@ -194,7 +194,7 @@ def test_the_hotbed_and_cbar_boxes_take_formulas_and_show_them_again():
     w = H.generator()
     w.show()
     w.activateWindow()
-    w._pdms_check.setChecked(True)
+    w._word_proposal_check.setChecked(True)
     H.pump(5)
     for box, formula, value in ((w._hotbed_rate_edit, "=50+9", "59"), (w._hotbed_days_edit, "=10/4", "2.5"),
                                 (w._fx["USD"]["edit"], "=1.7*1.02", "1.734")):
@@ -213,7 +213,7 @@ def test_the_hotbed_and_cbar_boxes_take_formulas_and_show_them_again():
     _type_into(w._hotbed_days_edit, "=1/0")                # refused: the box keeps its value
     assert w._hotbed_days_edit.text() == "2.5"
     assert abs(w.price_totals()["hotbed"] - 59 * 2.5 * 1.734) < 1e-6 or w.price_totals()["hotbed"] > 0
-    w._pdms_check.setChecked(False)
+    w._word_proposal_check.setChecked(False)
 
 
 def test_the_markup_box_takes_a_formula():
@@ -241,9 +241,9 @@ def test_the_statistics_cells_work_out_a_formula_and_totals_say_how_they_are_mad
     r = _row(w)
     tip = w._req_manpower_tbl.item(r, W._MP_TOTAL).toolTip()
     assert "Num Employees × Quantity (hours) × Rate" in tip
-    w._pdms_check.setChecked(True)
+    w._word_proposal_check.setChecked(True)
     assert "in manats" in w._req_manpower_tbl.item(r, W._MP_TOTAL).toolTip()
-    w._pdms_check.setChecked(False)
+    w._word_proposal_check.setChecked(False)
     for add, tbl, col, word in ((w._add_equip_row, w._req_equip_tbl, W._EQ_DAYS, "Days"),
                                 (w._add_cons_row, w._req_cons_tbl, W._CS_PRICE, "Unit"),
                                 (w._add_transport_row, w._transport_tbl, W._TR_DUR, "Duration")):
@@ -289,11 +289,11 @@ def test_cells_typed_as_formulas_are_formulas_in_the_azn_and_usd_ctrs():
     _type(w, 0, W._MP_NUMEMP, "=1+1")
     _type(w, 0, W._MP_QTY, "=2×12")                                           # × and a decimal comma are Excel-ised
     _type(w, 0, W._MP_RATE, "=2,5*2")
-    w._pdms_check.setChecked(True)                                           # in PDMS mode a Quantity formula is in days ...
+    w._word_proposal_check.setChecked(True)                                           # in Word proposal mode a Quantity formula is in days ...
     r1 = 1
     desc1 = mp.item(r1, W._MP_DESC).text()
     _type(w, r1, W._MP_QTY, "=5/2")                                          # 2.5 days at 12 h/shift = 30 h
-    w._pdms_check.setChecked(False)                                          # ... and the CTR holds hours: (5/2)*12
+    w._word_proposal_check.setChecked(False)                                          # ... and the CTR holds hours: (5/2)*12
     ci = next(i for i in range(cs.rowCount())                               # a priced line: a NONRECHARG one would raise a disparity
               if cs.item(i, W._CS_STATUS).text().startswith("✓") and cs.item(i, W._CS_PRICE).text().replace(".", "").isdigit())
     eq_desc, cs_desc = eq.item(0, W._EQ_DESC).text(), cs.item(ci, W._CS_DESC).text()
@@ -332,34 +332,34 @@ def test_cells_typed_as_formulas_are_formulas_in_the_azn_and_usd_ctrs():
     assert isinstance(azn.cell(_row_of(azn, desc, 3), 5).value, str) and not str(azn.cell(_row_of(azn, desc, 3), 5).value).startswith("=")
 
 
-def test_the_pdms_overview_sheet_keeps_formulas_in_days_and_the_day_rate():
+def test_the_word_proposal_overview_sheet_keeps_formulas_in_days_and_the_day_rate():
     import openpyxl
     from ctr_tools import window as W
-    from ctr_tools.pdms_overview import add_overview_sheet, SHEET_NAME
+    from ctr_tools.word_proposal_overview import add_overview_sheet, SHEET_NAME
     w = H.generator()
     w.show()
     mp = w._req_manpower_tbl
-    w._pdms_check.setChecked(True)
+    w._word_proposal_check.setChecked(True)
     H.resolve_disparities(w)
     _type(w, 0, W._MP_QTY, "=5/2")                                           # days
     _type(w, 0, W._MP_RATE, "=60*2")                                         # a day rate
-    _type(w, 1, W._MP_QTY, "=24*2")                                          # hours-unit formula typed while PDMS is on is days too
+    _type(w, 1, W._MP_QTY, "=24*2")                                          # hours-unit formula typed while Word proposal is on is days too
     w._hotbed_days_edit.setText("")
-    data, hdr, days = w._pdms_overview_data()
+    data, hdr, days = w._word_proposal_overview_data()
     wb = openpyxl.Workbook()
     add_overview_sheet(wb, data, hdr, days)
     ws = wb[SHEET_NAME]
     cells = {str(c.value) for row in ws.iter_rows() for c in row if isinstance(c.value, str)}
     assert "=5/2" in cells and "=60*2" in cells and "=24*2" in cells
-    w._pdms_check.setChecked(False)
-    _type(w, 2, W._MP_QTY, "=24*2")                                          # typed in hours (PDMS off): the overview shows days
-    w._pdms_check.setChecked(True)
-    data, hdr, days = w._pdms_overview_data()
+    w._word_proposal_check.setChecked(False)
+    _type(w, 2, W._MP_QTY, "=24*2")                                          # typed in hours (Word proposal off): the overview shows days
+    w._word_proposal_check.setChecked(True)
+    data, hdr, days = w._word_proposal_overview_data()
     wb = openpyxl.Workbook()
     add_overview_sheet(wb, data, hdr, days)
     cells = {str(c.value) for row in wb[SHEET_NAME].iter_rows() for c in row if isinstance(c.value, str)}
     assert "=(24*2)/12" in cells
-    w._pdms_check.setChecked(False)
+    w._word_proposal_check.setChecked(False)
 
 
 def test_the_statistics_workbooks_price_items_keep_formulas_for_matching_lines():

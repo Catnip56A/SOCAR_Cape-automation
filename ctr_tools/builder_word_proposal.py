@@ -1,12 +1,12 @@
 """
-ctr_tools/builder_pdms.py
+ctr_tools/builder_word_proposal.py
 
-Writes the PDMS proposal (a Word document) from the same rows the AZN and USD
+Writes the Word proposal (a Word document) from the same rows the AZN and USD
 CTRs are built from. Nothing is recalculated here except the AZN conversion of
 equipment and consumables (see _unit_prices) — the labour rows already carry
 AZN rates.
 
-The template (TEST_Files/CTR creator/PDMS_TEMPLATE_short.docx) holds tags that
+The template (TEST_Files/CTR creator/Word_Proposal_Template_short_v2.docx) holds tags that
 are replaced here:
 
     {{PRP_NUMBER}} {{DATE}} {{CUSTOMER_NAME}} {{CUSTOMER_CITY}} {{ATTENTION_NAME}}
@@ -21,14 +21,14 @@ are replaced here:
         caption and table between the markers are deleted when the section is empty
 
     {{NOTES_<PLACE>}} {{NOTES_<PLACE>_BULLET}}   (e.g. SCHEDULE, EXCLUSIONS, PRICE_BASIS)
-        the notes of that place (ctr_tools/pdms_notes.py): the paragraph carrying the tag is the model
+        the notes of that place (ctr_tools/word_proposal_notes.py): the paragraph carrying the tag is the model
         — style, indent and Word numbering — copied once per ticked note, in order; _BULLET is the model
         of a "* " line (a bullet note gets the "* " prefix; without it the main model is used)
     {{#IF_NOTES_<PLACE>}} ... {{/IF_NOTES_<PLACE>}}
         heading and tags between the markers are deleted when no note is ticked there
     A template without these tags works as before.
 
-Fixed texts and defaults live in template_config.json ("pdms").
+Fixed texts and defaults live in template_config.json ("word_proposal").
 
 The USD -> AZN conversion of equipment and consumables (CBAR rate, consumables mark-up
 applied) works as the colleagues asked (task log MA202). Everything that depends on it is
@@ -48,10 +48,10 @@ from docx.oxml.ns import qn
 from docx.table import Table, _Row
 from docx.text.paragraph import Paragraph
 
-from ctr_tools import pdms_notes
+from ctr_tools import word_proposal_notes
 from ctr_tools.config import CFG
 from ctr_tools.xl_formula import pick as _pick, pick_days as _pick_days
-from ctr_tools.naming import pdms_output_filename
+from ctr_tools.naming import word_proposal_output_filename
 
 log = logging.getLogger(__name__)
 
@@ -59,7 +59,7 @@ _MONTHS = ["January", "February", "March", "April", "May", "June", "July",
            "August", "September", "October", "November", "December"]
 
 _DEFAULTS = {
-    # The real customer and signer are configuration (template_config.json, "pdms"); the code carries none.
+    # The real customer and signer are configuration (template_config.json, "word_proposal"); the code carries none.
     "customer_name": "",
     "customer_city": "",
     "signer_name":   "",
@@ -69,14 +69,14 @@ _DEFAULTS = {
     "hotbed_label":  "Hotbed – if required",
     "hotbed_rate":   59.0,
     "default_usd_azn": 1.7,
-    "markup_rate": 0.10,          # the mark-up a PDMS proposal usually carries; the Markup Rate box switches to it
+    "markup_rate": 0.10,          # the mark-up a Word proposal usually carries; the Markup Rate box switches to it
     "category_currencies": {"manpower": "AZN", "equipment": "USD", "consumables": "USD", "transport": "AZN"},
 }
 
 
-def pdms_defaults() -> dict:
-    """The "pdms" block of template_config.json over the built-in defaults."""
-    cfg = {**_DEFAULTS, **CFG.get("pdms", {})}
+def word_proposal_defaults() -> dict:
+    """The "word_proposal" block of template_config.json over the built-in defaults."""
+    cfg = {**_DEFAULTS, **CFG.get("word_proposal", {})}
     cfg["category_currencies"] = {**_DEFAULTS["category_currencies"], **cfg.get("category_currencies", {})}
     return cfg
 
@@ -287,7 +287,7 @@ def _remove_block(doc, name: str) -> None:
     """Delete the paragraphs from {{#IF_name}} to {{/IF_name}}, markers included."""
     start, end = _find_paragraph(doc, "{{#IF_%s}}" % name), _find_paragraph(doc, "{{/IF_%s}}" % name)
     if start is None or end is None:
-        raise ValueError(f"PDMS template has no {{{{#IF_{name}}}}} ... {{{{/IF_{name}}}}} block.")
+        raise ValueError(f"Word proposal template has no {{{{#IF_{name}}}}} ... {{{{/IF_{name}}}}} block.")
     el = start._p
     while True:
         nxt = el.getnext()
@@ -357,8 +357,8 @@ def _fill_notes(doc, items: dict, values: dict) -> list[str]:
         for line in lines:
             kind = line.get("kind")
             model = found.get("bullet") if kind == "bullet" and found.get("bullet") is not None else main
-            text = pdms_notes.render(str(line.get("text", "")), values)
-            unresolved += pdms_notes.missing(str(line.get("text", "")), values)
+            text = word_proposal_notes.render(str(line.get("text", "")), values)
+            unresolved += word_proposal_notes.missing(str(line.get("text", "")), values)
             el = copy.deepcopy(model._p)
             last.addnext(el)
             last = el
@@ -378,14 +378,14 @@ def _find_table(doc, tag: str) -> Table:
     for t in doc.tables:
         if any(tag in c.text for r in t.rows for c in r.cells):
             return t
-    raise ValueError(f"PDMS template has no table with {tag}.")
+    raise ValueError(f"Word proposal template has no table with {tag}.")
 
 
 def _row_with(table: Table, tag: str):
     for r in table.rows:
         if any(tag in c.text for c in r.cells):
             return r
-    raise ValueError(f"PDMS template: no table row with {tag}.")
+    raise ValueError(f"Word proposal template: no table row with {tag}.")
 
 
 def _fill_row(table: Table, tr, values: dict) -> None:
@@ -431,7 +431,7 @@ def _drop_row(table: Table, tag: str) -> None:
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 
-def compute_pdms(
+def compute_word_proposal(
     support_rows: list[dict],
     other_rows: list[dict],
     equip_rows: list[dict],
@@ -443,10 +443,10 @@ def compute_pdms(
     hotbed: dict | None = None,
     currencies: dict | None = None,
 ) -> dict:
-    """The figures of a PDMS proposal, as the Word document and the Excel overview both show them
-    (see build_pdms for the arguments): labour, equipment, consumables, transport, the Hotbed line,
+    """The figures of a Word proposal, as the Word document and the Excel overview both show them
+    (see build_word_proposal for the arguments): labour, equipment, consumables, transport, the Hotbed line,
     the four totals and the rates used. Every line also keeps its own price, currency and CBAR rate."""
-    cfg = pdms_defaults()
+    cfg = word_proposal_defaults()
     defaults = {**cfg["category_currencies"], **(currencies or {})}
     labour = []
     for r in list(support_rows) + list(other_rows):
@@ -494,7 +494,7 @@ def compute_pdms(
 
 
 
-def build_pdms(
+def build_word_proposal(
     support_rows: list[dict],
     other_rows: list[dict],
     equip_rows: list[dict],
@@ -510,15 +510,15 @@ def build_pdms(
     notes: dict | None = None,
 ) -> Path:
     """
-    Write the PDMS proposal into a copy of the template and return its path.
+    Write the Word proposal into a copy of the template and return its path.
 
     Row dicts are the ones CTRWorker already gets (see build_azn / build_usd).
     header keys: prp_number, date, customer_name, customer_city, attention_name,
         salutation_name, scope (job title), project_type (Offshore/Onshore),
         signer_name, signer_title. Missing optional values fall back to the
-        "pdms" block of template_config.json.
+        "word_proposal" block of template_config.json.
     rates: {currency code: AZN per 1 unit} (CBAR). A price is in its line's
-        own "currency" key, else in its category's default (`currencies`, over the "pdms"
+        own "currency" key, else in its category's default (`currencies`, over the "word_proposal"
         block's: manpower AZN, equipment USD, consumables USD, transport AZN); it is converted to
         AZN first, then the mark-up is added, and line totals are rounded to 2 decimals.
     hotbed: {"rate", "days"[, "currency"]} or None (= left out). With both a rate and days it is
@@ -534,22 +534,22 @@ def build_pdms(
     """
     template_path, output_dir = Path(template_path), Path(output_dir)
     if not template_path.is_file():
-        raise ValueError(f"PDMS Template not found: {template_path}")
+        raise ValueError(f"Word Proposal Template not found: {template_path}")
     try:
         output_dir.mkdir(parents=True, exist_ok=True)
     except OSError as e:
         raise ValueError(f"Cannot create output folder {output_dir}: {e}") from e
 
-    cfg = pdms_defaults()
+    cfg = word_proposal_defaults()
     sym, currency = cfg["currency_symbol"], cfg["currency"]
     defaults = {**cfg["category_currencies"], **(currencies or {})}
     doc = docx.Document(str(template_path))
     if not (_has_table_with(doc, "{{L_DESC}}") or _has_table_with(doc, "{{L_POSITION}}")):
-        raise ValueError(f"{Path(template_path).name} is not a tagged PDMS template: its labour table has no {{{{L_DESC}}}} "
+        raise ValueError(f"{Path(template_path).name} is not a tagged Word proposal template: its labour table has no {{{{L_DESC}}}} "
                          "(short) or {{L_POSITION}} (long) tag. An original proposal document cannot be used as it is: "
-                         "choose the tagged template (for example PDMS_TEMPLATE_short_v2.docx or PDMS_TEMPLATE_long.docx).")
+                         "choose the tagged template (for example Word_Proposal_Template_short_v2.docx or Word_Proposal_Template_long.docx).")
 
-    d = compute_pdms(support_rows, other_rows, equip_rows, consump_rows, header, rates, markup_rate,
+    d = compute_word_proposal(support_rows, other_rows, equip_rows, consump_rows, header, rates, markup_rate,
                      third_party_rows, hotbed, currencies)
     labour, equipment, consumables, transport = d["labour"], d["equipment"], d["consumables"], d["transport"]
     hotbed, hotbed_total = d["hotbed"], d["hotbed_total"]
@@ -682,14 +682,14 @@ def build_pdms(
     # ── the notes (only a template that has the tags) ──
     if notes_places_in(doc):
         if notes is None:
-            data = pdms_notes.load_notes()
+            data = word_proposal_notes.load_notes()
             auto = {"location": location, "currency": currency}
-            notes = {"items": {p: [n for n in pdms_notes.notes_for(data, p) if n["id"] in ids]
-                               for p, ids in pdms_notes.default_ticks(data).items()},
-                     "values": {n: pdms_notes.initial_value(data, n, auto) for n in pdms_notes.placeholder_names(data)}}
+            notes = {"items": {p: [n for n in word_proposal_notes.notes_for(data, p) if n["id"] in ids]
+                               for p, ids in word_proposal_notes.default_ticks(data).items()},
+                     "values": {n: word_proposal_notes.initial_value(data, n, auto) for n in word_proposal_notes.placeholder_names(data)}}
         left = _fill_notes(doc, notes.get("items", {}), notes.get("values", {}))
         if left:
-            log.warning("PDMS notes: no value for %s — the text keeps the {name}", ", ".join(left))
+            log.warning("Word proposal notes: no value for %s — the text keeps the {name}", ", ".join(left))
 
     # ── text tags (body, headers, footers) ──
     for par in _all_paragraphs(doc):
@@ -697,10 +697,10 @@ def build_pdms(
 
     leftover = sorted({t for par in _all_paragraphs(doc) for t in _TAG.findall(par.text)})
     if leftover:
-        raise ValueError("PDMS template has tags this version cannot fill: " + ", ".join(leftover))
+        raise ValueError("Word proposal template has tags this version cannot fill: " + ", ".join(leftover))
 
-    out_path = output_dir / pdms_output_filename(header["prp_number"], header.get("scope", ""))
+    out_path = output_dir / word_proposal_output_filename(header["prp_number"], header.get("scope", ""))
     doc.save(str(out_path))
-    log.info("PDMS proposal written: %s (labour=%d equipment=%d consumables=%d transport=%d total=%.2f)",
+    log.info("Word proposal written: %s (labour=%d equipment=%d consumables=%d transport=%d total=%.2f)",
              out_path, len(labour), len(equipment), len(consumables), len(transport), grand_total)
     return out_path

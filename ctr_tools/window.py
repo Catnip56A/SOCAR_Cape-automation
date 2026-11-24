@@ -63,7 +63,7 @@ from ctr_tools.desc_renames import (
     load_desc_renames, get_desc_rename, set_desc_rename, delete_desc_rename,
     save_desc_renames,
 )
-from ctr_tools.config import CFG, reload_pdms_config
+from ctr_tools.config import CFG, reload_word_proposal_config
 from stats import cost_stats
 from common.find_bar import install_find
 from common.hover_text import install_elided_tooltips
@@ -77,17 +77,17 @@ from ctr_tools.builder_azn import (
     strip_support_keyword,
 )
 from ctr_tools.builder_usd import build_usd
-from ctr_tools.builder_pdms import (
-    attention_from_requester, build_pdms, compute_pdms, notes_places_in, pdms_defaults, salutation_from_attention,
+from ctr_tools.builder_word_proposal import (
+    attention_from_requester, build_word_proposal, compute_word_proposal, notes_places_in, word_proposal_defaults, salutation_from_attention,
 )
-from ctr_tools.pdms_overview import add_overview_sheet
+from ctr_tools.word_proposal_overview import add_overview_sheet
 from ctr_tools.parser import (
     parse_azn_pricebook, parse_usd_pricebook, parse_sage,
     parse_ctr_request, parse_equip_names_db, parse_encoding_info,
 )
 from ctr_tools.pdf_exporter import export_docx_to_pdf, export_to_pdf
-from ctr_tools import pdms_notes
-from ctr_tools.pdms_notes_view import PdmsNotesWindow
+from ctr_tools import word_proposal_notes
+from ctr_tools.word_proposal_notes_view import WordProposalNotesWindow
 from ctr_tools import cbar_rates
 from ctr_tools.tasks import TASKS, Job
 
@@ -119,10 +119,10 @@ _PRESET_FIELD_LABELS = {
     "job_ref":         "Job Ref",
     "output_dir":      "Output folder",
     "markup_rate_pct": "Markup Rate",
-    "customer_name":   "PDMS Customer",
-    "customer_city":   "PDMS Customer city",
-    "signer_name":     "PDMS Signer",
-    "signer_title":    "PDMS Signer title",
+    "customer_name":   "Proposal Customer",
+    "customer_city":   "Proposal Customer city",
+    "signer_name":     "Proposal Signer",
+    "signer_title":    "Proposal Signer title",
 }
 _PRESET_SAVES = ", ".join(_PRESET_FIELD_LABELS.get(f, f) for f in _PRESET_FIELDS)
 _PRESET_OMITS = (
@@ -206,9 +206,9 @@ _TRANSPORT_HEADERS = [
     "Rate AZN", "Mark Up %", "Total AZN",
 ]
 
-# What the headers say in PDMS mode: a price is in its own cell's currency (the cell shows the
+# What the headers say in Word proposal mode: a price is in its own cell's currency (the cell shows the
 # currency's sign), so the fixed AZN / USD goes from the Rate headers; every Total is in manats.
-_PDMS_HEADERS = {
+_WORD_PROPOSAL_HEADERS = {
     "manpower":    {_MP_QTY: "Quantity (Days)", _MP_RATE: "Rate/Day", _MP_TOTAL: "Total AZN"},
     "equipment":   {_EQ_RATE: "Rate/Day", _EQ_TOTAL: "Total AZN"},
     "consumables": {_CS_PRICE: "Unit Price", _CS_TOTAL: "Total AZN"},
@@ -267,13 +267,13 @@ class CTRWorker(QThread):
         header_azn:    dict | None = None,
         header_usd:    dict | None = None,
         markup_rate:   float | None = None,
-        pdms: dict | None = None,
+        word_proposal: dict | None = None,
         parent=None,
     ):
         super().__init__(parent)
-        # PDMS proposal mode: {"template", "header", "rates", "hotbed"}. The AZN / USD Excel CTRs are
+        # Word proposal mode: {"template", "header", "rates", "hotbed"}. The AZN / USD Excel CTRs are
         # then not written; the proposal (and its PDF, where LibreOffice can) is.
-        self._pdms = pdms
+        self._word_proposal = word_proposal
         self._support_rows  = support_rows
         self._other_rows    = other_rows
         self._equip_rows    = equip_rows
@@ -289,38 +289,38 @@ class CTRWorker(QThread):
         # Ordered steps, shown in the F12 Inspector. A stop request is only
         # honoured between steps, so a spreadsheet is never cut off halfway.
         self.job: Job = TASKS.begin_job(f"Generate CTR {job_ref}", (
-            ["Write PDMS proposal", "Export PDMS PDF"] if pdms else [
+            ["Write Word proposal", "Export Word proposal PDF"] if word_proposal else [
                 "Write AZN spreadsheet", "Write USD spreadsheet",
                 "Export AZN PDF", "Export USD PDF",
             ]))
         self.stopped = False
 
-    def _run_pdms(self, out: Path, job: Job, produced: list, stop_here) -> None:
-        """PDMS proposal mode: the Word proposal, then (best effort) its PDF."""
+    def _run_word_proposal(self, out: Path, job: Job, produced: list, stop_here) -> None:
+        """Word proposal mode: the Word proposal, then (best effort) its PDF."""
         job.start(0)
-        self.progress.emit("Writing PDMS proposal…")
-        pdms = self._pdms
-        docx_path = build_pdms(
+        self.progress.emit("Writing Word proposal…")
+        word_proposal = self._word_proposal
+        docx_path = build_word_proposal(
             self._support_rows, self._other_rows, self._equip_rows, self._consump_rows,
-            pdms["template"], out, pdms["header"], rates=pdms["rates"],
+            word_proposal["template"], out, word_proposal["header"], rates=word_proposal["rates"],
             markup_rate=self._markup_rate or 0.0, third_party_rows=self._third_party_rows,
-            hotbed=pdms.get("hotbed"), currencies=pdms.get("currencies"), notes=pdms.get("notes"),
+            hotbed=word_proposal.get("hotbed"), currencies=word_proposal.get("currencies"), notes=word_proposal.get("notes"),
         )
-        log.info("CTRWorker: PDMS proposal written: %s", docx_path)
-        cbar_rates.log_usage(docx_path.name, pdms["header"].get("prp_number", ""), pdms["rates_used"])
+        log.info("CTRWorker: Word proposal written: %s", docx_path)
+        cbar_rates.log_usage(docx_path.name, word_proposal["header"].get("prp_number", ""), word_proposal["rates_used"])
         job.done(0)
         produced.append(str(docx_path))
         if stop_here(1):
             return
         job.start(1)
-        self.progress.emit("Exporting PDMS PDF (Word if installed, else LibreOffice)…")
+        self.progress.emit("Exporting Word proposal PDF (Word if installed, else LibreOffice)…")
         try:
             pdf_path, engine = export_docx_to_pdf(docx_path, out)
-            log.info("CTRWorker: PDMS PDF written by %s: %s", engine, pdf_path)
+            log.info("CTRWorker: Word proposal PDF written by %s: %s", engine, pdf_path)
             produced.append(str(pdf_path))
             job.done(1)
         except RuntimeError as e:
-            log.warning("CTRWorker: PDMS PDF export skipped: %s", e)
+            log.warning("CTRWorker: Word proposal PDF export skipped: %s", e)
             produced.append(f"[PDF skipped: {e}]")
             job.done(1, "PDF skipped")
         job.finish()
@@ -352,8 +352,8 @@ class CTRWorker(QThread):
         try:
             out = Path(self._output_dir)
 
-            if self._pdms:
-                self._run_pdms(out, job, produced, _stop_here)
+            if self._word_proposal:
+                self._run_word_proposal(out, job, produced, _stop_here)
                 return
 
             step = 0
@@ -543,7 +543,7 @@ def _group_css(color: str) -> str:
 
 
 _JUMP_ROLE = Qt.UserRole + 5   # True on the one cell "Go to missing value" last jumped to
-_CUR_ROLE = Qt.UserRole + 50   # a Rate / Price cell's own currency code (None = its category's); PDMS mode
+_CUR_ROLE = Qt.UserRole + 50   # a Rate / Price cell's own currency code (None = its category's); Word proposal mode
 _SRC_ROLE = Qt.UserRole + 52      # on every cell of a row built from the CTR Request: (table, which request item)
 _LOADED_ROLE = Qt.UserRole + 53   # the text a cell had right after it was loaded (to tell what the user changed)
 _PICK_ROLE = Qt.UserRole + 54     # True on a cell picked with Ctrl+Shift+click for a reload
@@ -593,7 +593,7 @@ class _DaysViewMixin:
 
     A formula is kept beside the value (_FORMULA_ROLE) and is live only while the cell still holds the
     value it gave, so anything else that rewrites the cell (a re-match, a reload) retires it by itself.
-    PDMS mode shows a manpower row in days and a day rate (the proposal's own figures) while the table
+    Word proposal mode shows a manpower row in days and a day rate (the proposal's own figures) while the table
     keeps hours and the hourly rate; a formula typed there is in days. The owner's _days_view(index) says
     what to show; a row without a shift length stays in hours and gets a red "!" whose tooltip says why."""
 
@@ -683,7 +683,7 @@ class _DaysViewMixin:
 
 
 class _DaysQtyDelegate(_DaysViewMixin, _JumpOverlayDelegate):
-    """A manpower number cell: formulas, and for Quantity / UOM days and "Days" in PDMS mode."""
+    """A manpower number cell: formulas, and for Quantity / UOM days and "Days" in Word proposal mode."""
 
     def __init__(self, parent, owner):
         super().__init__(parent)
@@ -717,9 +717,9 @@ class _DaysQtyDelegate(_DaysViewMixin, _JumpOverlayDelegate):
 
 
 class _MoneyDelegate(_DaysViewMixin, _JumpOverlayDelegate):
-    """A Rate / Price cell in PDMS mode: the number in the left half and the currency in the right
+    """A Rate / Price cell in Word proposal mode: the number in the left half and the currency in the right
     half, drawn as the currency's sign (₼ $ £ €). The editor is a number box plus a drop-down of
-    the currency codes (AZN, USD, GBP …) that are turned on. Outside PDMS mode it is an ordinary cell."""
+    the currency codes (AZN, USD, GBP …) that are turned on. Outside Word proposal mode it is an ordinary cell."""
 
     NON_RECHARGEABLE = "NON-RECHARGEABLE"
 
@@ -729,7 +729,7 @@ class _MoneyDelegate(_DaysViewMixin, _JumpOverlayDelegate):
         self._popup_next = False
 
     def _active(self) -> bool:
-        return self._owner._pdms_on()
+        return self._owner._word_proposal_on()
 
     def parts(self, index) -> tuple[str, str]:
         """(the number as typed, the currency's sign); no sign for a text such as NONRECHARG."""
@@ -1980,8 +1980,8 @@ class CTRGeneratorWidget(QWidget):
         # Output templates + Combined DB — shared by both data-source sub-tabs below
         row4, self._azn_tpl_edit = _file_picker_row("AZN Template", "Excel (*.xlsx *.xls)")
         row5, self._usd_tpl_edit = _file_picker_row("USD Template", "Excel (*.xlsx *.xls)")
-        row_pd, self._pdms_tpl_edit = _file_picker_row("PDMS Template (short)", "Word (*.docx)")
-        row_pdl, self._pdms_tpl_long_edit = _file_picker_row("PDMS Template (long)", "Word (*.docx)")
+        row_pd, self._word_proposal_tpl_edit = _file_picker_row("Word Proposal (short)", "Word (*.docx)")
+        row_pdl, self._word_proposal_tpl_long_edit = _file_picker_row("Word Proposal (long)", "Word (*.docx)")
         row6, self._combined_db_edit = _file_picker_row(
             "Combined DB (Names + Request)", "Excel (*.xlsx *.xls)")
         gl.addLayout(row4)
@@ -2194,12 +2194,12 @@ class CTRGeneratorWidget(QWidget):
         btn_row.addWidget(mp_next_btn)
         gl.addLayout(btn_row)
 
-        # PDMS proposal only: the standing "Hotbed – if required" labour line. Rate (editable,
+        # Word proposal only: the standing "Hotbed – if required" labour line. Rate (editable,
         # standard 59) × Days = its total; left out of the proposal while either is blank. It is a
         # line of its own, not a table row, so no matching / encoding / "missing value" rule applies.
         self._hotbed_widgets = []
         hotbed_row = QHBoxLayout()
-        _hb_lbl = QLabel(f"PDMS — {pdms_defaults()['hotbed_label']}:")
+        _hb_lbl = QLabel(f"Proposal — {word_proposal_defaults()['hotbed_label']}:")
         _hb_lbl.setStyleSheet(f"color: {MUTED}; font-size: 11px;")
         self._hotbed_incl_chk = QCheckBox("Include")
         self._hotbed_incl_chk.setChecked(True)
@@ -2208,7 +2208,7 @@ class CTRGeneratorWidget(QWidget):
             "calculated; with one of them missing the line just carries what is given, with no total.\n"
             "Unticked: a line with a rate and days is still calculated and included; an incomplete one "
             "is left out.")
-        self._hotbed_rate_edit = QLineEdit(f"{float(pdms_defaults()['hotbed_rate']):g}")
+        self._hotbed_rate_edit = QLineEdit(f"{float(word_proposal_defaults()['hotbed_rate']):g}")
         self._hotbed_rate_edit.setFixedWidth(70)
         self._hotbed_rate_edit.setToolTip("Rate per day. Standard 59; change it when this job differs.")
         self._hotbed_days_edit = QLineEdit()
@@ -3011,8 +3011,8 @@ class CTRGeneratorWidget(QWidget):
         consumables = cons_raw * (1.0 + markup)
         with_scaffold = self._stats_panel.include_scaffold()
         usd_total = equipment + consumables + (scaffold if with_scaffold else 0.0)
-        hotbed = 0.0                                      # the PDMS proposal's Hotbed line (rate × days, in manats)
-        hb = self._hotbed_values() if self._pdms_on() else None
+        hotbed = 0.0                                      # the Word proposal's Hotbed line (rate × days, in manats)
+        hb = self._hotbed_values() if self._word_proposal_on() else None
         if hb and hb["rate"] and hb["days"]:          # calculated only when both are given
             code = (hb["currency"] or "AZN").upper()
             d = self._fx.get(code)
@@ -3025,7 +3025,7 @@ class CTRGeneratorWidget(QWidget):
 
     def _manpower_stat_rows(self) -> tuple[list[tuple], float]:
         """The matched (✓) manpower lines as (description, encoding, men, quantity, uom, rate, total) texts — in days
-        and a day rate in PDMS mode — and their total. Shared by the Manpower list under the statistics and the Excel."""
+        and a day rate in Word proposal mode — and their total. Shared by the Manpower list under the statistics and the Excel."""
         src = self._req_manpower_tbl
         out, total = [], 0.0
         for r in range(src.rowCount()):
@@ -3049,7 +3049,7 @@ class CTRGeneratorWidget(QWidget):
         return out, total
 
     def _refresh_manpower_stats(self) -> None:
-        """The Manpower list under the statistics: the matched lines, in days and a day rate in PDMS mode."""
+        """The Manpower list under the statistics: the matched lines, in days and a day rate in Word proposal mode."""
         tbl = getattr(self, "_mp_stats_tbl", None)
         if tbl is None:
             return
@@ -3064,17 +3064,17 @@ class CTRGeneratorWidget(QWidget):
                 tbl.setItem(i, c, item)
         tbl.setVisible(bool(rows))
         self._mp_stats_lbl.setVisible(bool(rows))
-        sign = "₼" if self._pdms_on() else "AZN"
+        sign = "₼" if self._word_proposal_on() else "AZN"
         self._mp_stats_lbl.setText(f"Manpower — {len(rows)} matched line(s), {sign} {total:,.2f}. Not costed from SAGE, so "
                                    "it is not part of the rechargeable / non-rechargeable figures above.")
 
     def _totals_report_frame(self) -> pd.DataFrame:
         """The Price totals under the statistics as a sheet: Category, Currency, Amount (AZN and USD never added)."""
         t = self.price_totals()
-        pdms = self._pdms_on()
+        word_proposal = self._word_proposal_on()
         rows = [("Manpower", "AZN", t["manpower"]), ("Transport (Third Party Activities)", "AZN", t["transport"])]
-        if pdms:
-            rows.append(("Hotbed (PDMS proposal)", "AZN", t["hotbed"]))
+        if word_proposal:
+            rows.append(("Hotbed (Word proposal)", "AZN", t["hotbed"]))
         rows += [("AZN CTR total", "AZN", t["azn_total"]),
                  ("Equipment" + ("" if t["scaffold_included"] else " (scaffold not included)"), "USD",
                   t["equipment"] + (t["scaffold"] if t["scaffold_included"] else 0.0)),
@@ -3109,10 +3109,10 @@ class CTRGeneratorWidget(QWidget):
                         if t["scaffold"] else "Scaffold not included")
         markup_txt = (f"with {t['markup'] * 100:g}% markup" if t["markup"] else
                       "without markup (tick “With markup” in Document price)")
-        pdms = self._pdms_on()
-        hb_on = pdms and self._hotbed_complete()
-        sign_usd = "₼" if pdms else "$"                    # PDMS mode: every amount is in manats
-        usd_note = ("<span style='color:#757575'>(converted to manats)</span> " if pdms else "")
+        word_proposal = self._word_proposal_on()
+        hb_on = word_proposal and self._hotbed_complete()
+        sign_usd = "₼" if word_proposal else "$"                    # Word proposal mode: every amount is in manats
+        usd_note = ("<span style='color:#757575'>(converted to manats)</span> " if word_proposal else "")
         wait_note = (f"<br><span style='color:#E65100'>⏳ Waiting for Load Files — {waiting} line(s) cannot be "
                      "matched or priced yet, so they are not in these totals.</span>" if waiting else "")
         html = (
@@ -3124,11 +3124,11 @@ class CTRGeneratorWidget(QWidget):
                   ("<span style='color:#757575'>(without the Hotbed line — it is listed below)</span> " if hb_on else "")
                   + note("manpower"))
             + row("AZN — Transport (Third Party Activities)", t["transport"], "₼", note("transport"))
-            + (row("AZN — Hotbed (PDMS proposal)", t["hotbed"], "₼",
+            + (row("AZN — Hotbed (Word proposal)", t["hotbed"], "₼",
                    ("<span style='color:#C62828'>(no CBAR rate for "
                     f"{self._hotbed_cur_combo.currentText()} yet)</span>"
                     if hb_on and not t["hotbed"] else "<span style='color:#757575'>rate × days</span>"))
-               if pdms else "")
+               if word_proposal else "")
             + row("AZN CTR total", t["azn_total"], "₼", bold=True)
             + row("USD — Equipment", t["equipment"] + (t["scaffold"] if t["scaffold_included"] else 0.0), sign_usd,
                   usd_note + scaffold_txt + note("equipment"))
@@ -3479,18 +3479,18 @@ class CTRGeneratorWidget(QWidget):
                     for i, col in enumerate(df.columns, start=1):
                         longest = max([len(str(col))] + [len(str(v)) for v in df[col].head(200)])
                         ws.column_dimensions[ws.cell(row=1, column=i).column_letter].width = min(70, longest + 2)
-                if self._pdms_on():
-                    # "PDMS overview": the proposal's figures with their arithmetic, as the first sheet
+                if self._word_proposal_on():
+                    # "Word proposal overview": the proposal's figures with their arithmetic, as the first sheet
                     try:
-                        figures, hdr, days = self._pdms_overview_data()
+                        figures, hdr, days = self._word_proposal_overview_data()
                         add_overview_sheet(writer.book, figures, hdr, days, index=0)
                         writer.book.active = 0
                         if getattr(self, "_overview_no_shift", None):
-                            overview_note = ("\n\nLeft out of the PDMS overview (no shift length, so no days / day rate): "
+                            overview_note = ("\n\nLeft out of the Word proposal overview (no shift length, so no days / day rate): "
                                              + "; ".join(self._overview_no_shift[:10]))
                     except Exception as exc:       # a missing rate / shift length must not lose the other sheets
-                        log.warning("PDMS overview sheet skipped: %s", exc)
-                        overview_note = f"\n\nThe PDMS overview sheet was NOT added: {exc}"
+                        log.warning("Word proposal overview sheet skipped: %s", exc)
+                        overview_note = f"\n\nThe Word proposal overview sheet was NOT added: {exc}"
             path.write_bytes(buf.getvalue())
             log.info("Statistics saved: %s", path)
             QMessageBox.information(self, "Saved", f"Statistics saved:\n{path}{overview_note}")
@@ -3561,7 +3561,7 @@ class CTRGeneratorWidget(QWidget):
     # ── Transport mark-up shared by the lines (exceptions) ───────────────────
     # The request gives no mark-ups: each line gets its one from transport_rates in template_config.json.
     # The lines share ONE mark-up (editing it on a line offers to change the others too); a line can
-    # be an exception (fuel at 0 %) and is then left alone. The notes of the PDMS proposal quote the
+    # be an exception (fuel at 0 %) and is then left alone. The notes of the Word proposal quote the
     # shared value.
 
     @staticmethod
@@ -3813,25 +3813,25 @@ class CTRGeneratorWidget(QWidget):
             "section header (\"Onshore Activities\" / \"Offshore Activities\")."
         )
 
-        # PDMS proposal mode: a Word proposal instead of the AZN / USD CTRs. The same rows
+        # Word proposal mode: a Word proposal instead of the AZN / USD CTRs. The same rows
         # and values; the header gets a PRP number, the addressee and the signer on top of
         # the CTR fields (those the letter does not use are listed in the overview sheet).
-        dflt = pdms_defaults()
-        self._pdms_check = QCheckBox("PDMS proposal (Word) instead of AZN / USD CTR")
-        self._pdms_check.setToolTip(
-            "Generates the PDMS proposal (.docx) from the PDMS Template, with the same "
+        dflt = word_proposal_defaults()
+        self._word_proposal_check = QCheckBox("Word proposal instead of AZN / USD CTR")
+        self._word_proposal_check.setToolTip(
+            "Generates the Word proposal (.docx) from the Word Proposal Template, with the same "
             "calculated values. The AZN and USD Excel CTRs are not written.")
-        self._pdms_kind_combo = QComboBox()
-        self._pdms_kind_combo.addItems(["Short proposal", "Long proposal"])
-        self._pdms_kind_combo.setToolTip(
-            "Short or long proposal from the same request: the short one is made from the PDMS Template (short), "
-            "the long one from the PDMS Template (long). Only the chosen one has to be selected.")
-        self._pdms_kind_combo.setVisible(False)          # shown in PDMS mode only (see _set_pdms_mode)
-        _pdms_line = QHBoxLayout()
-        _pdms_line.addWidget(self._pdms_check)
-        _pdms_line.addWidget(self._pdms_kind_combo)
-        _pdms_line.addStretch(1)
-        gl.addLayout(_pdms_line)
+        self._word_proposal_kind_combo = QComboBox()
+        self._word_proposal_kind_combo.addItems(["Short proposal", "Long proposal"])
+        self._word_proposal_kind_combo.setToolTip(
+            "Short or long proposal from the same request: the short one is made from the Word Proposal (short), "
+            "the long one from the Word Proposal (long). Only the chosen one has to be selected.")
+        self._word_proposal_kind_combo.setVisible(False)          # shown in Word proposal mode only (see _set_word_proposal_mode)
+        _word_proposal_line = QHBoxLayout()
+        _word_proposal_line.addWidget(self._word_proposal_check)
+        _word_proposal_line.addWidget(self._word_proposal_kind_combo)
+        _word_proposal_line.addStretch(1)
+        gl.addLayout(_word_proposal_line)
         row_prp, self._prp_edit      = _hdr_row("PRP No:")
         row_cu,  self._customer_edit = _hdr_row("Customer:", dflt["customer_name"])
         row_ci,  self._customer_city_edit = _hdr_row("Customer city:", dflt["customer_city"])
@@ -3871,16 +3871,16 @@ class CTRGeneratorWidget(QWidget):
         _cl.addStretch(1)
         self._normal_headers = {
             key: {col: tbl.horizontalHeaderItem(col).text() for col in cols}
-            for key, tbl, cols in (("manpower", self._req_manpower_tbl, _PDMS_HEADERS["manpower"]),
-                                   ("equipment", self._req_equip_tbl, _PDMS_HEADERS["equipment"]),
-                                   ("consumables", self._req_cons_tbl, _PDMS_HEADERS["consumables"]),
-                                   ("transport", self._transport_tbl, _PDMS_HEADERS["transport"]))}
+            for key, tbl, cols in (("manpower", self._req_manpower_tbl, _WORD_PROPOSAL_HEADERS["manpower"]),
+                                   ("equipment", self._req_equip_tbl, _WORD_PROPOSAL_HEADERS["equipment"]),
+                                   ("consumables", self._req_cons_tbl, _WORD_PROPOSAL_HEADERS["consumables"]),
+                                   ("transport", self._transport_tbl, _WORD_PROPOSAL_HEADERS["transport"]))}
         self._install_reload_picking()
         self._rebuild_fx_rows()
         self.cbar_currencies_changed.connect(self._rebuild_fx_rows)
         # A Rate / Price cell holds the number in its left half and its currency (a drop-down, shown
         # as the currency's sign) in its right half; the currency is kept on the cell, not in a column.
-        for _tbl, _cols in ((self._req_manpower_tbl, (_MP_NUMEMP, _MP_QTY, _MP_UOM)),   # + days and "Days" in PDMS mode
+        for _tbl, _cols in ((self._req_manpower_tbl, (_MP_NUMEMP, _MP_QTY, _MP_UOM)),   # + days and "Days" in Word proposal mode
                             (self._req_equip_tbl, (_EQ_QTY, _EQ_DAYS)), (self._req_cons_tbl, (_CS_QTY,)),
                             (self._transport_tbl, (_TR_QTY, _TR_DUR, _TR_MARKUP))):
             for _c in _cols:                           # number cells that take a formula
@@ -3892,7 +3892,7 @@ class CTRGeneratorWidget(QWidget):
             _tbl.model().rowsRemoved.connect(lambda *_a: self._update_group_titles_soon())
         for _c in self._cat_combos.values():
             _c.currentTextChanged.connect(lambda _t: (self._recalc_all_totals(), self._update_group_titles()))
-        # The PDMS proposal's notes (schedule, exclusions, price basis …): one button that opens a floating window.
+        # The Word proposal's notes (schedule, exclusions, price basis …): one button that opens a floating window.
         # It is red until it has been opened for this task (a new CTR Request or another Job Ref turns it red again).
         row_nt = QHBoxLayout()
         _nt_lbl = QLabel("Notes:")
@@ -3906,15 +3906,15 @@ class CTRGeneratorWidget(QWidget):
         self._notes_win = None
         self._notes_seen = False
         self._notes_job_ref = ""
-        self._pdms_rows = [row_prp, row_cu, row_ci, row_at, row_ld, row_sg, row_st, row_nt]
+        self._word_proposal_rows = [row_prp, row_cu, row_ci, row_at, row_ld, row_sg, row_st, row_nt]
         for row in (row_c, row_sc, row_l, row_s, row_d, row_cna, row_cnu, row_rv, row_pt, row_cm):
             gl.addLayout(row)
-        for row in self._pdms_rows:
+        for row in self._word_proposal_rows:
             gl.addLayout(row)
         gl.addWidget(self._fx_group)
         gl.addWidget(self._cat_widget)
-        self._pdms_check.toggled.connect(self._set_pdms_mode)
-        self._set_pdms_mode(False)
+        self._word_proposal_check.toggled.connect(self._set_word_proposal_mode)
+        self._set_word_proposal_mode(False)
         self._update_notes_button()
 
         gl.addSpacing(6)
@@ -4024,7 +4024,7 @@ class CTRGeneratorWidget(QWidget):
         return QSettings("SOCAR", "CTRGenerator")
 
     KEY_WARN_EMPTY_MANPOWER = "warnEmptyManpower"
-    KEY_HOTBED_INCLUDE = "pdms/hotbed_include"
+    KEY_HOTBED_INCLUDE = "word_proposal/hotbed_include"
 
     def _warn_empty_manpower(self) -> bool:
         """Settings: warn (Continue / Cancel) before generating with an empty Manpower table. On by default."""
@@ -4142,20 +4142,20 @@ class CTRGeneratorWidget(QWidget):
                 edit.setText(val)
             elif val:
                 self._unavailable_paths[key] = val
-        for key, edit in self._pdms_remembered().items():
-            val = s.value(f"pdms/{key}", "")
+        for key, edit in self._word_proposal_remembered().items():
+            val = s.value(f"word_proposal/{key}", "")
             if val:
                 edit.setText(val)
-        self._pdms_kind_combo.setCurrentIndex(1 if str(s.value("pdms/kind", "short")) == "long" else 0)
-        self._pdms_check.setChecked(str(s.value("pdms/enabled", "false")).lower() == "true")
+        self._word_proposal_kind_combo.setCurrentIndex(1 if str(s.value("word_proposal/kind", "short")) == "long" else 0)
+        self._word_proposal_check.setChecked(str(s.value("word_proposal/enabled", "false")).lower() == "true")
         self._hotbed_incl_chk.setChecked(str(s.value(self.KEY_HOTBED_INCLUDE, "true")).lower() == "true")
 
     def _path_edits(self) -> dict:
         return {
             "azn_template":   self._azn_tpl_edit,
             "usd_template":   self._usd_tpl_edit,
-            "pdms_template":  self._pdms_tpl_edit,
-            "pdms_template_long": self._pdms_tpl_long_edit,
+            "word_proposal_template":  self._word_proposal_tpl_edit,
+            "word_proposal_template_long": self._word_proposal_tpl_long_edit,
             "azn_pricebook":  self._azn_pb_edit,
             "sage_export":    self._sage_edit,
             "usd_pricebook":  self._usd_pb_edit,
@@ -4179,17 +4179,17 @@ class CTRGeneratorWidget(QWidget):
         """Persist current paths to QSettings. Call from the parent closeEvent."""
         s = self._settings()
         self._save_paths()
-        s.setValue("pdms/kind", self._pdms_kind())
-        for key, edit in self._pdms_remembered().items():
-            s.setValue(f"pdms/{key}", edit.text())
-        s.setValue("pdms/enabled", self._pdms_on())
+        s.setValue("word_proposal/kind", self._word_proposal_kind())
+        for key, edit in self._word_proposal_remembered().items():
+            s.setValue(f"word_proposal/{key}", edit.text())
+        s.setValue("word_proposal/enabled", self._word_proposal_on())
 
     # ── Presets ───────────────────────────────────────────────────────────────
 
-    # ── PDMS proposal mode ────────────────────────────────────────────────────
+    # ── Word proposal mode ────────────────────────────────────────────────────
 
-    def _pdms_remembered(self) -> dict:
-        """The PDMS header fields that are remembered between runs (not PRP No / Attention /
+    def _word_proposal_remembered(self) -> dict:
+        """The Word proposal header fields that are remembered between runs (not PRP No / Attention /
         Letter date: those belong to one proposal)."""
         return {
             "customer": self._customer_edit, "customer_city": self._customer_city_edit,
@@ -4234,11 +4234,11 @@ class CTRGeneratorWidget(QWidget):
         """The Hotbed's "Reload standard" button: the standard rate and currency from template_config.json (read again
         now) go back in; the days are never touched. Asks first when that overwrites something you typed."""
         try:
-            reload_pdms_config()
+            reload_word_proposal_config()
         except ValueError as exc:
             QMessageBox.warning(self, "Reload standard", f"{exc}.\n\nThe Hotbed values were not changed.")
             return
-        d = pdms_defaults()
+        d = word_proposal_defaults()
         rate = f"{float(d['hotbed_rate']):g}"
         cur = d["category_currencies"].get("hotbed", "AZN")
         if self._hotbed_cur_combo.findText(cur) < 0:                    # a currency that is not turned on: AZN is always there
@@ -4276,7 +4276,7 @@ class CTRGeneratorWidget(QWidget):
             self._refresh_price_totals()
             self._recalc_azn_totals()
 
-    # ── CBAR rates (PDMS proposal) ────────────────────────────────────────────
+    # ── CBAR rates (Word proposal) ────────────────────────────────────────────
 
     _FX_NOTE = ("Prices not in AZN are converted with these rates (then the consumables / "
                 "transport mark-up is added).")
@@ -4334,7 +4334,7 @@ class CTRGeneratorWidget(QWidget):
                 if saved:
                     text, day = f"{saved[0]:.4f}", saved[1]
                 elif code == "USD":
-                    text = str(pdms_defaults()["default_usd_azn"])
+                    text = str(word_proposal_defaults()["default_usd_azn"])
             edit.setText(text or "")
             d["date"] = day
             if code in old:                                     # kept across a rebuild
@@ -4349,7 +4349,7 @@ class CTRGeneratorWidget(QWidget):
             edit.textEdited.connect(lambda _t, c=code: self._on_fx_typed(c))   # any rate may be typed
             edit.textChanged.connect(lambda _t: self._recalc_all_totals())
             btn.clicked.connect(lambda _=False, c=code: self._reload_cbar([c]))
-        self._fx_group.setVisible(self._pdms_on())
+        self._fx_group.setVisible(self._word_proposal_on())
         self._refresh_currency_combos()
         if hasattr(self, "_req_manpower_tbl"):
             self._recalc_all_totals()
@@ -4360,7 +4360,7 @@ class CTRGeneratorWidget(QWidget):
     def _refresh_currency_combos(self) -> None:
         """AZN + the turned-on currencies in each category combo (and the Hotbed one); a choice that is
         no longer offered falls back to the category's standard currency."""
-        std = pdms_defaults()["category_currencies"]
+        std = word_proposal_defaults()["category_currencies"]
         choices = self._currency_choices()
         for key, combo in [*self._cat_combos.items(), ("hotbed", self._hotbed_cur_combo)]:
             prev = combo.currentText()
@@ -4371,24 +4371,24 @@ class CTRGeneratorWidget(QWidget):
             combo.setCurrentText(want)
             combo.blockSignals(False)
 
-    def _switch_markup(self, pdms: bool) -> None:
-        """A PDMS proposal usually carries a 10 % mark-up, the CTRs 6.5 %: ticking PDMS puts the
-        PDMS figure in the Markup Rate box, unticking puts the value it had back. Either can be
+    def _switch_markup(self, word_proposal: bool) -> None:
+        """A Word proposal usually carries a 10 % mark-up, the CTRs 6.5 %: ticking Word proposal puts the
+        Word proposal figure in the Markup Rate box, unticking puts the value it had back. Either can be
         changed by hand in between."""
         spin = getattr(self, "_markup_spin", None)
         if spin is None:
             return
-        if pdms and getattr(self, "_markup_before_pdms", None) is None:
-            self._markup_before_pdms = spin.value()
-            spin.setValue(float(pdms_defaults()["markup_rate"]) * 100.0)
-        elif not pdms and getattr(self, "_markup_before_pdms", None) is not None:
-            spin.setValue(self._markup_before_pdms)
-            self._markup_before_pdms = None
+        if word_proposal and getattr(self, "_markup_before_word_proposal", None) is None:
+            self._markup_before_word_proposal = spin.value()
+            spin.setValue(float(word_proposal_defaults()["markup_rate"]) * 100.0)
+        elif not word_proposal and getattr(self, "_markup_before_word_proposal", None) is not None:
+            spin.setValue(self._markup_before_word_proposal)
+            self._markup_before_word_proposal = None
         spin.setToolTip(
             ("USD consumables markup — written into the generated CTR's \"Mark up (For Consumables)\" cell. "
-             "Saved/loaded with presets." if not pdms else
-             "Mark-up added to the consumables (after the conversion to AZN) in the PDMS proposal. "
-             "Usually 10 %; change it when the job differs. Unticking PDMS puts the CTR value back."))
+             "Saved/loaded with presets." if not word_proposal else
+             "Mark-up added to the consumables (after the conversion to AZN) in the Word proposal. "
+             "Usually 10 %; change it when the job differs. Unticking Word proposal puts the CTR value back."))
 
     def _row_shift_hours(self, row: int) -> float | None:
         """A manpower row's shift length in hours: the end of its Encoding (NS-NAT-OFF-12 -> 12), else
@@ -4408,10 +4408,10 @@ class CTRGeneratorWidget(QWidget):
 
     _NUMBER_HINTS = {
         ("equipment", _EQ_QTY):   "Number of units of this equipment.",
-        ("equipment", _EQ_RATE):  "Rate <b>per day</b> of the matched item (or the one typed over it); in PDMS mode in the cell's currency.",
+        ("equipment", _EQ_RATE):  "Rate <b>per day</b> of the matched item (or the one typed over it); in Word proposal mode in the cell's currency.",
         ("equipment", _EQ_DAYS):  "Days the equipment is on the job. Total = Quantity × Rate × Days.",
         ("consumables", _CS_QTY): "Number of units of this consumable.",
-        ("consumables", _CS_PRICE): "<b>Unit</b> price of the matched item (or the one typed over it); in PDMS mode in the cell's currency.",
+        ("consumables", _CS_PRICE): "<b>Unit</b> price of the matched item (or the one typed over it); in Word proposal mode in the cell's currency.",
         ("transport", _TR_QTY):   "Number of units (vehicles, trips …).",
         ("transport", _TR_DUR):   "Duration, counted in the UOM column (days, trips …). Total = Quantity × Rate × Duration × (1 + Mark Up).",
         ("transport", _TR_MARKUP): "This line's mark-up in %, added on top of its cost.",
@@ -4463,11 +4463,11 @@ class CTRGeneratorWidget(QWidget):
         return "<br>".join(lines) if lines else None
 
     def _days_view(self, index) -> dict | None:
-        """PDMS mode, manpower Quantity / UOM / Rate cell: what to show in days and a day rate
+        """Word proposal mode, manpower Quantity / UOM / Rate cell: what to show in days and a day rate
         (hours / shift length, hourly rate x shift length, 2 decimals; the cell itself stays in hours).
         {"shown", "edit" (full precision), "ph" (shift length or None), "problem" (reason or None)};
         None when the cell is shown as it is."""
-        if (not self._pdms_on() or index.column() not in (_MP_QTY, _MP_UOM, _MP_RATE)
+        if (not self._word_proposal_on() or index.column() not in (_MP_QTY, _MP_UOM, _MP_RATE)
                 or index.model() is not self._req_manpower_tbl.model()):
             return None
         row, col = index.row(), index.column()
@@ -4498,9 +4498,9 @@ class CTRGeneratorWidget(QWidget):
         new = n / ph if col == _MP_QTY else n * ph
         return {"shown": f"{new:.2f}", "edit": f"{new:.10g}", "ph": ph, "problem": None}
 
-    def _pdms_on(self) -> bool:
-        """True while the PDMS proposal box is ticked (False before the header block is built)."""
-        box = getattr(self, "_pdms_check", None)
+    def _word_proposal_on(self) -> bool:
+        """True while the Word proposal box is ticked (False before the header block is built)."""
+        box = getattr(self, "_word_proposal_check", None)
         return bool(box is not None and box.isChecked())
 
     def _money_columns(self):
@@ -4509,10 +4509,10 @@ class CTRGeneratorWidget(QWidget):
                 ("consumables", self._req_cons_tbl, _CS_PRICE), ("transport", self._transport_tbl, _TR_RATE))
 
     def _cat_currency(self, key: str) -> str:
-        """A category's default currency: the box in PDMS mode, else the one its CTR is in."""
-        if self._pdms_on():
-            return self._cat_combos[key].currentText() or pdms_defaults()["category_currencies"][key]
-        return pdms_defaults()["category_currencies"][key]
+        """A category's default currency: the box in Word proposal mode, else the one its CTR is in."""
+        if self._word_proposal_on():
+            return self._cat_combos[key].currentText() or word_proposal_defaults()["category_currencies"][key]
+        return word_proposal_defaults()["category_currencies"][key]
 
     def _cell_currency(self, key: str, tbl, col: int, row: int) -> str:
         """The currency of a row's Rate / Price cell: its own choice, else its category's."""
@@ -4521,10 +4521,10 @@ class CTRGeneratorWidget(QWidget):
         return str(own or self._cat_currency(key)).upper()
 
     def _fx_factor(self, key: str, tbl, col: int, row: int) -> float:
-        """What a row's amounts are multiplied by to show manats: 1 outside PDMS mode (the tables
+        """What a row's amounts are multiplied by to show manats: 1 outside Word proposal mode (the tables
         keep their CTR's own currency) and for AZN; the currency's CBAR rate otherwise (0 while it
         has none — the total then shows 0.00 with a tooltip)."""
-        if not self._pdms_on():
+        if not self._word_proposal_on():
             return 1.0
         code = self._cell_currency(key, tbl, col, row)
         if code == "AZN":
@@ -4534,13 +4534,13 @@ class CTRGeneratorWidget(QWidget):
         return rate if rate and rate > 0 else 0.0
 
     def _total_item(self, total: float, key: str, tbl, col: int, row: int):
-        """A read-only Total cell; in PDMS mode it is in manats, and says so when a currency has no rate."""
+        """A read-only Total cell; in Word proposal mode it is in manats, and says so when a currency has no rate."""
         item = _ro_item(f"{total:.2f}")
         recipe = {"manpower": "Num Employees × Quantity (hours) × Rate",
                   "equipment": "Quantity × Rate/Day × Days",
                   "consumables": "Quantity × Unit Price",
                   "transport": "Quantity × Rate × Duration × (1 + Mark Up)"}[key]
-        if self._pdms_on():
+        if self._word_proposal_on():
             code = self._cell_currency(key, tbl, col, row)
             item.setToolTip(f"Total in manats = {recipe}"
                             + ("" if code == "AZN" else f", converted from {code} with its CBAR rate") + ".")
@@ -4572,11 +4572,11 @@ class CTRGeneratorWidget(QWidget):
 
     def _update_group_titles(self) -> None:
         """"Equipment — USD, GBP": the category's currency first, then any other currency a row in
-        its table uses (outside PDMS mode just the CTR's own)."""
+        its table uses (outside Word proposal mode just the CTR's own)."""
         for key, tbl, col in self._money_columns():
             main = self._cat_currency(key)
             others = set()
-            if self._pdms_on():
+            if self._word_proposal_on():
                 others = {self._cell_currency(key, tbl, col, r) for r in range(tbl.rowCount())} - {main}
             self._groups[key].setTitle(f"{self._GROUP_BASE[key]} — " + ", ".join([main, *sorted(others)]))
 
@@ -4594,7 +4594,7 @@ class CTRGeneratorWidget(QWidget):
         return used
 
     def _fx_event(self, code: str, action: str, stamp: str | None = None) -> None:
-        """Remember what last happened to a rate and when (shown in the PDMS overview sheet)."""
+        """Remember what last happened to a rate and when (shown in the Word proposal overview sheet)."""
         d = self._fx[code]
         d["action"] = action
         d["stamp"] = _datetime.now().strftime("%Y-%m-%d %H:%M") if stamp is None else (
@@ -4703,18 +4703,18 @@ class CTRGeneratorWidget(QWidget):
             if w is not None:
                 w.setVisible(visible)
 
-    def _set_pdms_mode(self, on: bool) -> None:
-        """Show the PDMS header rows (PRP No, customer, addressee, signer …) next to the CTR ones. The CTR
+    def _set_word_proposal_mode(self, on: bool) -> None:
+        """Show the Word proposal header rows (PRP No, customer, addressee, signer …) next to the CTR ones. The CTR
         header fields (Sub-Client, Contract No, Revision, Comments) stay: the letter does not use them, but the
-        PDMS overview sheet lists them. The AZN / USD templates are not used in PDMS mode."""
-        for row in self._pdms_rows:
+        Word proposal overview sheet lists them. The AZN / USD templates are not used in Word proposal mode."""
+        for row in self._word_proposal_rows:
             self._show_row(row, on)
         for edit in (self._azn_tpl_edit, self._usd_tpl_edit):
             edit.setEnabled(not on)
-        self._pdms_tpl_edit.setEnabled(on)
-        self._pdms_tpl_long_edit.setEnabled(on)
-        self._pdms_kind_combo.setEnabled(on)
-        self._pdms_kind_combo.setVisible(on)
+        self._word_proposal_tpl_edit.setEnabled(on)
+        self._word_proposal_tpl_long_edit.setEnabled(on)
+        self._word_proposal_kind_combo.setEnabled(on)
+        self._word_proposal_kind_combo.setVisible(on)
         for w in self._hotbed_widgets:
             w.setVisible(on)
         self._fx_group.setVisible(on)
@@ -4722,7 +4722,7 @@ class CTRGeneratorWidget(QWidget):
         self._switch_markup(on)
         for tbl, key in ((self._req_manpower_tbl, "manpower"), (self._req_equip_tbl, "equipment"),
                          (self._req_cons_tbl, "consumables"), (self._transport_tbl, "transport")):
-            for col, label in _PDMS_HEADERS[key].items():
+            for col, label in _WORD_PROPOSAL_HEADERS[key].items():
                 hi = tbl.horizontalHeaderItem(col)
                 if hi is not None:
                     hi.setText(label if on else self._normal_headers[key][col])
@@ -4732,7 +4732,7 @@ class CTRGeneratorWidget(QWidget):
         if hasattr(self, "_stats_panel"):
             self._refresh_price_totals()
 
-    # ── PDMS notes (floating window) ─────────────────────────────────────────
+    # ── Word proposal notes (floating window) ─────────────────────────────────────────
 
     KEY_WARN_UNSEEN_NOTES = "warnUnseenNotes"
 
@@ -4744,30 +4744,30 @@ class CTRGeneratorWidget(QWidget):
     def _notes_auto(self) -> dict:
         """What the app itself knows for the notes' placeholders."""
         shared = self._shared_third_party_markup()
-        return {"location": self._job_location(), "currency": pdms_defaults()["currency"],
+        return {"location": self._job_location(), "currency": word_proposal_defaults()["currency"],
                 "markup_materials": f"{self._markup_spin.value():g}",
                 "markup_third_party": f"{shared * 100:g}" if shared is not None else ""}
 
-    def _ensure_notes_window(self) -> PdmsNotesWindow:
+    def _ensure_notes_window(self) -> WordProposalNotesWindow:
         if self._notes_win is None:
-            self._notes_win = PdmsNotesWindow(self)
+            self._notes_win = WordProposalNotesWindow(self)
             self._notes_win.changed.connect(self._update_notes_button)
         self._notes_win.set_auto(self._notes_auto())
         return self._notes_win
 
-    def _pdms_kind(self) -> str:
-        """"short" or "long": which proposal the selector next to the PDMS box asks for."""
-        combo = getattr(self, "_pdms_kind_combo", None)
+    def _word_proposal_kind(self) -> str:
+        """"short" or "long": which proposal the selector next to the Word proposal box asks for."""
+        combo = getattr(self, "_word_proposal_kind_combo", None)
         return "long" if combo is not None and combo.currentIndex() == 1 else "short"
 
-    def _pdms_template_path(self) -> str:
+    def _word_proposal_template_path(self) -> str:
         """The template of the chosen proposal kind (the other one is not needed for this run)."""
-        edit = self._pdms_tpl_long_edit if self._pdms_kind() == "long" else self._pdms_tpl_edit
+        edit = self._word_proposal_tpl_long_edit if self._word_proposal_kind() == "long" else self._word_proposal_tpl_edit
         return edit.text().strip()
 
     def _template_has_note_tags(self) -> bool | None:
-        """True / False: does the PDMS Template of the chosen kind have {{NOTES_…}} tags? None = no readable template."""
-        path = self._pdms_template_path()
+        """True / False: does the Word Proposal Template of the chosen kind have {{NOTES_…}} tags? None = no readable template."""
+        path = self._word_proposal_template_path()
         if not path or not Path(path).is_file():
             return None
         try:
@@ -4789,9 +4789,9 @@ class CTRGeneratorWidget(QWidget):
         ticked, total = (self._notes_win.counts() if self._notes_win is not None else (None, None))
         if ticked is None:
             try:
-                data = pdms_notes.load_notes()
-                ticked = sum(len(v) for v in pdms_notes.default_ticks(data).values())
-                total = sum(len(pdms_notes.notes_for(data, p)) for p in data["places"])
+                data = word_proposal_notes.load_notes()
+                ticked = sum(len(v) for v in word_proposal_notes.default_ticks(data).values())
+                total = sum(len(word_proposal_notes.notes_for(data, p)) for p in data["places"])
             except Exception:
                 ticked = total = 0
         if self._notes_seen:
@@ -4841,7 +4841,7 @@ class CTRGeneratorWidget(QWidget):
             "job_ref":         self._job_ref_edit.text(),
             "output_dir":      self._out_dir_edit.text(),
             "markup_rate_pct": self._markup_spin.value(),
-            "customer_name":   self._customer_edit.text(),            # the PDMS proposal's header
+            "customer_name":   self._customer_edit.text(),            # the Word proposal's header
             "customer_city":   self._customer_city_edit.text(),
             "signer_name":     self._signer_edit.text(),
             "signer_title":    self._signer_title_edit.text(),
@@ -4860,7 +4860,7 @@ class CTRGeneratorWidget(QWidget):
             self._out_dir_edit.setText(data["output_dir"])
         for key, edit in (("customer_name", self._customer_edit), ("customer_city", self._customer_city_edit),
                           ("signer_name", self._signer_edit), ("signer_title", self._signer_title_edit)):
-            if key in data:                                      # an older preset has no PDMS header: leave the boxes alone
+            if key in data:                                      # an older preset has no Word proposal header: leave the boxes alone
                 edit.setText(str(data[key]))
         self._markup_spin.clear_formula()                    # a preset brings its own (or none)
         try:
@@ -5096,9 +5096,9 @@ class CTRGeneratorWidget(QWidget):
         # a second request clears the previous one's comments rather than
         # carrying them into an unrelated CTR.
         self._comments_edit.setText(data.get("comments", ""))
-        # PDMS proposal: the requester is the addressee. Written even when blank, like the comments.
+        # Word proposal: the requester is the addressee. Written even when blank, like the comments.
         self._attention_edit.setText(attention_from_requester(data.get("requester", "")))
-        # The CTR's Date is the day it is made (today, like the PDMS Letter date), not the request's estimated
+        # The CTR's Date is the day it is made (today, like the proposal Letter date), not the request's estimated
         # commencement date. Set again for every request loaded, so an app left open overnight does not keep
         # yesterday's date; still editable afterwards.
         self._date_edit.setText(_date.today().strftime("%Y-%m-%d"))
@@ -5184,7 +5184,7 @@ class CTRGeneratorWidget(QWidget):
     def _rematch_note(self) -> QLabel:
         """The short reminder shown under each table's Reload all button."""
         lbl = QLabel("Reload all reads each row again from the CTR Request file and prices it again: a cell you typed over "
-                     "or gave a formula is replaced (you are asked first), and in PDMS mode a rate's currency goes back "
+                     "or gave a formula is replaced (you are asked first), and in Word proposal mode a rate's currency goes back "
                      "to the category's. To reload only some cells, hold Ctrl+Shift and click them; on letting go you are "
                      "asked, and every cell in the picked rows and columns is reloaded. Editing Match By, Type, Shift, "
                      "Shift Type or Encoding re-matches that row.")
@@ -5452,8 +5452,8 @@ class CTRGeneratorWidget(QWidget):
             lines.append("• None of these cells has been changed by you.")
         if cat == "manpower":
             lines.append("• The quantity is worked out again from the working days × the shift length.")
-        if self._pdms_on():
-            lines.append("• PDMS mode: a reloaded rate / price goes back to the category's default currency.")
+        if self._word_proposal_on():
+            lines.append("• Word proposal mode: a reloaded rate / price goes back to the category's default currency.")
         return lines
 
     def _ask_reload_all(self, cat: str) -> None:
@@ -6607,14 +6607,14 @@ class CTRGeneratorWidget(QWidget):
                 pass
 
         other_label = activities_label(self._project_type_edit.text())
-        self._azn_onshore_lbl.setText(f"Project Support:  ₼ {support_total:,.2f}")  # PDMS mode: all rows are in manats
+        self._azn_onshore_lbl.setText(f"Project Support:  ₼ {support_total:,.2f}")  # Word proposal mode: all rows are in manats
         self._azn_offshore_lbl.setText(f"Total {other_label}:  ₼ {other_total:,.2f}")
         self._azn_third_party_lbl.setText(
             f"Total Third Party Activities:  ₼ {third_party_total:,.2f}")
         self._azn_total_lbl.setText(
             f"AZN CTR Total:  ₼ {support_total + other_total + third_party_total:,.2f}"
             + ("   (Hotbed not included — see the price totals)"
-               if self._pdms_on() and self._hotbed_complete() else ""))
+               if self._word_proposal_on() and self._hotbed_complete() else ""))
 
     def _recalc_usd_totals(self):
         timer = getattr(self, "_stats_timer", None)
@@ -6646,11 +6646,11 @@ class CTRGeneratorWidget(QWidget):
         cons_with_markup = cons_raw * (1 + markup_pct / 100.0)
         ctr_total        = equip_total + cons_with_markup
 
-        sign = "₼" if self._pdms_on() else "$"        # PDMS mode: the rows' totals are in manats
+        sign = "₼" if self._word_proposal_on() else "$"        # Word proposal mode: the rows' totals are in manats
         self._usd_equip_lbl.setText(f"Equipment:  {sign}{equip_total:,.2f}")
         self._usd_cons_lbl.setText(
             f"Consumables (incl. {markup_pct:.2f}% markup):  {sign}{cons_with_markup:,.2f}")
-        self._usd_total_lbl.setText(("Equipment + Consumables Total:  " if self._pdms_on()
+        self._usd_total_lbl.setText(("Equipment + Consumables Total:  " if self._word_proposal_on()
                                      else "USD CTR Total:  ") + f"{sign}{ctr_total:,.2f}")
 
     # ── Search filter ─────────────────────────────────────────────────────────
@@ -6701,10 +6701,10 @@ class CTRGeneratorWidget(QWidget):
 
     # ── Generate ──────────────────────────────────────────────────────────────
 
-    def _pdms_payload(self, pdms_tpl: str = "") -> dict:
-        """What the PDMS proposal (and the overview sheet) is made from, read from the header fields."""
+    def _word_proposal_payload(self, word_proposal_tpl: str = "") -> dict:
+        """What the Word proposal (and the overview sheet) is made from, read from the header fields."""
         return {
-            "template": pdms_tpl,
+            "template": word_proposal_tpl,
             "rates":      {c: r for c, (r, _d) in self._fx_rates().items()},
             "rates_used": {c: (r, d, "default" if (self._fx[c].get("action") or "").startswith("Default value") else None)
                            for c, (r, d) in self._fx_rates().items() if c in self._currencies_in_use()},
@@ -6733,16 +6733,16 @@ class CTRGeneratorWidget(QWidget):
             },
         }
 
-    def _pdms_overview_data(self) -> tuple[dict, dict, dict]:
-        """(figures, header, {currency: CBAR day or None}) for the "PDMS overview" sheet: the same rows
+    def _word_proposal_overview_data(self) -> tuple[dict, dict, dict]:
+        """(figures, header, {currency: CBAR day or None}) for the "Word proposal overview" sheet: the same rows
         and the same arithmetic as the Word proposal. Raises ValueError when a figure is missing
         (a currency without a rate, a manpower row without a shift length)."""
         incomplete = self._incomplete_cells()
         bad_rows = {(id(c["tbl"]), c["row"]) for c in incomplete}
         rows = self._collect_rows(True, bad_rows)
         self._overview_no_shift = rows["no_shift"]          # left out (no shift length); the export says so
-        job = self._pdms_payload()
-        data = compute_pdms(
+        job = self._word_proposal_payload()
+        data = compute_word_proposal(
             rows["support_rows"], rows["other_rows"], rows["equip_rows"], rows["consump_rows"], job["header"],
             job["rates"], self._markup_rate(), rows["third_party_rows"], job["hotbed"], job["currencies"])
         info = {c: {"day": d["date"], "stamp": d.get("stamp", ""), "action": d.get("action", "")}
@@ -6752,7 +6752,7 @@ class CTRGeneratorWidget(QWidget):
     def _row_formulas(self, tbl, r: int, cols: dict, ph: float | None = None) -> tuple[dict, dict]:
         """({field: "=expr"} in the units the CTR holds, the same in the overview sheet's units) for the cells of
         row `r` whose number came from a formula. `cols` maps a column to (field, kind), kind "qty" / "rate" for
-        the manpower cells that are days and a day rate in PDMS mode (`ph` = the shift length), else "plain"."""
+        the manpower cells that are days and a day rate in Word proposal mode (`ph` = the shift length), else "plain"."""
         ctr, alt = {}, {}
         for col, (field, kind) in cols.items():
             it = tbl.item(r, col)
@@ -6776,15 +6776,15 @@ class CTRGeneratorWidget(QWidget):
                 ctr[field] = alt[field] = "=" + expr
         return ctr, alt
 
-    def _collect_rows(self, pdms_on: bool, bad_rows: set) -> dict:
+    def _collect_rows(self, word_proposal_on: bool, bad_rows: set) -> dict:
         """The rows that go into a generated document, read from the four tables: only rows with a
-        "✓" status and without a missing value (`bad_rows`). Shared by Generate and the PDMS overview."""
+        "✓" status and without a missing value (`bad_rows`). Shared by Generate and the Word proposal overview."""
         # Only rows with a "✓" status (matched against pricebook/SAGE, or
         # manually added) are included — "✗ No match" rows are skipped so
         # unmatched requests never silently appear in the output at rate 0.
         support_rows, other_rows = [], []
         mp_skipped = 0
-        no_shift = []                         # PDMS: manpower rows left out because days / a day rate cannot be worked out
+        no_shift = []                         # Word proposal: manpower rows left out because days / a day rate cannot be worked out
         incomplete_skipped = len(bad_rows)    # rows left out for a missing value
         for r in range(self._req_manpower_tbl.rowCount()):
             status_item = self._req_manpower_tbl.item(r, _MP_STATUS)
@@ -6806,9 +6806,9 @@ class CTRGeneratorWidget(QWidget):
             # when it's something else (Overtime/Rotational/Standby).
             comment = f"{shift} Shift" if shift_type == "Normal" else f"{shift} Shift, {shift_type}"
             # Shift length (hours) from the Encoding, e.g. NS-NAT-OFF-12 -> 12; the matched stock
-            # code is the fallback. The PDMS proposal needs it to show days and a day rate.
+            # code is the fallback. The Word proposal needs it to show days and a day rate.
             _hours = self._row_shift_hours(r)
-            if pdms_on and not _hours:                    # the proposal shows days and a day rate: leave the row out
+            if word_proposal_on and not _hours:                    # the proposal shows days and a day rate: leave the row out
                 no_shift.append(_txt(_MP_DESC))
                 continue
             row_dict = {
@@ -6826,7 +6826,7 @@ class CTRGeneratorWidget(QWidget):
                 "nationality":   _txt(_MP_NAT),
                 "hours_per_shift": float(_hours) if _hours else None,
                 "encoding":      _txt(_MP_ENC),
-                "currency":      self._cell_currency("manpower", self._req_manpower_tbl, _MP_RATE, r) if pdms_on else None,
+                "currency":      self._cell_currency("manpower", self._req_manpower_tbl, _MP_RATE, r) if word_proposal_on else None,
             }
             f_ctr, f_days = self._row_formulas(
                 self._req_manpower_tbl, r,
@@ -6873,7 +6873,7 @@ class CTRGeneratorWidget(QWidget):
                 "days":         days,
                 "stock_code":   _etxt(_EQ_CODE),
                 "sage_cost":    sage_cost,
-                "currency":     self._cell_currency("equipment", self._req_equip_tbl, _EQ_RATE, r) if pdms_on else None,
+                "currency":     self._cell_currency("equipment", self._req_equip_tbl, _EQ_RATE, r) if word_proposal_on else None,
             })
             f_ctr, _alt = self._row_formulas(self._req_equip_tbl, r, {
                 _EQ_QTY: ("quantity", "plain"), _EQ_RATE: ("rate_per_day", "plain"), _EQ_DAYS: ("days", "plain")})
@@ -6911,7 +6911,7 @@ class CTRGeneratorWidget(QWidget):
                 "product":           _ctxt(_CS_CODE),
                 "quantity":          qty,
                 "sage_cost":         sage_cost,
-                "currency":          self._cell_currency("consumables", self._req_cons_tbl, _CS_PRICE, r) if pdms_on else None,
+                "currency":          self._cell_currency("consumables", self._req_cons_tbl, _CS_PRICE, r) if word_proposal_on else None,
             })
             f_ctr, _alt = self._row_formulas(self._req_cons_tbl, r, {
                 _CS_QTY: ("quantity", "plain"), _CS_PRICE: ("local_expect_cost", "plain")})
@@ -6938,8 +6938,8 @@ class CTRGeneratorWidget(QWidget):
         azn_tpl    = self._azn_tpl_edit.text().strip()
         usd_tpl    = self._usd_tpl_edit.text().strip()
         output_dir = self._out_dir_edit.text().strip()
-        pdms_on    = self._pdms_on()
-        pdms_tpl   = self._pdms_template_path()
+        word_proposal_on    = self._word_proposal_on()
+        word_proposal_tpl   = self._word_proposal_template_path()
 
         # ── Required fields ────────────────────────────────────────────────────
         if not job_ref:
@@ -6947,13 +6947,13 @@ class CTRGeneratorWidget(QWidget):
         elif not job_ref.isdigit():
             errors.append("Job Ref must be a number (e.g. 217).")
 
-        if pdms_on:
-            if not pdms_tpl:
-                errors.append(f"PDMS Template ({self._pdms_kind()}) not selected.")
-            elif not Path(pdms_tpl).is_file():
-                errors.append(f"PDMS Template ({self._pdms_kind()}) not found: {pdms_tpl}")
+        if word_proposal_on:
+            if not word_proposal_tpl:
+                errors.append(f"Word Proposal ({self._word_proposal_kind()}) not selected.")
+            elif not Path(word_proposal_tpl).is_file():
+                errors.append(f"Word Proposal ({self._word_proposal_kind()}) not found: {word_proposal_tpl}")
             if not self._prp_edit.text().strip():
-                errors.append("PRP No is required for a PDMS proposal.")
+                errors.append("PRP No is required for a Word proposal.")
             _in_use = self._currencies_in_use()
             for _code, (_rate, _day) in self._fx_rates().items():
                 if _code in _in_use and (_rate is None or _rate <= 0):
@@ -7009,11 +7009,11 @@ class CTRGeneratorWidget(QWidget):
         if not self._client_edit.text().strip():
             warnings.append("Client is empty — the template cell will be left blank.")
 
-        if pdms_on:
+        if word_proposal_on:
             if self._template_has_note_tags() is False:
-                warnings.append("The PDMS Template has no note tags, so the notes list is NOT used: the proposal keeps the "
+                warnings.append("The Word Proposal Template has no note tags, so the notes list is NOT used: the proposal keeps the "
                                 "fixed texts of that template (use a template with the tags, for example "
-                                "PDMS_TEMPLATE_short_v2.docx).")
+                                "Word_Proposal_Template_short_v2.docx).")
             if not self._notes_seen and self._warn_unseen_notes():
                 warnings.append("The notes of the proposal have not been looked at for this job (the Notes button is red) — "
                                 "the pre-ticked ones will be used.")
@@ -7025,7 +7025,7 @@ class CTRGeneratorWidget(QWidget):
                 warnings.append("A note has a value that is still empty: " + ", ".join("{%s}" % n for n in _left)
                                 + " — the text keeps the name in braces.")
 
-        if pdms_on:
+        if word_proposal_on:
             if not self._attention_edit.text().strip():
                 warnings.append("Attention is empty — the proposal's \"Attention:\" and \"Dear …\" lines will be blank.")
             for _code, (_rate, _day) in self._fx_rates().items():
@@ -7133,19 +7133,19 @@ class CTRGeneratorWidget(QWidget):
 
         log.info("Generate clicked: job_ref=%s output_dir=%s", job_ref, output_dir)
 
-        rows = self._collect_rows(pdms_on, bad_rows)
+        rows = self._collect_rows(word_proposal_on, bad_rows)
         support_rows, other_rows = rows["support_rows"], rows["other_rows"]
         equip_rows, consump_rows = rows["equip_rows"], rows["consump_rows"]
         third_party_rows = rows["third_party_rows"]
         mp_skipped, eq_skipped, cs_skipped = rows["mp_skipped"], rows["eq_skipped"], rows["cs_skipped"]
         incomplete_skipped = rows["incomplete_skipped"]
 
-        if pdms_on and rows["no_shift"]:
+        if word_proposal_on and rows["no_shift"]:
             # The proposal's labour table shows days and a day rate; both come from the shift length.
             _bad = rows["no_shift"]
             answer = QMessageBox.question(
                 self, "Shift length missing — rows will be skipped",
-                "The PDMS proposal shows days and a day rate, which need the shift length — the hours at the "
+                "The Word proposal shows days and a day rate, which need the shift length — the hours at the "
                 "end of the Encoding (for example NS-NAT-OFF-12 = 12 hours). These manpower rows have none and "
                 "will be SKIPPED (left out of the proposal):\n\n• " + "\n• ".join(_bad[:15])
                 + (f"\n• … and {len(_bad) - 15} more" if len(_bad) > 15 else "")
@@ -7179,7 +7179,7 @@ class CTRGeneratorWidget(QWidget):
             "required_info": list(self._required_info),
         }
         header_usd = {**_base, "contract_no": self._contract_no_usd_edit.text().strip()}
-        pdms_job = self._pdms_payload(pdms_tpl) if pdms_on else None
+        word_proposal_job = self._word_proposal_payload(word_proposal_tpl) if word_proposal_on else None
 
         worker = CTRWorker(
             support_rows  = support_rows,
@@ -7194,7 +7194,7 @@ class CTRGeneratorWidget(QWidget):
             header_azn    = header_azn,
             header_usd    = header_usd,
             markup_rate   = self._markup_rate(),
-            pdms          = pdms_job,
+            word_proposal          = word_proposal_job,
             parent        = self,
         )
         self._prune_workers()

@@ -342,8 +342,8 @@
     "cons_rechargability_col": 18
   },
 
-  "pdms": {
-    "_comment": "PDMS proposal (Word). Fixed texts and defaults for the header fields; the tags in the template are filled by builder_pdms.py. hotbed_rate: the standing 'Hotbed - if required' line of the labour table (0 = no such line). default_usd_azn is only the starting value of the USD->AZN field; the figure actually used is the one in the UI.",
+  "word_proposal": {
+    "_comment": "Word proposal. Fixed texts and defaults for the header fields; the tags in the template are filled by builder_word_proposal.py. hotbed_rate: the standing 'Hotbed - if required' line of the labour table (0 = no such line). default_usd_azn is only the starting value of the USD->AZN field; the figure actually used is the one in the UI.",
     "customer_name":   "PD & MS Energy (Aberdeen) Limited",
     "customer_city":   "Baku, Azerbaijan",
     "signer_name":     "Rufat Badalov",
