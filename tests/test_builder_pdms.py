@@ -290,3 +290,28 @@ def test_an_incomplete_hotbed_is_inserted_as_given_without_a_total():
     assert row[6] == "295.00 ₼" and total == "59,479.00 ₼"
     # None = left out
     assert hotbed_row(None, "pdms_hb_e")[0] is None
+
+
+def test_no_manpower_leaves_no_labour_caption_table_or_summary_row():
+    if not TEMPLATE.is_file():
+        raise H.Skip("PDMS_TEMPLATE_short.docx is not in TEST_Files/CTR creator")
+    out = B.build_pdms([], [], EQUIP, CONS, TEMPLATE, H.SANDBOX / "pdms_nolabour", HEADER, rates={"USD": 1.7}, markup_rate=0.1)
+    d = docx.Document(str(out))
+    text = _text(d)
+    assert "{{" not in text and "Labour Rates" not in text
+    assert "Rates are listed in Table № 1 and Table № 2." in text
+    assert "Table № 1.  Equipment rates." in text and "Table № 2 Consumables costs" in text
+    assert len(d.tables) == 3                                   # equipment + consumables + summary
+    assert [r.cells[0].text.strip() for r in d.tables[-1].rows] == ["MATERIAL:", "CONSUMABLES:", "GRAND TOTAL:"]
+
+
+def test_each_category_can_be_missing_alone():
+    if not TEMPLATE.is_file():
+        raise H.Skip("PDMS_TEMPLATE_short.docx is not in TEST_Files/CTR creator")
+    for name, man, eq, co, gone in (("m", [], EQUIP, CONS, "Labour Rates"), ("e", MAN, [], CONS, "Equipment rates"),
+                                    ("c", MAN, EQUIP, [], "Consumables costs")):
+        out = B.build_pdms(man, [], eq, co, TEMPLATE, H.SANDBOX / f"pdms_alone_{name}", HEADER, rates={"USD": 1.7}, markup_rate=0.1)
+        d = docx.Document(str(out))
+        text = _text(d)
+        assert gone not in text and "{{" not in text
+        assert all(any(c.text.strip() for c in r.cells) for t in d.tables for r in t.rows)   # no empty table rows left

@@ -120,3 +120,14 @@ def test_an_untagged_proposal_is_refused_with_a_message_that_says_so():
         assert "not a tagged PDMS template" in str(exc) and "long proposal.docx" in str(exc)
     else:
         raise AssertionError("an untagged proposal was accepted")
+
+
+def test_the_long_proposal_without_manpower_or_third_party_has_no_empty_table():
+    _need()
+    d = B.build_pdms([], [], TB.EQUIP, TB.CONS, LONG, H.SANDBOX / "pdmsl_nolabour", dict(TB.HEADER, project_type="Onshore"),
+                     rates={"USD": 1.7}, markup_rate=0.1, third_party_rows=[])
+    d = docx.Document(str(d))
+    text = _all_text(d)
+    assert "{{" not in text and ". Personnel" not in text and ". Third-Party services" not in text
+    assert "Table A. Plant and Equipment" in text and "Table B. Materials and Consumables" in text
+    assert "Position" not in _tables(d)

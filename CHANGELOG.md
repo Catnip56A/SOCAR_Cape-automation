@@ -5,6 +5,10 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and version numbers come from the [VERSION](VERSION) file.
 
+## [1.0.27] - 2026-11-24
+### Fixed
+- **PDMS proposal: a category with no lines is left out of the Word document.** Manpower was the only category that was never optional, so a request without manpower produced an empty Labour table with its caption and a Labour row in the summary. Now **manpower, equipment, consumables and third-party (transport)** with no lines each disappear with their caption, their table (and note) and their summary row, the remaining tables are renumbered (short: Table № 1, 2 …; long: A, B …) and the "Rates are listed in …" sentence follows. A Hotbed line given without manpower keeps the labour table. The shipped templates are not changed: the labour table is found by its tag (a template with `{{#IF_LABOUR}}` … `{{/IF_LABOUR}}` is cut at those markers). `_remove_labour_section`, `build_pdms` (`builder_pdms.py`); `tests/test_builder_pdms.py`, `tests/test_builder_pdms_long.py`.
+
 ## [1.0.26] - 2026-11-15
 ### Added
 - **Disparities: Choose for selected.** Select several lines in the Disparities window (Ctrl / Shift + click) and press **Choose for selected…** to give them all one choice — the document, SAGE, or clear it. The choice is kept per Stock Code, so a code on several lines is set once, and the statistics recalculate once. `DisparitiesDialog._choose_selected` / `_apply_to_selected`, `StatsPanel.set_choices_bulk` (`stats_view.py`); `tests/test_bulk_choice_and_empty_manpower.py`.

@@ -405,6 +405,25 @@ def _fill_rows(table: Table, tag: str, rows: list[dict]) -> None:
     sample.getparent().remove(sample)
 
 
+def _remove_labour_section(doc, tag: str) -> None:
+    """No manpower: the labour caption and table go. A template with {{#IF_LABOUR}} ... {{/IF_LABOUR}} is cut at
+    those markers; the shipped templates have none, so the table is found by its tag and everything from its
+    caption (the paragraph with {{NO_LABOUR}} / {{LTR_LABOUR}}) to the table is removed with it."""
+    if _find_paragraph(doc, "{{#IF_LABOUR}}") is not None and _find_paragraph(doc, "{{/IF_LABOUR}}") is not None:
+        _remove_block(doc, "LABOUR")
+        return
+    table = _find_table(doc, tag)._tbl
+    el = table.getprevious()
+    while el is not None:
+        prev = el.getprevious()
+        text = "".join(t.text or "" for t in el.iter(qn("w:t")))
+        el.getparent().remove(el)
+        if "{{NO_LABOUR}}" in text or "{{LTR_LABOUR}}" in text:
+            break
+        el = prev
+    table.getparent().remove(table)
+
+
 def _drop_row(table: Table, tag: str) -> None:
     tr = _row_with(table, tag)._tr
     tr.getparent().remove(tr)
@@ -544,14 +563,15 @@ def build_pdms(
     separate_tp = _has_table_with(doc, "{{T_DESC}}")
     has_tp = separate_tp and bool(transport)
     has_cons = bool(consumables) if separate_tp else bool(consumables or transport)
-    present = [("LABOUR", True), ("EQUIPMENT", bool(equipment)), ("CONSUMABLES", has_cons), ("THIRD_PARTY", has_tp)]
+    has_labour = bool(labour or hotbed)         # a Hotbed line alone still needs the labour table
+    present = [("LABOUR", has_labour), ("EQUIPMENT", bool(equipment)), ("CONSUMABLES", has_cons), ("THIRD_PARTY", has_tp)]
     numbers, n = {}, 0
     for name, used in present:
         if used:
             n += 1
             numbers[name] = n
     refs = [f"Table № {i}" for k, i in numbers.items() if k != "THIRD_PARTY"]
-    tables_ref = refs[0] if len(refs) == 1 else ", ".join(refs[:-1]) + " and " + refs[-1]
+    tables_ref = (refs[0] if len(refs) == 1 else ", ".join(refs[:-1]) + " and " + refs[-1]) if refs else "this proposal"
 
     attention = header.get("attention_name", "")
     values = {
@@ -573,7 +593,7 @@ def build_pdms(
         "{{NO_CONSUMABLES}}":  str(numbers.get("CONSUMABLES", "")),
         "{{NO_THIRD_PARTY}}":  str(numbers.get("THIRD_PARTY", "")),
         # the long proposal letters its tables (Table A, B …) in the same order
-        "{{LTR_LABOUR}}":      chr(64 + numbers["LABOUR"]),
+        "{{LTR_LABOUR}}":      chr(64 + numbers["LABOUR"]) if "LABOUR" in numbers else "",
         "{{LTR_EQUIPMENT}}":   chr(64 + numbers["EQUIPMENT"]) if "EQUIPMENT" in numbers else "",
         "{{LTR_CONSUMABLES}}": chr(64 + numbers["CONSUMABLES"]) if "CONSUMABLES" in numbers else "",
         "{{LTR_THIRD_PARTY}}": chr(64 + numbers["THIRD_PARTY"]) if "THIRD_PARTY" in numbers else "",
@@ -582,6 +602,9 @@ def build_pdms(
     }
 
     # ── optional blocks (before the tables, so empty ones leave nothing) ──
+    l_tag = "{{L_DESC}}" if _has_table_with(doc, "{{L_DESC}}") else "{{L_POSITION}}"   # the long one has Position and Shift columns
+    if not has_labour:
+        _remove_labour_section(doc, l_tag)
     blocks = [("EQUIPMENT", equipment), ("CONSUMABLES", has_cons)] + ([("THIRD_PARTY", has_tp)] if separate_tp else [])
     for name, rows in blocks:
         if rows:
@@ -590,24 +613,24 @@ def build_pdms(
             _remove_block(doc, name)
 
     # ── tables: the template holds the sample's own tables; rows are copies of its sample rows ──
-    l_tag = "{{L_DESC}}" if _has_table_with(doc, "{{L_DESC}}") else "{{L_POSITION}}"   # the long one has Position and Shift columns
-    labour_t = _find_table(doc, l_tag)
-    _fill_rows(labour_t, l_tag, [
-        {"{{L_NO}}": str(i), "{{L_DESC}}": r["description"], "{{L_POSITION}}": r["position"], "{{L_SHIFT}}": r["shift"],
-         "{{L_NAT}}": r["nationality"], "{{L_LOC}}": location,
-         "{{L_DAYS}}": _qty(r["days"]), "{{L_MEN}}": _qty(r["men"]),
-         "{{L_RATE}}": _money(r["rate"], sym), "{{L_TOTAL}}": _money(r["total"], sym)}
-        for i, r in enumerate(labour, 1)])
-    if hotbed:      # always inserted; calculated only when both the rate and the days are given
-        both = bool(hotbed.get("rate") and hotbed.get("days"))
-        _fill_row(labour_t, _row_with(labour_t, "{{HOTBED_LABEL}}")._tr, {
-            "{{HOTBED_LABEL}}": cfg["hotbed_label"],
-            "{{HOTBED_DAYS}}": _qty(hotbed["days"]) if hotbed.get("days") else "",
-            "{{HOTBED_RATE}}": _money(hotbed["rate"], sym) if hotbed.get("rate") else "",
-            "{{HOTBED_TOTAL}}": _money(hotbed_total, sym) if both else ""})
-    else:
-        _drop_row(labour_t, "{{HOTBED_LABEL}}")
-    _fill_row(labour_t, _row_with(labour_t, "{{L_SUM}}")._tr, {"{{L_SUM}}": _money(labour_total, sym)})
+    if has_labour:
+        labour_t = _find_table(doc, l_tag)
+        _fill_rows(labour_t, l_tag, [
+            {"{{L_NO}}": str(i), "{{L_DESC}}": r["description"], "{{L_POSITION}}": r["position"], "{{L_SHIFT}}": r["shift"],
+             "{{L_NAT}}": r["nationality"], "{{L_LOC}}": location,
+             "{{L_DAYS}}": _qty(r["days"]), "{{L_MEN}}": _qty(r["men"]),
+             "{{L_RATE}}": _money(r["rate"], sym), "{{L_TOTAL}}": _money(r["total"], sym)}
+            for i, r in enumerate(labour, 1)])
+        if hotbed:      # always inserted; calculated only when both the rate and the days are given
+            both = bool(hotbed.get("rate") and hotbed.get("days"))
+            _fill_row(labour_t, _row_with(labour_t, "{{HOTBED_LABEL}}")._tr, {
+                "{{HOTBED_LABEL}}": cfg["hotbed_label"],
+                "{{HOTBED_DAYS}}": _qty(hotbed["days"]) if hotbed.get("days") else "",
+                "{{HOTBED_RATE}}": _money(hotbed["rate"], sym) if hotbed.get("rate") else "",
+                "{{HOTBED_TOTAL}}": _money(hotbed_total, sym) if both else ""})
+        else:
+            _drop_row(labour_t, "{{HOTBED_LABEL}}")
+        _fill_row(labour_t, _row_with(labour_t, "{{L_SUM}}")._tr, {"{{L_SUM}}": _money(labour_total, sym)})
 
     if equipment:
         t = _find_table(doc, "{{E_DESC}}")
@@ -645,6 +668,8 @@ def build_pdms(
 
     if _has_table_with(doc, "{{S_GRAND}}"):        # the long proposal has no summary table
         summary_t = _find_table(doc, "{{S_GRAND}}")
+        if not has_labour:
+            _drop_row(summary_t, "{{S_LABOUR}}")
         if not equipment:
             _drop_row(summary_t, "{{S_MATERIAL}}")
         if not has_cons:
