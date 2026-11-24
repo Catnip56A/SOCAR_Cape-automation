@@ -11,6 +11,8 @@ dependencies = [
     "xlwings>=0.31",
     "python-docx>=1.1",
     "docxtpl>=0.19",
+    "pypdf>=7.1.1",
+    "rapidfuzz>=3.14.6",
 ]
 
 [project.optional-dependencies]

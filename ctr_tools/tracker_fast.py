@@ -1376,3 +1376,151 @@ def write_entries_fast(
     ]
 
     return written, skipped, backup_path, notes
+
+
+# ── Purchase orders: read the rows a PO could belong to, write a PO into the row the user picked ────────────────
+
+_DATE_FORMAT = "[$-409]dd\\-mmm\\-yy;@"      # the tracker's own date format (as in its N and Q columns)
+
+
+def _num(text: str):
+    try:
+        return float(text)
+    except (TypeError, ValueError):
+        return None
+
+
+def read_tracker_rows(tracker_path: str | Path) -> list[dict]:
+    """Every data row of the tracker that has a CTR number or a PO, with the cells a PO touches (read only):
+    {"row", "client", "ctr", "po_type", "po", "line", "account", "description", "delivery" (date or None),
+     "value" (the CTR value S), "po_value" (T), "currency", "revision"}."""
+    cfg, pcfg = CFG["ctr_tracker"], CFG["ctr_tracker_po"]
+    letters = {
+        "client": pcfg["col_company"], "ctr": cfg["col_ctr_number"], "po_type": pcfg["col_po_type"],
+        "po": pcfg["col_po_number"], "line": pcfg["col_po_line"], "account": pcfg["col_account"],
+        "description": cfg["col_description"], "delivery": pcfg["col_delivery"], "value": cfg["col_value"],
+        "po_value": pcfg["col_value"], "currency": cfg["col_currency"], "revision": cfg["col_revision"],
+    }
+    by_letter = {v: k for k, v in letters.items()}
+    out: list[dict] = []
+    with zipfile.ZipFile(tracker_path, "r") as zf:
+        sheet_root = etree.fromstring(zf.read(_resolve_sheet_part(zf, cfg["sheet_name"])))
+        shared = _load_shared_strings(zf)
+    for row_elem in sheet_root.findall(f".//{_M}sheetData/{_M}row"):
+        r = int(row_elem.get("r"))
+        if r <= cfg["header_row"]:
+            continue
+        rec: dict = {"row": r}
+        for c in row_elem.findall(f"{_M}c"):
+            key = by_letter.get(_col_letters(c.get("r")))
+            if key is not None:
+                rec[key] = _cell_text(c, shared).replace("\xa0", " ").strip()
+        if not (rec.get("ctr") or rec.get("po")):
+            continue
+        for key in ("value", "po_value"):
+            rec[key] = _num(rec.get(key))
+        serial = _num(rec.get("delivery"))
+        rec["delivery"] = _EXCEL_EPOCH + timedelta(days=int(serial)) if serial is not None else None
+        for key in letters:
+            rec.setdefault(key, None if key in ("value", "po_value", "delivery") else "")
+        out.append(rec)
+    return out
+
+
+def write_pos_fast(
+    tracker_path: str | Path,
+    assignments: list[dict],
+    make_backup: bool = False,
+) -> tuple[list[tuple[int, str, int]], list[tuple[int, str, str]], Path | None]:
+    """Write purchase-order data into the tracker rows the user picked. Each assignment is
+    {"row": int, "ctr": the CTR number the row must still carry, "currency": the PO's currency,
+     "fields": {"po_number", "po_line", "company", "account", "delivery" (date), "value", "po_type"} — only the
+     fields to write; a field not listed is left as it is}.
+    Only those cells are touched, in the picked row; no row is inserted or moved, so no Excel is needed. A row whose
+    CTR number is no longer the expected one (the tracker changed meanwhile) is skipped with a reason.
+    Returns (written [(index, ctr, row)], skipped [(index, ctr, reason)], backup_path)."""
+    if not assignments:
+        raise ValueError("No purchase orders to write.")
+    tracker_path = Path(tracker_path)
+    cfg, pcfg = CFG["ctr_tracker"], CFG["ctr_tracker_po"]
+    backup_path = backup_tracker(tracker_path) if make_backup else None
+
+    with zipfile.ZipFile(tracker_path, "r") as zin:
+        sheet_part = _resolve_sheet_part(zin, cfg["sheet_name"])
+        sheet_root = etree.fromstring(zin.read(sheet_part))
+        shared = _load_shared_strings(zin)
+        infos = {i.filename: i for i in zin.infolist()}
+        all_data = {name: zin.read(name) for name in zin.namelist() if name != sheet_part}
+    row_by_num = {int(r.get("r")): r for r in sheet_root.findall(f".//{_M}sheetData/{_M}row")}
+    default_styles = _col_default_styles(sheet_root)
+    styles_root = etree.fromstring(all_data["xl/styles.xml"])
+
+    written: list[tuple[int, str, int]] = []
+    skipped: list[tuple[int, str, str]] = []
+    for idx, a in enumerate(assignments):
+        row, ctr = a["row"], a.get("ctr", "")
+        row_elem = row_by_num.get(row)
+        if row_elem is None:
+            skipped.append((idx, ctr, f"row {row} does not exist any more"))
+            continue
+        cells = {c.get("r"): c for c in row_elem.findall(f"{_M}c")}
+        now_ctr = _cell_text(cells[f"{cfg['col_ctr_number']}{row}"], shared) if f"{cfg['col_ctr_number']}{row}" in cells else ""
+        if _normalize_ctr_number(now_ctr) != _normalize_ctr_number(ctr):
+            skipped.append((idx, ctr, f'row {row} now holds "{now_ctr or "(blank)"}", not {ctr} — the tracker changed; '
+                                      "load the PO again"))
+            continue
+
+        def _cell(letter: str, _row=row, _cells=cells, _elem=row_elem):
+            return _get_or_create_cell(_elem, _cells, _row, letter, default_styles)
+
+        def _restyle(cell, letter: str, format_code: str | None) -> None:
+            if not format_code:
+                return
+            style = _style_with_number_format(
+                styles_root, cell.get("s") or default_styles.get(_col_index(letter), "0"), format_code)
+            if style is not None:
+                cell.set("s", style)
+
+        f = a["fields"]
+        if f.get("po_number"):
+            text = str(f["po_number"]).strip()
+            cell = _cell(pcfg["col_po_number"])
+            _set_numeric_cell(cell, int(text)) if text.isdigit() else _set_string_cell(cell, text)
+        if f.get("po_line") is not None:
+            _set_numeric_cell(_cell(pcfg["col_po_line"]), int(f["po_line"]))
+        if f.get("company"):
+            _set_string_cell(_cell(pcfg["col_company"]), f["company"])
+        if f.get("account"):
+            _set_string_cell(_cell(pcfg["col_account"]), f["account"])
+        if f.get("po_type"):
+            _set_string_cell(_cell(pcfg["col_po_type"]), f["po_type"])
+        if f.get("delivery") is not None:
+            cell = _cell(pcfg["col_delivery"])
+            _set_numeric_cell(cell, _excel_serial(f["delivery"]))
+            _restyle(cell, pcfg["col_delivery"], _DATE_FORMAT)
+        if f.get("value") is not None:
+            cell = _cell(pcfg["col_value"])
+            _set_numeric_cell(cell, f["value"])
+            row_currency = (_cell_text(cells[f"{cfg['col_currency']}{row}"], shared)
+                            if f"{cfg['col_currency']}{row}" in cells else "") or a.get("currency", "")
+            _restyle(cell, pcfg["col_value"], cfg["value_format_by_currency"].get(row_currency.strip().upper()))
+        written.append((idx, ctr, row))
+
+    if written:
+        new_sheet_xml = etree.tostring(sheet_root, xml_declaration=True, encoding="UTF-8", standalone=True)
+        if "xl/workbook.xml" in all_data:
+            all_data["xl/workbook.xml"] = _force_full_calc_on_load(all_data["xl/workbook.xml"])
+        tmp_path = tracker_path.with_name(tracker_path.name + ".tmp")
+        try:
+            with zipfile.ZipFile(tmp_path, "w", zipfile.ZIP_DEFLATED) as zout:
+                for name, info in infos.items():
+                    zout.writestr(info, new_sheet_xml if name == sheet_part else all_data[name])
+            try:
+                tmp_path.replace(tracker_path)
+            except PermissionError as exc:
+                raise ValueError(
+                    f'Cannot save "{tracker_path.name}" — it is locked, most likely open in Excel or being synced. '
+                    "Close it there and write again; no PO data was saved.") from exc
+        finally:
+            tmp_path.unlink(missing_ok=True)
+    return written, skipped, backup_path

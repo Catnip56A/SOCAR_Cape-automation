@@ -358,20 +358,23 @@ class _CompaniesDialog(QDialog):
     """Edit the CTR Tracker's company -> Project Code list. A CTR whose Client is one of these companies
     always gets that Project Code, whatever its Location is."""
 
-    def __init__(self, parent, entries: dict[str, str]):
-        super().__init__(parent)
-        self.setWindowTitle("CTR Tracker company codes")
-        self.resize(560, 420)
-        lay = QVBoxLayout(self)
-        note = QLabel(
-            "A CTR whose Client is one of these companies always gets this Project Code in the CTR Tracker, "
+    TITLE = "CTR Tracker company codes"
+    NOTE = ("A CTR whose Client is one of these companies always gets this Project Code in the CTR Tracker, "
             "whatever Location is picked (it overrides the Location's code). The company name is compared "
             "with the CTR's Client text ignoring capitals; it must otherwise match exactly.")
+    HEADERS = ["Company (the CTR's Client)", "Project Code"]
+
+    def __init__(self, parent, entries: dict[str, str]):
+        super().__init__(parent)
+        self.setWindowTitle(self.TITLE)
+        self.resize(560, 420)
+        lay = QVBoxLayout(self)
+        note = QLabel(self.NOTE)
         note.setWordWrap(True)
         note.setStyleSheet(_MUTED)
         lay.addWidget(note)
         self._table = QTableWidget(0, 2)
-        self._table.setHorizontalHeaderLabels(["Company (the CTR's Client)", "Project Code"])
+        self._table.setHorizontalHeaderLabels(self.HEADERS)
         self._table.horizontalHeader().setStretchLastSection(True)
         self._table.setColumnWidth(0, 300)
         self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
@@ -422,6 +425,16 @@ class _CompaniesDialog(QDialog):
             seen[company.lower()] = company
             out[company] = code
         return out
+
+
+class _POCompaniesDialog(_CompaniesDialog):
+    """Edit the PO company -> short name list: the CTR Tracker's Company column holds the short name (AIOC, BPCS …) of
+    the company a purchase order names."""
+    TITLE = "PO company short names"
+    NOTE = ("The company as a purchase order prints it, and the short name the CTR Tracker's Company column uses for "
+            "it. Capitals and a trailing LIMITED / LTD are ignored when a PO's company is matched; a company not in "
+            "this list is asked for by hand when a PO is loaded.")
+    HEADERS = ["Company (as on the PO)", "Short name"]
 
 
 class _TypesDialog(QDialog):
@@ -643,6 +656,13 @@ class SettingsTab(QWidget):
                         self._edit_companies, self._reset_companies,
                         lambda: self._restore("Template config", _config._CONFIG_PATH),
                         open_text="Edit…")
+        self._saved_row(g2, "po_companies", "PO company short names",
+                        "How a purchase order's company is written in the CTR Tracker's Company column (for example "
+                        "BP EXPLORATION (CASPIAN SEA) → BPCS). Stored in your template_config.json; Restore brings back "
+                        "an earlier copy of that file.",
+                        self._edit_po_companies, self._reset_po_companies,
+                        lambda: self._restore("Template config", _config._CONFIG_PATH),
+                        open_text="Edit…")
         self._saved_row(g2, "types", "Stock Code types",
                         "Which Stock Codes are Equipment and which are Consumables (used by Document price in the "
                         "MR vs CTR tab). Ships with the app; Merge adds the shipped codes you do not have yet, "
@@ -845,6 +865,7 @@ class SettingsTab(QWidget):
         self._counts["presets"].setText(f"{c['presets']} saved")
         self._counts["choices"].setText(f"{c.get('choices', 0)} saved")
         self._counts["companies"].setText(f"{len(_config.CFG.get('ctr_tracker_companies', {}))} companies")
+        self._counts["po_companies"].setText(f"{len(_config.CFG.get('ctr_tracker_po_companies', {}))} companies")
         t = _types.current_types()
         self._counts["types"].setText(
             f"{len(t['equipment'])} equipment · {len(t['consumable'])} consumable"
@@ -879,7 +900,8 @@ class SettingsTab(QWidget):
         for key, path in (("aliases", _aliases._ALIASES_PATH), ("renames", _renames._DESC_RENAMES_PATH),
                           ("presets", _presets._PRESETS_PATH), ("choices", _choices._CHOICES_PATH),
                           ("types", _types._TYPES_PATH), ("keywords", _kw._KEYWORDS_PATH),
-                          ("config", _config._CONFIG_PATH), ("companies", _config._CONFIG_PATH)):
+                          ("config", _config._CONFIG_PATH), ("companies", _config._CONFIG_PATH),
+                          ("po_companies", _config._CONFIG_PATH)):
             n = len(backups_for(path))
             btn = self._restore_btns[key]
             btn.setEnabled(n > 0)
@@ -1098,6 +1120,41 @@ class SettingsTab(QWidget):
             return
         self.refresh()
 
+    def _edit_po_companies(self) -> None:
+        dlg = _POCompaniesDialog(self, dict(_config.CFG.get("ctr_tracker_po_companies", {})))
+        accepted = dlg.exec() == QDialog.DialogCode.Accepted
+        entries = dlg.entries() if accepted else None
+        dlg.deleteLater()
+        if not accepted:
+            return
+        try:
+            check_writable(_config._CONFIG_PATH.parent)
+            copy_backup(_config._CONFIG_PATH)
+            _config.save_po_companies(entries)
+        except (OSError, ValueError) as exc:
+            log.exception("Saving the PO company short names failed")
+            QMessageBox.critical(self, "Save failed", str(exc))
+            return
+        self.refresh()
+
+    def _reset_po_companies(self) -> None:
+        if QMessageBox.question(
+                self, "Reset PO company short names",
+                "Replace your PO company list with the one that ships with the app?\n\nYour other template settings "
+                "are kept; the current template_config.json is first saved next to it as “…bak-<date>-<time>…”.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel) != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            check_writable(_config._CONFIG_PATH.parent)
+            copy_backup(_config._CONFIG_PATH)
+            _config.save_po_companies(_config.shipped_po_companies())
+        except (OSError, ValueError) as exc:
+            log.exception("Reset of the PO company short names failed")
+            QMessageBox.critical(self, "Reset failed", str(exc))
+            return
+        self.refresh()
+
     def _edit_types(self) -> None:
         names = self._gen.sage_names() if hasattr(self._gen, "sage_names") else {}
         dlg = _TypesDialog(self, _types.current_types(), names)
@@ -1307,7 +1364,7 @@ class SettingsTab(QWidget):
             QMessageBox.information(self, "Template config", f"The folder is:\n\n{folder}")
 
     def _after_config_change(self) -> None:
-        for reload in (_config.reload_pdms_config, _config.reload_tracker_companies):
+        for reload in (_config.reload_pdms_config, _config.reload_tracker_companies, _config.reload_po_companies):
             try:
                 reload()                 # the PDMS values and the company codes apply at once; the template positions at the next start
             except ValueError:

@@ -41,6 +41,8 @@ from ctr_tools.tracker import (
     location_options, match_site,
 )
 from ctr_tools.tracker_fast import IN_BATCH_CONFLICT_MARKER, find_older_revisions, write_entries_fast
+from ctr_tools.po import ctr_base
+from ctr_tools.po_view import POSectionWidget
 from ctr_tools.tasks import TASKS
 from ctr_tools.window import _file_picker_row, _group_css, _highlight_row, _make_table, _ro_item
 
@@ -250,6 +252,10 @@ class CTRTrackerWidget(QWidget):
         self._build_workbook_section(cl)
         self._build_add_section(cl)
         self._build_batch_section(cl)
+        self._po_section = POSectionWidget(
+            lambda: self._tracker_edit.text(), self._backup_check.isChecked, self._po_ctr_files)
+        self._tracker_edit.textChanged.connect(lambda _=None: self._po_section.tracker_path_changed())
+        cl.addWidget(self._po_section)
 
         cl.addStretch()
 
@@ -434,6 +440,15 @@ class CTRTrackerWidget(QWidget):
         gl.addLayout(retry_row)
 
         parent_layout.addWidget(grp)
+
+    def _po_ctr_files(self) -> dict[str, str]:
+        """CTR base number -> the CTR file loaded in the batch (or in the form), for the PO pricebook check."""
+        out: dict[str, str] = {}
+        for e in list(self._batch) + ([self._current_entry] if self._current_entry else []):
+            base = ctr_base(e.ctr_number)
+            if base and e.source_path:
+                out[base] = e.source_path
+        return out
 
     # ── Load / Add flow ─────────────────────────────────────────────────────
 
@@ -770,6 +785,7 @@ class CTRTrackerWidget(QWidget):
         self._workers.append(worker)
 
         def _done(written: list, skipped: list, backup_path, notes: list):
+            self._po_section.invalidate_tracker_rows()   # the rows the PO pickers list have changed
             dlg.close()
             dlg.deleteLater()
             self._workers.remove(worker)
@@ -806,7 +822,8 @@ class CTRTrackerWidget(QWidget):
             dlg.close()
             dlg.deleteLater()
             self._workers.remove(worker)
-            QMessageBox.critical(self, "Write failed", message)
+            QMessageBox.critical(self, "Write failed", message + "\n\nNothing was lost: your CTRs are still in the "
+                                 "batch below. Fix the problem (for example close the tracker in Excel) and write again.")
             self._refresh_batch_state()
 
         worker.finished_ok.connect(_done)

@@ -22,7 +22,7 @@ def _window():
     win._mr_df, win._ctr_df = mr, ctr
     win._run_compare()
     H.pump(30)
-    assert H.wait(lambda: not win._stats_workers, 60)
+    assert H.wait_stats(win, 60)
     return win
 
 
@@ -76,7 +76,7 @@ def test_missing_columns_are_shown_empty_and_grey_and_not_compared():
     win._mr_df = mr
     win._run_compare()
     H.pump(30)
-    assert H.wait(lambda: not win._stats_workers, 60)
+    assert H.wait_stats(win, 60)
     df = win._display_df
     for col in ("Unit (MR)", "Rechargeable (MR)", "Allocation"):
         assert col in df.columns and df[col].map(lambda v: A._norm_val(v) == "").all(), col

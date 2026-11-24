@@ -23,7 +23,7 @@ setup:
 # contains a Unix symlink (lib64 -> lib) that uv on native Windows can't
 # rebuild over the \\wsl$ UNC path. Requires PySide6/pandas/openpyxl/
 # pyinstaller installed globally on Windows: `pip install PySide6 pandas
-# openpyxl pyinstaller`.
+# openpyxl pypdf rapidfuzz pyinstaller`.
 build:
     python -m PyInstaller app.spec
 

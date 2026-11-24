@@ -408,6 +408,50 @@ _DEFAULTS: dict = {
     "ctr_tracker_companies": {
         "Turan Drilling": "AZE0104",
         "CDC":            "AZE0129",
+        "Caspian Drilling Company":        "AZE0129",
+        "Encotec":                         "AZE0078",
+        "SMO":                             "AZE0151-WREP / AZE0152-BTC",
+        "Socar Fugro":                     "AZE0045",
+        "Khazar Engineering/Fabrication":  "AZE0048",
+        "Wood Group":                      "AZE0101",
+        "RAPID SOLUTIONS LTD":             "AZE0061",
+        "Caspian Marine Services":         "AZE0055",
+        "PD&MS":                           "AZE0082",
+    },
+
+    # Purchase orders (CTR Tracker, "Purchase orders" section). Column letters of the tracker sheet a PO is written
+    # into (the row of the CTR the user picks) and the printed labels of the SAP purchase-order PDF the reader looks
+    # for. Edit here, not in code, if the tracker or the PO layout changes. The company column is the tracker's own
+    # "Company Name & Location" (ctr_tracker.col_client).
+    "ctr_tracker_po": {
+        "col_po_number": "H",    # POBackbone — the PO number
+        "col_po_line":   "I",    # PO Line Number (the PO item number)
+        "col_company":   "C",
+        "col_account":   "M",    # Account Assignment
+        "col_delivery":  "Q",    # the PO's Delivery Date (the tracker's "PO Valid from")
+        "col_value":     "T",    # PO value, in the PO's own currency (the row's Currency column says which)
+        "col_po_type":   "E",    # Type of PO — typed by the user, not on the PDF
+        "label_po_number":   "Purchase Order No:",
+        "label_order_date":  "Order Date:",
+        "label_currency":    "Currency:",
+        "label_company":     "COMPANY:",
+        "label_item_description": "Description:",
+        "label_pricebook":   "Pricebook #",
+        "label_account":     "Account Assignment:",
+        "label_delivery":    "Delivery Date:",
+        "label_total":       "Total Purchase Order Amount",
+        "suggestions":       8,
+        "default_types":     ["CONTRACT", "LIMIT", "LIMIT/FIX", "STANDARD", "STANDARD/FIX"],   # first Type of PO suggestions
+    },
+
+    # PO company (as printed on the PO) -> the short name the tracker's Company column uses. Matched ignoring
+    # capitals and a trailing LIMITED / LTD. Edited in Settings.
+    "ctr_tracker_po_companies": {
+        "AZERBAIJAN INTERNATIONAL OPERATING CO.":   "AIOC",
+        "BP EXPLORATION (SHAH DENIZ)":               "BPSD",
+        "BP EXPLORATION (CASPIAN SEA)":              "BPCS",
+        "THE BAKU-TBILISI-CEYHAN PIPELINE COMPANY":  "BTC",
+        "GEORGIAN PIPELINE COMPANY":                 "GPC",
     },
 
     # The "Additional Information / Type of Scaffold System / TRANSPORT"
@@ -598,45 +642,68 @@ def reload_pdms_config() -> dict:
 
 # ── the CTR Tracker's company -> Project Code list (edited in Settings) ──────────────────────────────────────
 
-def shipped_tracker_companies() -> dict:
-    """The company list of the shipped file (the built-in default when it cannot be read)."""
+def _shipped_dict(key: str) -> dict:
+    """A dict section of the shipped file (the built-in default when it cannot be read)."""
     try:
-        value = _read_config_file(_SHIPPED_CONFIG_PATH).get("ctr_tracker_companies")
+        value = _read_config_file(_SHIPPED_CONFIG_PATH).get(key)
     except Exception:
         value = None
-    return dict(value) if isinstance(value, dict) else dict(_DEFAULTS.get("ctr_tracker_companies", {}))
+    return dict(value) if isinstance(value, dict) else dict(_DEFAULTS.get(key, {}))
 
 
-def reload_tracker_companies() -> dict:
-    """Re-read "ctr_tracker_companies" of the user's copy into CFG, so an edit (or a restored file) applies at once.
+def _reload_dict(key: str) -> dict:
+    """Re-read one dict section of the user's copy into CFG, so an edit (or a restored file) applies at once.
     Raises ValueError when the file cannot be read; CFG is then left as it was."""
     try:
         data = _read_config_file(_CONFIG_PATH)
     except Exception as exc:
         raise ValueError(f"{_CONFIG_PATH.name} could not be read ({exc})") from exc
-    value = data.get("ctr_tracker_companies")
-    CFG["ctr_tracker_companies"] = dict(value) if isinstance(value, dict) else dict(
-        _DEFAULTS.get("ctr_tracker_companies", {}))
-    return CFG["ctr_tracker_companies"]
+    value = data.get(key)
+    CFG[key] = dict(value) if isinstance(value, dict) else dict(_DEFAULTS.get(key, {}))
+    return CFG[key]
 
 
-def save_tracker_companies(companies: dict) -> None:
-    """Write the company list into the user's template_config.json (every other setting kept, file replaced in one
-    step) and apply it at once. Raises ValueError if the file cannot be read (nothing is written) and OSError if it
-    cannot be saved."""
+def _save_dict(key: str, entries: dict) -> None:
+    """Write one string -> string section into the user's template_config.json (every other setting kept, file
+    replaced in one step) and apply it at once. Raises ValueError if the file cannot be read (nothing is written)
+    and OSError if it cannot be saved."""
     _seed_user_copy()
     try:
         data = _read_config_file(_CONFIG_PATH)
     except Exception as exc:
         raise ValueError(f"{_CONFIG_PATH.name} could not be read ({exc})") from exc
-    data["ctr_tracker_companies"] = {str(k): str(v) for k, v in companies.items()}
+    data[key] = {str(k): str(v) for k, v in entries.items()}
     tmp = _CONFIG_PATH.with_name(_CONFIG_PATH.name + ".tmp")
     try:
         tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
         tmp.replace(_CONFIG_PATH)
     finally:
         tmp.unlink(missing_ok=True)
-    CFG["ctr_tracker_companies"] = dict(data["ctr_tracker_companies"])
+    CFG[key] = dict(data[key])
+
+
+def shipped_tracker_companies() -> dict:
+    return _shipped_dict("ctr_tracker_companies")
+
+
+def reload_tracker_companies() -> dict:
+    return _reload_dict("ctr_tracker_companies")
+
+
+def save_tracker_companies(companies: dict) -> None:
+    _save_dict("ctr_tracker_companies", companies)
+
+
+def shipped_po_companies() -> dict:
+    return _shipped_dict("ctr_tracker_po_companies")
+
+
+def reload_po_companies() -> dict:
+    return _reload_dict("ctr_tracker_po_companies")
+
+
+def save_po_companies(companies: dict) -> None:
+    _save_dict("ctr_tracker_po_companies", companies)
 
 
 # ── the user's copy: what differs from the shipped file, and the Settings buttons ────────────────────────────

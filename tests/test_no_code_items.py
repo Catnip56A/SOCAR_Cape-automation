@@ -70,6 +70,6 @@ def test_window_shows_the_item_matched_and_the_statistics_ignore_it():
     win._mr_df, win._ctr_df = _frames()
     win._run_compare()
     H.pump(30)
-    assert H.wait(lambda: not win._stats_workers, 60)
+    assert H.wait_stats(win, 60)
     assert len(win._display_df) == 2 and len(win._omr_dl) == 0 and len(win._octr_dl) == 0
     assert set(win._stats_items["key"]) == {"A1"}              # the statistics never saw the forklift

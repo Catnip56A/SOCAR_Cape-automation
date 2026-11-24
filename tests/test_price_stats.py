@@ -402,7 +402,7 @@ def _mr_window():
 
 def _settle(win):
     """Wait until no statistics worker is running (a thread still running at exit crashes the process)."""
-    assert H.wait(lambda: not win._stats_workers, 120), "a statistics worker is still running"
+    assert H.wait_stats(win, 120), "a statistics worker is still running"
     H.pump(20)
 
 

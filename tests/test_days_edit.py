@@ -24,6 +24,10 @@ def _window(total=True):
         w.close()                                                           # the active window (an editor needs that)
         w.deleteLater()
     _OPEN.clear()
+    from PySide6.QtWidgets import QApplication                              # ... and hide the shared generator window
+    for w in QApplication.topLevelWidgets():                                # another test file left shown (hidden, not
+        if isinstance(w, A.MainWindow) and w.isVisible():                   # closed: later tests still use it)
+            w.hide()
     H.pump(5)
     ST.save_types({"equipment": {"C1", "C2", "C6", "C7"}, "consumable": {"C3"},
                    "confirmed": {k: "Equipment" for k in ("C1", "C2", "C6", "C7")} | {"C3": "Consumable"}})
@@ -42,12 +46,18 @@ def _window(total=True):
         "_Section": "Plant & Equipment"})
     win._run_compare()
     H.pump(30)
-    assert H.wait(lambda: not win._stats_workers, 60)
+    # The statistics job starts a moment after Compare and its result replaces the panel's rows when it arrives: wait
+    # for that result (not just for "no worker running", which is also true before the job has started — right after
+    # a slow earlier test the job started late and overwrote the costs set below) and only then set the costs.
+    assert H.wait_stats(win)
     win._stats_panel.set_rows(cs.cost_rows(win._stats_items, COSTS, True))
     win._local_ready = True
     win._local_mult_chk.setChecked(total)
     win._apply_local_costs()
     H.pump(10)
+    # the statistics job that starts after the costs are applied must be done (and its rows set) before a test edits
+    # days: "does the other side have a line" is only known then, and right after a slow earlier test it is not yet
+    assert H.wait_stats(win)
     return win
 
 
@@ -68,7 +78,15 @@ def _cell(view, code, col):
 
 def _edit(view, code, col, text):
     """What typing into the cell and pressing Enter does."""
-    return view.model().setData(_cell(view, code, col), text, Qt.ItemDataRole.EditRole)
+    done = view.model().setData(_cell(view, code, col), text, Qt.ItemDataRole.EditRole)
+    # an accepted edit rebuilds the statistics in the background; give that time to finish (a slow earlier test
+    # file makes it slower), so the totals the test reads are the new ones
+    H.pump(5)
+    if _OPEN:
+        win = _OPEN[-1]
+        H.wait_stats(win, 90)
+        H.pump(5)
+    return done
 
 
 def _flags_editable(view, code, col):

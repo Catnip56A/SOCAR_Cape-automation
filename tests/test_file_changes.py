@@ -104,7 +104,7 @@ def test_compare_does_not_warn_when_the_files_are_unchanged():
     win._run_compare()
     H.pump(10)
     assert asked == [] and len(win._display_df) == 1
-    assert H.wait(lambda: not win._stats_workers, 60)
+    assert H.wait_stats(win, 60)
 
 
 def test_compare_names_the_files_that_changed_and_lets_the_user_cancel():
@@ -126,7 +126,7 @@ def test_compare_names_the_files_that_changed_and_lets_the_user_cancel():
     win._run_compare()
     H.pump(10)
     assert len(win._display_df) == 1
-    assert H.wait(lambda: not win._stats_workers, 60)
+    assert H.wait_stats(win, 60)
 
 
 def test_a_file_that_is_gone_is_reported_too():
@@ -148,7 +148,7 @@ def test_load_files_in_the_generator_refreshes_the_statistics_of_the_current_com
     win.changed_files_chooser = lambda changed: True
     win._run_compare()
     H.pump(10)
-    assert H.wait(lambda: not win._stats_workers, 60)
+    assert H.wait_stats(win, 60)
     calls = []
     win._start_stats_job = lambda *a, **k: calls.append(1)
     win._ctr_gen.files_loaded.emit()
@@ -286,7 +286,7 @@ def test_compare_can_reload_the_changed_files_and_then_compare():
     _wait_reloaded(win)
     assert H.wait(lambda: "Compared at" in win.statusBar().currentMessage(), 60) and len(seen) == 1
     assert win._changed_source_files() == [] and seen[0][0][:2] == ("MR", copy.name)
-    assert H.wait(lambda: not win._stats_workers, 120)
+    assert H.wait_stats(win, 120)
 
 
 def test_a_table_that_the_new_version_no_longer_has_is_named():
@@ -391,7 +391,7 @@ def test_compare_anyway_is_offered_when_a_file_cannot_be_reloaded():
     win._run_compare()
     _wait_reloaded(win)
     assert offered and H.wait(lambda: "Compared at" in win.statusBar().currentMessage(), 60)
-    assert H.wait(lambda: not win._stats_workers, 120)
+    assert H.wait_stats(win, 120)
 
 
 def test_unticked_sheets_stay_unticked_when_a_located_file_has_another_name():

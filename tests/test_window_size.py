@@ -20,7 +20,7 @@ def _compared_window():
                                 "_SourceFile": "c.xlsx", "_SourceSheet": "S", "_Section": ["Plant & Equipment"]})
     win._run_compare()
     H.pump(30)
-    assert H.wait(lambda: not win._stats_workers, 60)
+    assert H.wait_stats(win, 60)
     return win
 
 

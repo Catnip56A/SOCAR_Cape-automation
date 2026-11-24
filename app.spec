@@ -43,6 +43,8 @@ a = Analysis(
         # from a static import scan on a machine without them installed,
         # so list them explicitly rather than relying on PyInstaller's
         # own xlwings hook always being present/complete.
+        "rapidfuzz",        # CTR Tracker purchase orders: description matching (ctr_tools/po.py)
+        "pypdf",            # CTR Tracker purchase orders (ctr_tools/po.py reads the PO PDFs)
         "xlwings",
         "win32com",
         "win32com.client",

@@ -41,7 +41,7 @@ def test_no_scaffold_or_no_pricing_sheet_gives_none():
 
 
 def _tracker_copy(name):
-    src = H.ROOT / "TEST_Files" / "CTR tracker" / "CTR-Tracker copy.xlsm"
+    src = H.tracker_copy()
     if not src.exists():
         raise H.Skip("TEST_Files/CTR tracker is not here")
     work = H.SANDBOX / name

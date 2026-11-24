@@ -29,7 +29,9 @@ def _window():
     win._mr_df, win._ctr_df = mr, ctr
     win._run_compare()
     H.pump(30)
-    assert H.wait(lambda: not win._stats_workers, 60)
+    # wait for the statistics RESULT, not just for "no worker running" (also true before the job has started: right
+    # after a slow earlier test file it started late and its result then replaced rows a test had set)
+    assert H.wait_stats(win)
     return win
 
 

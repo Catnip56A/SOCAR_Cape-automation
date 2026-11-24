@@ -45,7 +45,7 @@ def test_compare_against_the_mr():
     win._mr_df, win._ctr_df = mr, ctr
     win._run_compare()
     H.pump(30)
-    assert H.wait(lambda: not win._stats_workers, 60)
+    assert H.wait_stats(win, 60)
     assert len(win._display_df) == 13 and len(win._omr_dl) == 2 and len(win._octr_dl) == 3
     assert win._display_df["CTR Document"].str.endswith(".docx").all()
     assert not win._rate_rech_mismatch_cells                       # prices are numbers, MR says NONRECHARG
@@ -64,7 +64,7 @@ def _compare_pair(proposal_mode: bool):
     win._mr_df, win._ctr_df = mr, ctr
     win._run_compare()
     H.pump(30)
-    assert H.wait(lambda: not win._stats_workers, 60)
+    assert H.wait_stats(win, 60)
     return win
 
 

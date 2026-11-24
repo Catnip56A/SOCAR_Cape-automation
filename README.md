@@ -47,6 +47,7 @@ See [USER_GUIDE.md](USER_GUIDE.md) for full step-by-step usage of all three tool
 - Batches up to 10 CTRs before writing, with a per-CTR editable review table
 - Writes each CTR into its pre-created row in the master tracker workbook, matched by CTR number and Location — rows are never created or shifted on the normal path
 - Revision handling: the same CTR + currency + revision overwrites its row in place; a different revision gets its own row in ascending revision order — a spare row sharing that CTR number if it keeps that order, otherwise a new one inserted via Excel automation; when an older revision is already there you can replace it instead (asked each time, always, or never)
+- **Purchase orders**: loads SAP PO PDFs, you pick the CTR each item belongs to (starred suggestions from the item's description, by a CTR number or by typing; the description is already in the box) and the PO number, line, company short name, account assignment, delivery date, PO value and Type of PO are written into that row; existing different values are asked; a pricebook that differs from the CTR's is a red warning
 - Cost breakdown in USD whatever the CTR's currency (AZN figures converted at the tracker's rate); scaffold (equipment and consumables) in its own column; the CTR's own consumables mark-up (editable); the figures of an earlier CTR are cleared from the row it is written into
 - Companies with one fixed Project Code are edited in Settings
 - Optional timestamped backup of the tracker workbook before every write
@@ -92,7 +93,7 @@ The source code lives in WSL, but the build runs in a **Windows PowerShell** ses
 3. **Install dependencies** (`uv` may not be on the Windows PATH — use plain pip instead):
 
    ```powershell
-   pip install PySide6 pandas openpyxl pyinstaller
+   pip install PySide6 pandas openpyxl pypdf rapidfuzz pyinstaller
    ```
 4. **Build the exe**:
 
@@ -174,7 +175,9 @@ SOCAR_Cape-automation/
 │   ├── config.py            # Loads template_config.json
 │   ├── tracker_window.py    # CTR Tracker tab
 │   ├── tracker.py           # CTR Tracker data model + CTR-file field extraction
-│   ├── tracker_fast.py      # Raw-XML write path (normal case)
+│   ├── tracker_fast.py      # Raw-XML write path (normal case); also reads the rows and writes the purchase orders
+│   ├── po.py                # Purchase orders: PDF reader, company short names, CTR row suggestions, pricebook
+│   ├── po_view.py           # The Purchase Orders section of the CTR Tracker tab
 │   ├── tracker_xlwings.py   # Excel-COM write path (row-insert fallback, Windows + Excel only)
 │   ├── inspector.py         # F12 Inspector dock (read-only: logs, data, storage, threads, variables, tasks, charts, CBAR rates)
 │   ├── tasks.py             # Ordered background tasks + "stop after current task" (used by the Inspector)

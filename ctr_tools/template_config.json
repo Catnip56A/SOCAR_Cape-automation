@@ -231,7 +231,46 @@
 
   "ctr_tracker_companies": {
     "Turan Drilling": "AZE0104",
-    "CDC":            "AZE0129"
+    "CDC":            "AZE0129",
+    "Caspian Drilling Company":        "AZE0129",
+    "Encotec":                         "AZE0078",
+    "SMO":                             "AZE0151-WREP / AZE0152-BTC",
+    "Socar Fugro":                     "AZE0045",
+    "Khazar Engineering/Fabrication":  "AZE0048",
+    "Wood Group":                      "AZE0101",
+    "RAPID SOLUTIONS LTD":             "AZE0061",
+    "Caspian Marine Services":         "AZE0055",
+    "PD&MS":                           "AZE0082"
+  },
+
+  "ctr_tracker_po": {
+    "_comment": "Purchase orders in the CTR Tracker: the tracker columns a PO is written into, and the printed labels of the SAP purchase-order PDF. Delivery date goes to the tracker's PO Valid from column; Type of PO is typed by the user.",
+    "col_po_number": "H",
+    "col_po_line":   "I",
+    "col_company":   "C",
+    "col_account":   "M",
+    "col_delivery":  "Q",
+    "col_value":     "T",
+    "col_po_type":   "E",
+    "label_po_number":   "Purchase Order No:",
+    "label_order_date":  "Order Date:",
+    "label_currency":    "Currency:",
+    "label_company":     "COMPANY:",
+    "label_item_description": "Description:",
+    "label_pricebook":   "Pricebook #",
+    "label_account":     "Account Assignment:",
+    "label_delivery":    "Delivery Date:",
+    "label_total":       "Total Purchase Order Amount",
+    "suggestions":       8,
+    "default_types":     ["CONTRACT", "LIMIT", "LIMIT/FIX", "STANDARD", "STANDARD/FIX"]
+  },
+
+  "ctr_tracker_po_companies": {
+    "AZERBAIJAN INTERNATIONAL OPERATING CO.":   "AIOC",
+    "BP EXPLORATION (SHAH DENIZ)":               "BPSD",
+    "BP EXPLORATION (CASPIAN SEA)":              "BPCS",
+    "THE BAKU-TBILISI-CEYHAN PIPELINE COMPANY":  "BTC",
+    "GEORGIAN PIPELINE COMPANY":                 "GPC"
   },
 
   "ctr_request_extras": {

@@ -289,7 +289,7 @@ def _combined_window(typed_days=None):
         "_SourceSheet": "P", "_Section": "Plant & Equipment"})
     win._run_compare()
     H.pump(30)
-    assert H.wait(lambda: not win._stats_workers, 60)
+    assert H.wait_stats(win)   # the RESULT, see _window
     win._stats_panel.set_rows(cs.cost_rows(win._stats_items, COMBINED_COSTS, True))
     if typed_days:
         win._stats_panel.set_days(typed_days)
@@ -380,4 +380,4 @@ def test_a_new_compare_does_not_show_the_previous_compares_costs():
     H.pump(10)
     assert set(_col(win._tab_matched, "Local cost")) <= {"", "⏳ waiting"}   # no figure until THIS compare's statistics are ready
     assert win._combined_df["Local cost"].isna().all()
-    assert H.wait(lambda: not win._stats_workers, 60)
+    assert H.wait_stats(win, 60)

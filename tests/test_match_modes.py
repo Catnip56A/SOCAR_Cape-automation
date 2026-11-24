@@ -79,7 +79,7 @@ def _compare(win):
     win._mr_df, win._ctr_df = mr, ctr
     win._run_compare()
     H.pump(30)
-    assert H.wait(lambda: not win._stats_workers, 60)
+    assert H.wait_stats(win, 60)
 
 
 def test_window_default_and_compare_per_mode():

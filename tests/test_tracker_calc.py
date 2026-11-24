@@ -17,6 +17,22 @@ def _wb(*children):
     return f'<workbook xmlns="{NS}">{body}</workbook>'.encode()
 
 
+def _without_calc_flag(path):
+    """Take fullCalcOnLoad out of a sandbox copy's workbook.xml: a tracker that was opened and saved in Excel already
+    carries it (Excel sets it itself), and the test starts from a file that does not."""
+    tmp = path.with_name(path.name + ".tmp")
+    with zipfile.ZipFile(path) as zin, zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as zout:
+        for info in zin.infolist():
+            data = zin.read(info.filename)
+            if info.filename == "xl/workbook.xml":
+                root = etree.fromstring(data)
+                for calc in root.iter(f"{{{NS}}}calcPr"):
+                    calc.attrib.pop("fullCalcOnLoad", None)
+                data = etree.tostring(root, xml_declaration=True, encoding="UTF-8", standalone=True)
+            zout.writestr(info, data)
+    tmp.replace(path)
+
+
 def _children(xml: bytes):
     return [etree.QName(c).localname for c in etree.fromstring(xml)]
 
@@ -41,12 +57,13 @@ def test_writing_an_entry_marks_the_saved_tracker_for_recalculation_and_it_still
     from openpyxl.utils import column_index_from_string as ci
     from ctr_tools.config import CFG
     from ctr_tools.tracker import CTREntry
-    src = H.ROOT / "TEST_Files" / "CTR tracker" / "CTR-Tracker copy.xlsm"
+    src = H.tracker_copy()
     if not src.exists():
         raise H.Skip("TEST_Files/CTR tracker is not here")
     cfg = CFG["ctr_tracker"]
     work = H.SANDBOX / "tracker_copy_calc.xlsm"
     shutil.copy2(src, work)
+    _without_calc_flag(work)
 
     def calc_attrs():
         root = etree.fromstring(zipfile.ZipFile(work).read("xl/workbook.xml"))
@@ -69,7 +86,7 @@ def test_writing_an_entry_marks_the_saved_tracker_for_recalculation_and_it_still
 
 
 def test_nothing_is_written_to_the_file_when_no_entry_could_be_placed():
-    src = H.ROOT / "TEST_Files" / "CTR tracker" / "CTR-Tracker copy.xlsm"
+    src = H.tracker_copy()
     if not src.exists():
         raise H.Skip("TEST_Files/CTR tracker is not here")
     from ctr_tools.tracker import CTREntry

@@ -60,6 +60,14 @@ INPUTS = ROOT / "TEST_Files" / "CTR creator"
 msgs: list[tuple] = []              # every dialog the code under test raised: (kind, title, text)
 
 
+def tracker_copy() -> Path:
+    """The test copy of the CTR Tracker, whatever capitals its name has ("CTR-Tracker copy.xlsm" / "... Copy.xlsm": a
+    Windows copy can change them). A path that does not exist when the file is not there, so `.exists()` still works."""
+    folder = ROOT / "TEST_Files" / "CTR tracker"
+    found = next((f for f in folder.glob("*.xlsm") if f.name.lower() == "ctr-tracker copy.xlsm"), None)
+    return found or folder / "CTR-Tracker copy.xlsm"
+
+
 class Skip(Exception):
     """Raise from a test that cannot run here (the runner reports it as SKIP)."""
 
@@ -90,6 +98,25 @@ def wait(cond, secs: float = 120.0) -> bool:
         app.processEvents()
         time.sleep(0.03)
     return cond()
+
+
+def wait_stats(win, secs: float = 90.0) -> bool:
+    """Wait until the statistics of the window's last Compare are DONE — or will never run.
+
+    "No statistics worker is running" is not enough: the job starts 400 ms AFTER Compare (a timer, so the comparison
+    shows first), and until then that is already true — a test then went on, set its own values, and the job's result
+    replaced them (it only showed after a slow earlier test). The window itself knows better: `_local_state` is
+    "waiting" from Compare until the result arrives ("ready") or fails ("failed"), and a new Compare puts it back to
+    "waiting" (so an older result cannot fool this). It does not depend on the data having rows. When the statistics
+    cannot run at all (no usable SAGE Export) there is nothing to wait for."""
+    def done() -> bool:
+        if win._stats_workers:
+            return False
+        path = win._sage_edit.text().strip()
+        if win._stats_items is None or not path or not Path(path).is_file():
+            return True                                      # no job will start: the warning is shown at once
+        return getattr(win, "_local_state", "none") in ("ready", "failed", "none")
+    return wait(done, secs)
 
 
 def _new_generator() -> "W.CTRGeneratorWidget":
