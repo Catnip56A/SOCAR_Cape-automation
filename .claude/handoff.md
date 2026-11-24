@@ -7,13 +7,14 @@
 - Logging (part 10): `app.log` has one line per step for POs and the Tracker (PO read/refused, tracker rows read with seconds, suggestions, row picked, values already in the tracker and the answer, write, result, failed write, CTR batch, Settings list saved). Buyer data is never read or logged. Verified: 11 new tests `tests/test_po_logging.py` (log lines captured, no e-mail in the log), and a real run on the two sample POs.
 - Inspector: Data tab lists "Purchase orders (items)" and "Tracker rows (PO picker)", Storage lists PO files and picked CTR files, Variables shows PO counts only, Tasks shows the tracker-row read next to the PO write; Snapshot carries counts, no PO/CTR text (tested with `build_snapshot`). Accessors `inspector_items/files/rows_state` on `POSectionWidget`.
 - Full suite 462 passed, 0 failed, 0 skipped.
-- Docs: CHANGELOG, USER_GUIDE (new title/contents/numbered parts, PO in the Tracker part, Inspector rows), tests/README; task log rows MA258 (PO, 85 %), MA260 (logging), MA261 (guide), MA124 -> 60 %, MA130 -> 85 %; General Form checked.
-- Windows test build made from WSL with the Windows Python (PyInstaller 6.21): `dist/Commercial-automation.exe` (98.6 MB, 2026-11-24 10:46). Checked in the build tables: rapidfuzz (Python + compiled .pyd incl. AVX2) and pypdf and `ctr_tools.po/po_view` are bundled; only optional-extra warnings for pypdf. I ran `pip install rapidfuzz` on the Windows Python (3.14.6) for this.
-- The user tested a multi-item PO ("works as intended"): the multi-item layout is verified.
+- Docs: CHANGELOG, USER_GUIDE (new title/contents/numbered parts, PO in the Tracker part, Inspector rows), tests/README; task log rows MA258 (PO, now 100 %), MA260 (logging), MA261 (guide), MA124 -> 60 %, MA130 -> 85 %; General Form checked.
+- Windows test build made from WSL with the Windows Python (PyInstaller 6.21): `dist/Commercial-automation.exe` (98.6 MB; mine 10:46, rebuilt by the user 10:55 — the later one was tested). Checked in the build tables: rapidfuzz (Python + compiled .pyd incl. AVX2) and pypdf and `ctr_tools.po/po_view` are bundled; only optional-extra warnings for pypdf. I ran `pip install rapidfuzz` (3.14.6) on the Windows Python 3.13 for this.
+- Verified by the user on the Windows build (2026-11-24): the app works, single and multi-item POs work as intended, no errors in the logs for a week. MA258 (purchase orders) is therefore 100 % in the task log.
+- Start test by me: the exe starts ("Main window shown" 5 s after start), `crash.log` empty, no import errors.
 
 ## In progress / not fully done
-- NOT verified: the exe has not been started; PO reading/suggestions inside the exe; real Excel opening of a written tracker; tooltips in the PO group (a style sheet on a container may turn them black).
-- PO feature (MA258, 85 %) stays below 100 % until the Windows checks and the commercial answers below.
+- Nothing built is unfinished. Not checked by me (only reported by the user as working): the details of each Windows check, for example the tooltip colours in the PO group and the Excel formulas after a write.
+- Waiting on commercial staff (config values only, not code): the delivery-date column Q, the meaning of T, whether AG is filled.
 
 ## Decisions (with reasoning)
 - Delivery date -> column Q ("PO Valid from"), AG left empty, T = PO value in the row's currency: to be confirmed by commercial staff (config values, easy to change).
@@ -22,7 +23,7 @@
 - The user commits; no Co-Authored-By line. Build artifacts (`dist/`, `build/`) are git-ignored.
 
 ## Next
-Commit part 10 (the user), then the user starts `dist/Commercial-automation.exe` and tells me: I read `logs/app.log`, `crash.log` and the Inspector Snapshot for errors; then the Windows checks below.
+Commit part 10 (the user). Then the next part of 1.0.26 (the user decides what part 11 is) or the commercial answers above; if the answers differ from Q/T/AG, change `ctr_tracker_po` in `template_config.json` (and `config.py`), no code.
 
 ## Open questions
 - Consumables mark-up (AU): CTR's amount (on full consumables) or the rate on the reduced amount? (unanswered)
@@ -33,6 +34,4 @@ Commit part 10 (the user), then the user starts `dist/Commercial-automation.exe`
 - Docs were checked by keyword against the CHANGELOG only, not line by line against the code (user may point at a stale section).
 
 ## Windows checks
-- Start the exe (no import error in `logs/app.log`); load both sample POs and a multi-item one; type in the CTR box (list, Up/Down only open it, Enter/click picks); pricebook warning and yellow reminder; write into a tracker copy and open it in Excel (A and AK formulas after Ctrl+Alt+Shift+F9).
-- Tooltips in the Purchase Orders group; Settings > PO company short names; window still fits.
-- Inspector F12: Data / Storage / Variables / Tasks show the PO state; the log lines appear in the Logs tab.
+Done by the user on the 2026-11-24 build (PO reading, the CTR box, writing, Inspector, logs). Remaining, only if something changes: after the next build start the exe once and look at `logs/app.log` for errors; if the build is rebuilt after a dependency change, check `rapidfuzz` and `pypdf` are still in `build/app/PYZ-00.toc`.
