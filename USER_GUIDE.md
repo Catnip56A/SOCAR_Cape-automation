@@ -1,8 +1,24 @@
-# MR vs CTR Comparator — User Guide
+# SOCAR Cape Automation — User Guide
+
+This guide describes **version 1.0.26** of the app. One window, three tools on tabs, plus Settings and the Inspector:
+
+| Tab | What it is for | Guide |
+|---|---|---|
+| **MR vs CTR Comparator** | Compare Material Requisitions with CTRs (or with a PDMS proposal): matches, differences, statistics, cost of the documents | [Part 1](#part-1--mr-vs-ctr-comparator) |
+| **CTR Generator** | Make the AZN and USD CTR spreadsheets (and the PDMS Word proposal) from a CTR Request, priced from the pricebooks and SAGE | [Part 2](#part-2--ctr-generator) |
+| **CTR Tracker** | Write a generated CTR, and the customer's purchase order (PO), into the master tracker workbook | [Part 3](#part-3--ctr-tracker) |
+| **⚙ Settings** (left end of the tab bar) | What the app remembers between runs: paths, saved lists, company codes, short company names, template config | Part 2, [Settings](#settings) |
+| **Inspector (F12)** | A read-only panel showing what the app is doing, with a Snapshot for bug reports | [Part 4](#part-4--inspector-f12) |
+
+The changes of each release are in `CHANGELOG.md`; the short overview of the project is in `README.md`.
 
 ---
 
-## What the app does
+# Part 1 — MR vs CTR Comparator
+
+---
+
+## What the Comparator does
 
 The MR vs CTR Comparator is a desktop tool for the SOCAR Cape commercial team. It lets you load one or more **Material Requisition (MR)** Excel files and one or more **Cost Time Resource (CTR)** Excel files, then compares them side-by-side to find:
 
@@ -353,7 +369,7 @@ The app looks for the following columns in MR tables (column names are matched c
 
 ---
 
-# CTR Generator — User Guide
+# Part 2 — CTR Generator
 
 ---
 
@@ -710,15 +726,15 @@ To view, delete, or export saved renames: click the **Manage Saved Renames…** 
 
 ---
 
-# CTR Tracker — User Guide
+# Part 3 — CTR Tracker
 
 ---
 
 ## What the CTR Tracker does
 
-The **CTR Tracker** tab writes a generated CTR's header fields and cost-breakdown totals into the master CTR Tracker workbook (the shared `.xlsm` file used to log every CTR). It reads the fields straight off a generated CTR file instead of you retyping them, lets you build up a batch of up to 10 CTRs and review/correct every field before anything is written, then writes the whole batch in one go.
+The **CTR Tracker** tab writes a generated CTR's header fields and cost-breakdown totals into the master CTR Tracker workbook (the shared `.xlsm` file used to log every CTR). It reads the fields straight off a generated CTR file instead of you retyping them, lets you build up a batch of up to 10 CTRs and review/correct every field before anything is written, then writes the whole batch in one go. A second part of the tab, **Purchase Orders**, loads the customer's PO files (PDF) and writes each PO item's number, company, account assignment, delivery date and value into the tracker row of its CTR (see step 5).
 
-It does **not** create or reorder rows in the tracker on its normal path — each CTR is written into a row a human has already reserved for it by hand. The only exception is a new revision with no spare row available (or whose spare would break revision order), which inserts a row via Excel automation (see below).
+It does **not** create or reorder rows in the tracker on its normal path — each CTR is written into a row a human has already reserved for it by hand. The only exception is a new revision with no spare row available (or whose spare would break revision order), which inserts a row via Excel automation (see below) — or, when the tracker already holds an older revision of that CTR, a row you choose to replace (step 4). A purchase order never inserts or moves a row.
 
 ---
 
@@ -728,6 +744,8 @@ It does **not** create or reorder rows in the tracker on its normal path — eac
 |---|---|---|
 | **CTR Tracker File** | The master tracker workbook — picked once and remembered across runs | `.xlsm` (or `.xlsx`) |
 | **CTR File** | A generated CTR output file (AZN or USD template) to read fields from | `.xlsx` |
+| **PO file(s)** | The customer's purchase order, one file per PO (needs the CTR Tracker File above, whose rows the PO is matched to) | `.pdf` (SAP purchase order with a text layer; a scan is not readable) |
+| **CTR File for a PO** (optional) | The CTR's own file, only to compare its Pricebook # with the PO's | `.xlsx` |
 
 ---
 
@@ -808,23 +826,32 @@ If a batch contains two entries for the same CTR number + currency (e.g. a CTR a
 | *"Cannot save … it is locked, most likely open in Excel or being synced"* | The tracker file could not be replaced at the final save, so **no CTR data was written** | Close the tracker in Excel (and any other program or sync using it), then write the batch again. If the message adds that blank rows were already inserted, those spare rows stay in the tracker and are reused next time |
 | *"Excel stopped responding or was closed while the row was being inserted"* | Excel went away while the app was inserting a revision row; that entry was skipped | Close any open Excel windows and write the batch again |
 | Row insert requires Excel | A new revision needed a row inserted (no spare, or the spare would break revision order) | Run this on a machine with a licensed Excel install, or pre-create a spare row by hand instead |
+| *"… does not look like a purchase order"* / *"the item list … was not found"* / *"could not be read as a PDF"* | The PDF is not a SAP PO, or has no text (a scan) | Load the PO as sent by the customer (the PDF that has selectable text) |
+| PO table: *"Pick the tracker workbook above first — the CTR rows come from it."* | The CTR boxes need the tracker's rows | Pick the tracker workbook in **Tracker Workbook**; its rows are read at once (a few seconds) |
+| PO note (red): *"No CTR chosen — this item is skipped."* | The box holds only text (the PO description is placed there for you); nothing is picked | Open the list or type words / a CTR number and pick a row |
+| PO note (red): *"The PO is in USD, the tracker row in AZN."* | The picked row has the other currency | Pick the row with the PO's currency (the same CTR number can have an AZN and a USD row) |
+| PO note (red): *"Pricebook differs: PO …, CTR …."* | The PO and the CTR file name different pricebooks | Check the CTR against the PO; the write is still allowed |
+| PO note (yellow): *"Pricebook not checked …"* / *"The CTR file is for …, the chosen row is …"* | No CTR file was picked, or it belongs to another CTR | A reminder only — pick the right file with **CTR file…**, or ignore it |
+| PO note (red): *"Company not in the short-name list …"* | The PO's company has no short name yet | Type the short name in the **Company** box, and add it in **Settings → PO company short names** |
+| PO note (red): *"Another item points at row N too."* / *"Two items point at the same tracker row"* | Two PO items were given one row | Give each item its own row; the write refuses until then |
+| PO write failed (for example the tracker is open in Excel) | The file could not be saved; the message ends *"Nothing was lost"* | Close the tracker in Excel and press **Write POs to Tracker…** again; the items stay in the list (they are not kept after closing the app) |
 | Formula cells (e.g. USD equivalent, totals) empty after writing, formula visible in the cell | The writer stores formulas without a calculated result and Excel hasn't recalculated them yet | In Excel press **Ctrl+Alt+Shift+F9** to recalculate the whole workbook |
 
 ---
 
-# Inspector (F12)
+# Part 4 — Inspector (F12)
 
 Press **F12** anywhere to open the **Inspector** — a read-only panel that shows what the app is doing. It never changes your data. It opens docked on the right; drag its title to move it to another side. Press **Float** to turn it into its own window — an ordinary window with a normal title bar you can drag, edges you can resize, and minimise/maximise buttons — and **Dock** to put it back. Press F12 again to hide it. The app remembers whether it was docked or floating, and the window's size and position, but it always starts closed.
 
 | Tab | What it shows |
 |---|---|
 | **Overview** | Version, memory, CPU, running jobs, log folder, and the **last error with its date** and how long ago it happened. |
-| **Logs** | The log files (`app.log`, `crash.log`, older rotations). Filter by **Level**, **Search**, and tick **Follow** to keep scrolling to the newest line as the log grows (untick it to stay where you are). **Open folder** / **Copy path** find the file. |
-| **Data** | Everything currently held in memory — pricebooks, SAGE, request lines, MR/CTR tables — with rows, size and source path. Sources that aren't loaded show the path they are connected to. Select a loaded table to preview its first rows. |
-| **Storage** | Every file and folder the app is connected to, as a **path only** (nothing is opened): whether it exists, size, date, and whether the app itself holds its contents. |
+| **Logs** | The log files (`app.log`, `crash.log`, older rotations). Filter by **Level**, **Search**, and tick **Follow** to keep scrolling to the newest line as the log grows (untick it to stay where you are). **Open folder** / **Copy path** find the file. The CTR Tracker and the purchase orders write one line per step: a PO read (file, PO number, company, items, total) or refused (and why), the tracker rows read (how many, how long), the suggestions and the row you picked, the question about values already in the tracker and your answer, the write (row by row, the backup), what was written and what was skipped and why. Search for `PO ` or `write_pos_fast` / `write_entries_fast`. |
+| **Data** | Everything currently held in memory — pricebooks, SAGE, request lines, MR/CTR tables — with rows, size and source path. Sources that aren't loaded show the path they are connected to. For the CTR Tracker this includes the **batch**, the **purchase-order items** (what was read from each PO and what you picked or typed) and the **tracker rows held for the PO pickers**. Select a loaded table to preview its first rows. |
+| **Storage** | Every file and folder the app is connected to, as a **path only** (nothing is opened): whether it exists, size, date, and whether the app itself holds its contents. The loaded **PO files** and the CTR files picked for a pricebook check are listed too. |
 | **Threads** | What every thread is doing right now (its call stack). **Copy all stacks** is handy for a bug report. |
-| **Variables** | A read-only list of the app's variables with a search box. |
-| **Tasks** | The background work in order, with timings. **Stop after current task** lets the running task finish and doesn't start the next ones. |
+| **Variables** | A read-only list of the app's variables with a search box. The Purchase Orders section shows counts only (items listed, with a CTR picked, with warnings, PO files, tracker rows held), never PO or CTR texts. |
+| **Tasks** | The background work in order, with timings (including *Read tracker rows for purchase orders* and *Write purchase orders to CTR Tracker*). **Stop after current task** lets the running task finish and doesn't start the next ones. |
 | **Charts** | Memory and CPU over time (tick **Record usage** to start sampling), time per task, memory per loaded table, space per folder. |
 | **CBAR** | Pick a currency (USD and the turned-on ones) to see its AZN rates fetched so far as a line chart (a dot on every logged day; orange dots = days a document used that rate). **Hover a dot** to see the day, the rate and which documents used it; **click it** to jump to those documents in the list below. Below the chart is the **documents that used a rate**: when it was generated, the document, PRP No, every rate it used (with the CBAR day, or *typed*) and the selected currency's. **Check log** looks through the whole history for values that look like a typo or a parsing error. The same history is available from a terminal: `python -m ctr_tools.cbar_rates --history` (or `--validate`). |
 

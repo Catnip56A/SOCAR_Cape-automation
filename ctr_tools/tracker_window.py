@@ -26,6 +26,7 @@ Workflow:
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from dataclasses import replace
 from datetime import date as _date
 
@@ -482,6 +483,9 @@ class CTRTrackerWidget(QWidget):
 
     def _apply_loaded_entry(self, entry: CTREntry) -> None:
         """Fills the form from a freshly read CTR file (UI thread)."""
+        log.info("CTR file read: %s — CTR %s rev %s, %s, value %s, site %r, scaffold %s, markup rate %s",
+                 Path(entry.source_path).name, entry.ctr_number, entry.revision or "-", entry.currency or "?",
+                 entry.value, entry.site_hint, entry.total_scaffold, entry.consumables_markup_rate)
         self._current_entry = entry
         self._client_edit.setText(entry.client)
         self._ctr_no_edit.setText(entry.ctr_number)
@@ -594,6 +598,8 @@ class CTRTrackerWidget(QWidget):
             consumables_markup_rate=markup_rate,
         )
         self._batch.append(entry)
+        log.info("CTR added to the batch: %s rev %s %s value %s (batch now %d)", entry.ctr_number, entry.revision or "-",
+                 entry.currency, entry.value, len(self._batch))
         self._append_batch_row(entry)
         self._refresh_batch_state()
 
@@ -652,6 +658,7 @@ class CTRTrackerWidget(QWidget):
         for r in range(tbl.rowCount()):
             if tbl.cellWidget(r, _BC_REMOVE) is button:
                 tbl.removeRow(r)
+                log.info("CTR removed from the batch: %s (nothing written)", self._batch[r].ctr_number)
                 del self._batch[r]
                 break
         self._refresh_batch_state()
@@ -766,6 +773,9 @@ class CTRTrackerWidget(QWidget):
                 return                                # cancelled
             replace_rows, replaced = chosen
 
+        log.info("CTR write started: %d CTR(s) %s into %s, backup %s, older-revision mode %s, rows to replace %s%s",
+                 len(self._batch), [e.ctr_number for e in self._batch], Path(tracker_path).name,
+                 "on" if make_backup else "OFF", mode, replace_rows or "none", " (automatic retry)" if skip_confirm else "")
         dlg = QProgressDialog(
             "Writing to the tracker workbook…",
             None, 0, 0, self,

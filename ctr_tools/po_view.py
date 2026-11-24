@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
@@ -178,13 +179,23 @@ class _RowsWorker(QThread):
     def __init__(self, path: str, parent=None):
         super().__init__(parent)
         self._path = path
+        self.job = TASKS.begin_job("Read tracker rows for purchase orders", [Path(path).name], stoppable=False)
 
     def run(self):
+        self.job.start(0)
+        t0 = time.time()
         try:
-            self.done.emit(self._path, read_tracker_rows(self._path))
+            rows = read_tracker_rows(self._path)
         except Exception as exc:
-            log.exception("Reading the tracker rows failed")
+            log.exception("Reading the tracker rows failed: %s", Path(self._path).name)
+            self.job.failed(0, str(exc))
+            self.job.finish()
             self.error.emit(str(exc))
+            return
+        log.info("PO: %d tracker rows read from %s in %.1f s", len(rows), Path(self._path).name, time.time() - t0)
+        self.job.done(0)
+        self.job.finish()
+        self.done.emit(self._path, rows)
 
 
 class _PoWriteWorker(QThread):
@@ -357,6 +368,35 @@ class POSectionWidget(QGroupBox):
         self._write_btn.clicked.connect(self._write)
         lay.addWidget(self._write_btn)
 
+    # ── read-only views of the state, for the Inspector (F12) ───────────────
+
+    def inspector_items(self) -> list[dict]:
+        """One dict per PO item in the list: what was read from the PO and what was chosen/typed so far."""
+        out = []
+        for r in self._rows:
+            out.append({
+                "PO": r.po.po_number, "Item": r.item.number, "PO company": r.po.company, "Company (typed)": r.company_edit.text(),
+                "Currency": r.po.currency, "Amount": r.item.amount, "Delivery": r.item.delivery, "Account": r.item.account,
+                "Pricebook (PO)": r.item.pricebook, "CTR row picked": self._chosen_row(r), "Pricebook (CTR file)": r.ctr_pricebook,
+                "Type of PO": r.type_combo.currentText(), "Suggestions": len(r.suggested),
+                "Warnings": len(self.problems(r)[0]), "Reminders": len(self.reminders(r)),
+            })
+        return out
+
+    def inspector_files(self) -> tuple[list[str], list[str]]:
+        """(PO files loaded, CTR files picked for the pricebook check) — paths only."""
+        pos = sorted({r.po.path for r in self._rows if r.po.path})
+        ctrs = sorted({r.ctr_file for r in self._rows if r.ctr_file})
+        return pos, ctrs
+
+    def inspector_rows_state(self) -> tuple[list[dict], str, bool]:
+        """(the tracker rows held for the pickers, the workbook they came from, whether they are being read now)."""
+        try:
+            reading = self._rows_worker is not None and self._rows_worker.isRunning()
+        except RuntimeError:                      # the thread object is already gone
+            reading = False
+        return self._tracker_rows, self._rows_for, reading
+
     # ── Type of PO suggestions (remembered, deletable) ──────────────────────
 
     @staticmethod
@@ -377,11 +417,14 @@ class POSectionWidget(QGroupBox):
         self._settings().setValue(_TYPES_KEY, json.dumps(self._types, ensure_ascii=False))
 
     def _remember_types(self, used: list[str]) -> None:
+        before = list(self._types)
         for t in used:
             t = t.strip()
             if t and t.lower() not in (x.lower() for x in self._types):
                 self._types.append(t)
         self._save_types()
+        if self._types != before:
+            log.info("PO: Type of PO suggestions now %s", self._types)
         self._refresh_type_combos()
 
     def _refresh_type_combos(self) -> None:
@@ -399,6 +442,7 @@ class POSectionWidget(QGroupBox):
         types = dlg.types() if accepted else None
         dlg.deleteLater()
         if types is not None:
+            log.info("PO: Type of PO suggestions edited: %s -> %s", self._types, types)
             self._types = types
             self._save_types()
             self._refresh_type_combos()
@@ -417,6 +461,8 @@ class POSectionWidget(QGroupBox):
             self._ensure_tracker_rows()
 
     def clear(self) -> None:
+        if self._rows:
+            log.info("PO: list cleared (%d item(s) dropped, nothing written)", len(self._rows))
         self._rows.clear()
         self._tbl.setRowCount(0)
         self._status.setText("")
@@ -441,6 +487,10 @@ class POSectionWidget(QGroupBox):
                     continue
                 self._add_row(_PORow(po=po, item=item))
                 added += 1
+        log.info("PO: %d file(s) chosen, %d item(s) added to the list, %d problem(s)", len(paths), added, len(errors))
+        for e in errors:
+            if "already in the list" in e:
+                log.warning("PO: %s", e)
         if errors:
             QMessageBox.warning(self, "Purchase orders", "\n".join(errors))
         if added:
@@ -513,7 +563,9 @@ class POSectionWidget(QGroupBox):
         self._populate(r)
         self._refresh_note(r)
 
-    def _remove(self, r: _PORow) -> None:
+    def _remove(self, r: _PORow, silent: bool = False) -> None:
+        if not silent:
+            log.info("PO %s item %s: removed from the list by the user (nothing written)", r.po.po_number, r.item.number)
         i = self._rows.index(r)
         self._rows.pop(i)
         self._tbl.removeRow(i)
@@ -545,6 +597,8 @@ class POSectionWidget(QGroupBox):
     def _rows_ready(self, path: str, rows: list) -> None:
         self._tracker_rows, self._rows_for = rows, path
         self._search_model = self._build_search_model(rows)
+        log.info("PO: %d tracker rows ready for the CTR pickers (%d with a CTR number)", len(rows),
+                 self._search_model.rowCount())
         self._status.setText(f"{len(rows):,} tracker rows read.")
         self._status.setStyleSheet(f"color: {MUTED}; font-size: 11px;")
         for r in self._rows:
@@ -573,6 +627,11 @@ class POSectionWidget(QGroupBox):
         combo.clear()
         by_row = {rec["row"]: rec for rec in self._tracker_rows}
         r.suggested = suggest_rows(r.item, self._tracker_rows)
+        if self._tracker_rows:
+            log.info("PO %s item %s: %d suggestion(s) for %r%s", r.po.po_number, r.item.number, len(r.suggested),
+                     (r.item.description or "")[:60],
+                     "" if not r.suggested else " — top: " + ", ".join(
+                         f"row {x['row']} ({x['score']:g}; {x['reasons'][0]})" for x in r.suggested[:3]))
         for s in r.suggested:
             rec = by_row[s["row"]]
             combo.addItem(self._label(rec, True, "; ".join(s["reasons"])), rec["row"])
@@ -697,6 +756,11 @@ class POSectionWidget(QGroupBox):
         rec = self._record(r)
         picked = rec["row"] if rec is not None else None
         if picked != r.picked:                    # another CTR: the CTR file picked for the old one no longer applies
+            if picked is not None:
+                log.info("PO %s item %s: CTR row %s picked (%s, %s%s)", r.po.po_number, r.item.number, picked,
+                         rec["ctr"], rec.get("currency") or "?", f", rev {rec['revision']}" if rec.get("revision") else "")
+            elif r.picked is not None:
+                log.info("PO %s item %s: the picked CTR row %s is no longer picked", r.po.po_number, r.item.number, r.picked)
             r.picked = picked
             r.ctr_file = r.ctr_pricebook = r.ctr_file_ctr = ""
             r.file_btn.setText("CTR file…")
@@ -721,6 +785,11 @@ class POSectionWidget(QGroupBox):
         try:
             r.ctr_pricebook, r.ctr_file_ctr = read_ctr_file_info(path)
             r.ctr_file = path
+            log.info("PO %s item %s: CTR file %s read — CTR %s, pricebook %s (PO's pricebook %s)", r.po.po_number,
+                     r.item.number, Path(path).name, r.ctr_file_ctr or "?", r.ctr_pricebook or "?", r.item.pricebook or "?")
+            if pricebook_differs(r.item.pricebook, r.ctr_pricebook):
+                log.warning("PO %s item %s: pricebook differs — PO %s, CTR file %s", r.po.po_number, r.item.number,
+                            r.item.pricebook, r.ctr_pricebook)
             r.file_btn.setText("✓ " + Path(path).stem[:10])
             r.file_btn.setToolTip(f"{path}\nCTR {r.ctr_file_ctr or '(not found)'} · Pricebook # {r.ctr_pricebook or '(none found)'}")
         except Exception as exc:
@@ -797,14 +866,19 @@ class POSectionWidget(QGroupBox):
     def _write(self) -> None:
         path = self._tracker_path().strip()
         if not path or not Path(path).is_file():
+            log.warning("PO write refused: no usable tracker workbook (%r)", path)
             QMessageBox.warning(self, "Purchase orders", "Pick the tracker workbook first.")
             return
         picked = [r for r in self._rows if self._chosen_row(r) is not None]
+        log.info("PO write requested: %d of %d item(s) have a CTR chosen, tracker %s, backup %s", len(picked),
+                 len(self._rows), Path(path).name, "on" if self._backup() else "OFF")
         if not picked:
+            log.warning("PO write refused: no item has a CTR chosen")
             QMessageBox.information(self, "Purchase orders", "Choose the CTR for at least one item first.")
             return
         rows_used = [self._chosen_row(r) for r in picked]
         if len(set(rows_used)) != len(rows_used):
+            log.warning("PO write refused: two items point at the same tracker row (%s)", sorted(rows_used))
             QMessageBox.warning(self, "Purchase orders", "Two items point at the same tracker row — fix that first "
                                 "(the red notes show which).")
             return
@@ -813,6 +887,7 @@ class POSectionWidget(QGroupBox):
         try:
             fresh = {rec["row"]: rec for rec in read_tracker_rows(path)}
         except Exception as exc:
+            log.exception("PO write stopped: the tracker could not be read before writing")
             QMessageBox.critical(self, "Purchase orders", f"The tracker could not be read:\n{exc}")
             return
 
@@ -821,6 +896,7 @@ class POSectionWidget(QGroupBox):
             row = self._chosen_row(r)
             rec = fresh.get(row)
             if rec is None:
+                log.warning("PO write stopped: row %s of the tracker no longer exists", row)
                 QMessageBox.warning(self, "Purchase orders", f"Row {row} no longer exists in the tracker — load again.")
                 return
             fields = self._fields_of(r)
@@ -834,6 +910,8 @@ class POSectionWidget(QGroupBox):
                     lines.append((label, _show(name, old), _show(name, new)))
             if lines:
                 conflicts[idx] = lines
+                log.info("PO %s item %s → row %s: %d cell(s) already hold a different value: %s", r.po.po_number,
+                         r.item.number, row, len(lines), "; ".join(f"{lab}: {old} -> {new}" for lab, old, new in lines))
             assignments.append({"row": row, "ctr": rec["ctr"], "currency": r.po.currency, "fields": fields,
                                 "_source": r, "_conflict_names": [n for n in fields if (
                                     rec.get(_FIELDS[n][0]) not in (None, "") and not _same(n, rec.get(_FIELDS[n][0]), fields[n]))]})
@@ -844,8 +922,10 @@ class POSectionWidget(QGroupBox):
             flags = dlg.replace_flags() if ok else {}
             dlg.deleteLater()
             if not ok:
+                log.info("PO write cancelled in the 'values already in the tracker' window")
                 return
             for idx, replace in flags.items():
+                log.info("PO write: %s — old values %s", titles[idx], "REPLACED" if replace else "kept (only empty cells filled)")
                 if not replace:
                     for n in assignments[idx]["_conflict_names"]:
                         assignments[idx]["fields"].pop(n, None)
@@ -862,14 +942,21 @@ class POSectionWidget(QGroupBox):
         if warnings:
             text += "\n\nWarnings:\n• " + "\n• ".join(warnings)
         remind = [f"PO {r.po.po_number} item {r.item.number}: {m}" for r in picked for m in self.reminders(r)]
+        for w_ in warnings:
+            log.warning("PO write: warning shown — %s", w_)
+        for m_ in remind:
+            log.info("PO write: reminder shown — %s", m_)
         if remind:
             text += "\n\nCheck before writing:\n• " + "\n• ".join(remind)
         if QMessageBox.question(self, "Write purchase orders", text, QMessageBox.StandardButton.Yes |
                                 QMessageBox.StandardButton.Cancel, QMessageBox.StandardButton.Cancel
                                 ) != QMessageBox.StandardButton.Yes:
+            log.info("PO write cancelled at the confirmation")
             return
 
         sources = [a.pop("_source") for a in assignments]
+        for a in assignments:
+            log.info("PO write: row %s (%s) <- %s", a["row"], a["ctr"], ", ".join(f"{k}={_show(k, v)!r}" for k, v in a["fields"].items()))
         for a in assignments:
             a.pop("_conflict_names", None)
         self._write_btn.setEnabled(False)
@@ -880,9 +967,13 @@ class POSectionWidget(QGroupBox):
 
     def _written(self, written: list, skipped: list, backup, sources: list) -> None:
         done = [sources[i] for i, _ctr, _row in written]
+        log.info("PO write finished: %d written (rows %s), %d skipped, backup %s", len(written),
+                 [row for _i, _c, row in written], len(skipped), backup.name if backup else "none")
+        for _i, ctr, reason in skipped:
+            log.warning("PO write: not written — %s: %s", ctr, reason)
         self._remember_types([r.type_combo.currentText() for r in done])
         for r in done:
-            self._remove(r)
+            self._remove(r, silent=True)
         self.invalidate_tracker_rows()
         lines = [f"{len(written)} PO item(s) written."]
         if backup:
@@ -900,6 +991,7 @@ class POSectionWidget(QGroupBox):
             self._ensure_tracker_rows()
 
     def _write_failed(self, message: str) -> None:
+        log.error("PO write failed, nothing lost (items kept in the list): %s", message)
         self._write_btn.setEnabled(bool(self._rows))
         QMessageBox.critical(self, "Purchase orders", message + "\n\nNothing was lost: your PO items (the chosen CTRs, "
                              "companies and Type of PO) are still in the list. Fix the problem (for example close the "

@@ -343,6 +343,15 @@ def collect_data(win) -> list[dict]:
         batch = getattr(trk, "_batch", None) or []
         row("CTR Tracker batch", _batch_frame(batch) if batch else None,
             _edit_text(trk, "_tracker_edit") or "(not selected)")
+        po = getattr(trk, "_po_section", None)
+        if po is not None:
+            items = po.inspector_items()
+            po_files, _ctr_files = po.inspector_files()
+            row("Purchase orders (items)", pd.DataFrame(items) if items else None,
+                ", ".join(Path(f).name for f in po_files) if po_files else "(no PO file loaded)")
+            tracker_rows, rows_for, reading = po.inspector_rows_state()
+            row("Tracker rows (PO picker)", pd.DataFrame(tracker_rows[:200]) if tracker_rows else None,
+                Path(rows_for).name if rows_for else "(not read yet)", reading, count=len(tracker_rows))
     return rows
 
 
@@ -422,6 +431,13 @@ def collect_storage(win) -> list[dict]:
             backups = sorted(tp.parent.glob(f"{tp.stem}.backup-*")) if tp.parent.is_dir() else []
             add("CTR Tracker", f"Backups next to it ({len(backups)})", tp.parent, "dir")
         add("CTR Tracker", "CTR file to load", _edit_text(trk, "_ctr_file_edit") or None)
+        po = getattr(trk, "_po_section", None)
+        if po is not None:
+            po_files, ctr_files = po.inspector_files()
+            for f in po_files:
+                add("CTR Tracker", "Purchase order file", f, loaded="yes (PO list, Data tab)")
+            for f in ctr_files:
+                add("CTR Tracker", "CTR file picked for a PO (pricebook check)", f, loaded="pricebook only")
     return out
 
 
@@ -469,6 +485,27 @@ def collect_variables(win) -> list[tuple[str, str, str]]:
                 described = None
             if described:
                 rows.append((f"{owner_name}.{attr}", described[0], described[1]))
+    # The Purchase Orders section: counts and states only (its rows hold CTR descriptions and PO figures, which a
+    # snapshot must not carry), taken from its read-only accessors instead of a dump of its attributes.
+    po = getattr(getattr(win, "_ctr_tracker", None), "_po_section", None)
+    if po is not None:
+        try:
+            items = po.inspector_items()
+            po_files, ctr_files = po.inspector_files()
+            tracker_rows, rows_for, reading = po.inspector_rows_state()
+            rows += [
+                ("purchase orders.items listed", "int", str(len(items))),
+                ("purchase orders.items with a CTR picked", "int", str(sum(1 for i in items if i["CTR row picked"] is not None))),
+                ("purchase orders.items with warnings", "int", str(sum(1 for i in items if i["Warnings"]))),
+                ("purchase orders.PO files loaded", "int", str(len(po_files))),
+                ("purchase orders.CTR files picked", "int", str(len(ctr_files))),
+                ("purchase orders.tracker rows held", "int", str(len(tracker_rows))),
+                ("purchase orders.tracker rows read from", "str", Path(rows_for).name if rows_for else "(not read yet)"),
+                ("purchase orders.tracker rows being read", "bool", str(bool(reading))),
+                ("purchase orders.Type of PO suggestions", "int", str(len(po._types))),
+            ]
+        except Exception:
+            log.exception("Listing the Purchase Orders state failed")
     return rows
 
 

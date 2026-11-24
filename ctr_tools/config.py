@@ -680,6 +680,8 @@ def _save_dict(key: str, entries: dict) -> None:
     finally:
         tmp.unlink(missing_ok=True)
     CFG[key] = dict(data[key])
+    log.info("Settings saved: %s now has %d entr%s (%s)", key, len(data[key]), "y" if len(data[key]) == 1 else "ies",
+             _CONFIG_PATH.name)
 
 
 def shipped_tracker_companies() -> dict:

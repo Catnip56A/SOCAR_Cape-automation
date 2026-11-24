@@ -1353,6 +1353,8 @@ def write_entries_fast(
             try:
                 tmp_path.replace(tracker_path)
             except PermissionError as exc:
+                log.error("write_entries_fast: %s is locked (open in Excel or being synced); no CTR data was saved%s",
+                          tracker_path.name, " (blank rows were already inserted)" if to_insert else "")
                 inserted = (
                     " Blank rows were already inserted for this batch, so the "
                     "tracker has spare rows that were not filled in."
@@ -1375,6 +1377,12 @@ def write_entries_fast(
         if idx not in pre_skip
     ]
 
+    log.info("write_entries_fast: %d CTR(s) written %s, %d skipped, %d note(s), backup %s", len(written),
+             [(num, row) for _i, num, row in written], len(skipped), len(notes), backup_path.name if backup_path else "none")
+    for _i, num, reason in skipped:
+        log.warning("write_entries_fast: %s not written — %s", num, reason)
+    for n in notes:
+        log.info("write_entries_fast: %s", n)
     return written, skipped, backup_path, notes
 
 
@@ -1424,6 +1432,7 @@ def read_tracker_rows(tracker_path: str | Path) -> list[dict]:
         for key in letters:
             rec.setdefault(key, None if key in ("value", "po_value", "delivery") else "")
         out.append(rec)
+    log.info("read_tracker_rows: %d row(s) with a CTR number or PO read from %s", len(out), Path(tracker_path).name)
     return out
 
 
@@ -1444,6 +1453,8 @@ def write_pos_fast(
     tracker_path = Path(tracker_path)
     cfg, pcfg = CFG["ctr_tracker"], CFG["ctr_tracker_po"]
     backup_path = backup_tracker(tracker_path) if make_backup else None
+    log.info("write_pos_fast: %d assignment(s) into %s, backup %s", len(assignments), tracker_path.name,
+             backup_path.name if backup_path else "none")
 
     with zipfile.ZipFile(tracker_path, "r") as zin:
         sheet_part = _resolve_sheet_part(zin, cfg["sheet_name"])
@@ -1462,12 +1473,14 @@ def write_pos_fast(
         row_elem = row_by_num.get(row)
         if row_elem is None:
             skipped.append((idx, ctr, f"row {row} does not exist any more"))
+            log.warning("write_pos_fast: row %s does not exist any more", row)
             continue
         cells = {c.get("r"): c for c in row_elem.findall(f"{_M}c")}
         now_ctr = _cell_text(cells[f"{cfg['col_ctr_number']}{row}"], shared) if f"{cfg['col_ctr_number']}{row}" in cells else ""
         if _normalize_ctr_number(now_ctr) != _normalize_ctr_number(ctr):
             skipped.append((idx, ctr, f'row {row} now holds "{now_ctr or "(blank)"}", not {ctr} — the tracker changed; '
                                       "load the PO again"))
+            log.warning("write_pos_fast: %s", skipped[-1][2])
             continue
 
         def _cell(letter: str, _row=row, _cells=cells, _elem=row_elem):
@@ -1518,9 +1531,12 @@ def write_pos_fast(
             try:
                 tmp_path.replace(tracker_path)
             except PermissionError as exc:
+                log.error("write_pos_fast: %s is locked (open in Excel or being synced); no PO data was saved",
+                          tracker_path.name)
                 raise ValueError(
                     f'Cannot save "{tracker_path.name}" — it is locked, most likely open in Excel or being synced. '
                     "Close it there and write again; no PO data was saved.") from exc
         finally:
             tmp_path.unlink(missing_ok=True)
+    log.info("write_pos_fast: %d row(s) written %s, %d skipped", len(written), [row for _i, _c, row in written], len(skipped))
     return written, skipped, backup_path

@@ -198,9 +198,19 @@ def parse_po_text(text: str, path: str = "") -> POData:
 def read_po(path: str | Path) -> POData:
     """Read one purchase-order PDF. Raises POError (with a readable message) when it is not one."""
     path = Path(path)
-    if not path.is_file():
-        raise POError(f"{path.name} was not found.")
-    return parse_po_text(_pdf_text(path), str(path))
+    try:
+        if not path.is_file():
+            raise POError(f"{path.name} was not found.")
+        po = parse_po_text(_pdf_text(path), str(path))
+    except POError as exc:
+        log.warning("PO file refused: %s — %s", path.name, exc)
+        raise
+    log.info("PO read: file=%s po=%s company=%r currency=%s items=%d total=%s order_date=%s",
+             path.name, po.po_number, po.company, po.currency, len(po.items),
+             f"{po.total:,.2f}" if po.total is not None else "?", po.order_date)
+    for note in po.notes:
+        log.warning("PO %s: %s", po.po_number, note)
+    return po
 
 
 # ── company short name ──────────────────────────────────────────────────────────────────────────────────────
