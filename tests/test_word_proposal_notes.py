@@ -22,7 +22,7 @@ def test_without_a_file_the_standard_notes_are_used_and_they_match_the_template_
     assert [len(ticks[p]) for p in ("schedule", "exclusions", "price_basis")] == [6, 6, 3]
     assert ticks["exclusions"][0] == "excl-container"
     opt = [n for n in d["notes"] if n["id"].startswith("opt-")]                  # the team's optional notes: in every place, never pre-ticked
-    assert len(opt) == 18 and all(set(n["places"]) == set(d["places"]) for n in opt)
+    assert len(opt) == 22 and all(set(n["places"]) == set(d["places"]) for n in opt)
     assert not any(n["places"][p]["pretick"] for n in opt for p in n["places"])
 
 

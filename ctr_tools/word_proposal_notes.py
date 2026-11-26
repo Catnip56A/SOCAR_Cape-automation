@@ -130,6 +130,15 @@ _OPTIONAL = [
     ("opt-x-medical", "First aid and medical facilities;", ""),
     ("opt-x-lifting", "Lifting equipment - forklift, crane, tractor and trailer.", ""),
     ("opt-x-waste", "Waste management", ""),
+    # texts that stood fixed in the long templates of one task type (1.0.27 part 3)
+    ("opt-fresh-water", "Fresh water, diesel for equipment and IBC for diesel and water will be provided by client.",
+     "INDUSTRIAL CLEANING"),
+    ("opt-wht-taxes", "Rates exclude WHT / applicable taxes.", "INSULATION"),
+    ("opt-survey-days", "Survey is estimated to take 5 days based on unrestricted access to all zones. The team can close out "
+                        "corrective actions, but any additional days incurred will be charged out at the rates mentioned in "
+                        "section 7.1 of the proposal.", "INSULATION"),
+    ("opt-reports", "Detailed reports will be issued to client within 2 weeks of completion of offshore inspection.",
+     "INSULATION"),
 ]
 # A standard note that also gets a hint from the team's list (it is the same text).
 _HINTS = {"price-invoice": "ONLY REIMBURSABLE PROPOSAL"}

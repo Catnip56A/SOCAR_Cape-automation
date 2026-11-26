@@ -547,7 +547,7 @@ def build_word_proposal(
     if not (_has_table_with(doc, "{{L_DESC}}") or _has_table_with(doc, "{{L_POSITION}}")):
         raise ValueError(f"{Path(template_path).name} is not a tagged Word proposal template: its labour table has no {{{{L_DESC}}}} "
                          "(short) or {{L_POSITION}} (long) tag. An original proposal document cannot be used as it is: "
-                         "choose the tagged template (for example Word_Proposal_Template_short_v2.docx or Word_Proposal_Template_long.docx).")
+                         "choose the tagged template (for example Word_Proposal_Template_short_v2.docx or Word_Proposal_Template_long_Scaffolding.docx).")
 
     d = compute_word_proposal(support_rows, other_rows, equip_rows, consump_rows, header, rates, markup_rate,
                      third_party_rows, hotbed, currencies)

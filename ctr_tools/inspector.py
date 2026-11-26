@@ -417,8 +417,7 @@ def collect_storage(win) -> list[dict]:
         src("Combined DB (names + request)", "_combined_db_edit", "_names_db_df")
         src("AZN Template", "_azn_tpl_edit")
         src("USD Template", "_usd_tpl_edit")
-        src("Word Proposal Template, short (shared by the department, not in git)", "_word_proposal_tpl_edit")
-        src("Word Proposal Template, long (shared by the department, not in git)", "_word_proposal_tpl_long_edit")
+        src("Word Proposal template folder (shared by the department, not in git)", "_word_proposal_folder_edit", kind="dir")
         src("Output folder", "_out_dir_edit", kind="dir")
 
     # CTR Tracker
@@ -1614,6 +1613,9 @@ def build_snapshot(win, dock=None) -> str:
         if fx:
             out.append("Word proposal mode: " + ("on" if gen._word_proposal_on() else "off")
                        + f", mark-up {gen._markup_spin.value():g} %")
+            out.append(f"Word proposal: {gen._word_proposal_kind()} / task type {gen._word_proposal_type() or '(not chosen)'}"
+                       f", {len(gen._word_proposal_map)} template(s) mapped by hand, "
+                       f"{len(gen._word_proposal_found)} found by name")
             out.append("Rates in the header (what a proposal would use):")
             for code, d in fx.items():
                 out.append(f"    {code}: {d['edit'].text() or '—'}   source: "

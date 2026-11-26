@@ -60,6 +60,26 @@ INPUTS = ROOT / "TEST_Files" / "CTR creator"
 msgs: list[tuple] = []              # every dialog the code under test raised: (kind, title, text)
 
 
+def untagged_word_proposal_template() -> Path:
+    """A short Word proposal template WITHOUT the {{NOTES_*}} tags (the older kind): the tagged short_v2 with its note
+    paragraphs and markers removed and the price-basis text fixed. Written once into the sandbox."""
+    import docx
+    out = SANDBOX / "short_without_note_tags.docx"
+    if out.is_file():
+        return out
+    d = docx.Document(str(INPUTS / "Word_Proposal_Template_short_v2.docx"))
+    for p in list(d.paragraphs):
+        t = p.text.strip()
+        if t == "{{NOTES_PRICE_BASIS}}":
+            p.runs[0].text = "Prices Validity - all prices are valid for 30 days."
+            for r in p.runs[1:]:
+                r._r.getparent().remove(r._r)
+        elif t.startswith(("{{NOTES_", "{{#IF_NOTES_", "{{/IF_NOTES_")):
+            p._p.getparent().remove(p._p)
+    d.save(str(out))
+    return out
+
+
 def tracker_copy() -> Path:
     """The test copy of the CTR Tracker, whatever capitals its name has ("CTR-Tracker copy.xlsm" / "... Copy.xlsm": a
     Windows copy can change them). A path that does not exist when the file is not there, so `.exists()` still works."""

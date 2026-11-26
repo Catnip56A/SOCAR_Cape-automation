@@ -1,4 +1,4 @@
-"""The long Word proposal (Word_Proposal_Template_long.docx, a tagged copy of the long proposal): Position and Shift columns,
+"""The long Word proposal (Word_Proposal_Template_long_Scaffolding.docx, a tagged copy of the long proposal): Position and Shift columns,
 mark-up columns, its own third-party table, tables lettered A-D in the order present, the cover's text boxes, the notes
 (schedule, 8.2 pricing notes, Provided by client), an empty optional table or place leaving no trace. Fixture rows."""
 import docx
@@ -9,12 +9,12 @@ from ctr_tools import builder_word_proposal as B
 from ctr_tools import word_proposal_notes as N
 import test_builder_word_proposal as TB
 
-LONG = H.INPUTS / "Word_Proposal_Template_long.docx"
+LONG = H.INPUTS / "Word_Proposal_Template_long_Scaffolding.docx"
 
 
 def _need():
     if not LONG.is_file():
-        raise H.Skip("Word_Proposal_Template_long.docx is not in TEST_Files/CTR creator")
+        raise H.Skip("Word_Proposal_Template_long_Scaffolding.docx is not in TEST_Files/CTR creator")
     N._NOTES_PATH = H.SANDBOX / "notes_long_none.json"
 
 
@@ -110,14 +110,14 @@ def test_the_long_proposal_notes_take_the_chosen_schedule_pricing_notes_and_clie
 
 
 def test_an_untagged_proposal_is_refused_with_a_message_that_says_so():
-    orig = H.INPUTS / "Word_Proposal_old" / "long proposal.docx"
+    orig = H.INPUTS / "Word_Proposal_old" / "long Insulation Commercial Proposal.docx"
     if not orig.is_file():
         raise H.Skip("the original long proposal is not in TEST_Files/CTR creator/Word_Proposal_old")
     try:
         B.build_word_proposal(TB.MAN, [], TB.EQUIP, TB.CONS, orig, H.SANDBOX / "word_proposall_untagged", TB.HEADER,
                      rates={"USD": 1.7}, markup_rate=0.1)
     except ValueError as exc:
-        assert "not a tagged Word proposal template" in str(exc) and "long proposal.docx" in str(exc)
+        assert "not a tagged Word proposal template" in str(exc) and "long Insulation Commercial Proposal.docx" in str(exc)
     else:
         raise AssertionError("an untagged proposal was accepted")
 

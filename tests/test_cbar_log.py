@@ -354,9 +354,9 @@ def test_signs_of_currencies():
 def test_a_cell_in_another_currency_needs_its_rate_and_reaches_the_proposal():
     import docx
     from ctr_tools import window as W
-    template = H.INPUTS / "Word_Proposal_Template_short.docx"
+    template = H.INPUTS / "Word_Proposal_Template_short_v2.docx"
     if not template.is_file():
-        raise H.Skip("Word_Proposal_Template_short.docx is not in TEST_Files/CTR creator")
+        raise H.Skip("Word_Proposal_Template_short_v2.docx is not in TEST_Files/CTR creator")
     _fresh("e2e")
     C._CURRENCIES_PATH = H.SANDBOX / "e2e_currencies.json"
     w = H.generator()
@@ -372,7 +372,7 @@ def test_a_cell_in_another_currency_needs_its_rate_and_reaches_the_proposal():
     w._fx["GBP"]["edit"].setText("")
     out = H.SANDBOX / "out" / "word_proposal_gbp"
     out.mkdir(parents=True, exist_ok=True)
-    w._word_proposal_tpl_edit.setText(str(template))
+    w._word_proposal_use_template("short", str(template))
     w._out_dir_edit.setText(str(out))
     w._job_ref_edit.setText("999")
     w._prp_edit.setText("PRP-26-888")
@@ -572,14 +572,14 @@ def test_the_storage_list_and_the_snapshot_know_the_word_proposal_template_and_t
     w = H.generator()
     w.show()
     w._word_proposal_check.setChecked(True)
-    w._word_proposal_tpl_edit.setText(str(H.INPUTS / "Word_Proposal_Template_short.docx"))
+    w._word_proposal_use_template("short", str(H.INPUTS / "Word_Proposal_Template_short_v2.docx"))
     w._fx["USD"]["edit"].setText("1.7000")
     w._on_fx_typed("USD")
 
     class _Win:                                                      # the parts of the main window the lists read
         _ctr_gen = w
     labels = {e["label"] for e in I.collect_storage(_Win())}
-    assert any(l.startswith("Word Proposal Template") for l in labels)
+    assert any(l.startswith("Word Proposal template folder") for l in labels)
     assert {"CBAR rates (saved, what the app starts from)", "CBAR rate log", "CBAR currencies turned on",
             "CBAR document-usage log"} <= labels
     C.save_rates_json(datetime(2026, 10, 26), C.parse_rates(_xml_many()), C.DEFAULT_CURRENCIES)

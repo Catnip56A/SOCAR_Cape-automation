@@ -7,7 +7,7 @@ import docx
 import harness as H
 from ctr_tools import builder_word_proposal as B
 
-TEMPLATE = H.INPUTS / "Word_Proposal_Template_short.docx"
+TEMPLATE = H.INPUTS / "Word_Proposal_Template_short_v2.docx"
 
 HEADER = {
     "prp_number": "PRP-26-099", "date": "2026-09-09", "attention_name": "Jane Doe",
@@ -51,7 +51,7 @@ def test_helpers():
 
 def test_full_proposal(tmp_path=None):
     if not TEMPLATE.is_file():
-        raise H.Skip("Word_Proposal_Template_short.docx is not in TEST_Files/CTR creator")
+        raise H.Skip("Word_Proposal_Template_short_v2.docx is not in TEST_Files/CTR creator")
     out = _build(H.SANDBOX / "word_proposal_full", hotbed={"rate": 59.0, "days": 10})
     assert out.name == "PRP-26-099 P000001 - Test job - REQ0000001.docx"
     d = docx.Document(str(out))
@@ -93,7 +93,7 @@ def test_full_proposal(tmp_path=None):
 
 def test_empty_sections_are_removed_and_tables_renumbered():
     if not TEMPLATE.is_file():
-        raise H.Skip("Word_Proposal_Template_short.docx is not in TEST_Files/CTR creator")
+        raise H.Skip("Word_Proposal_Template_short_v2.docx is not in TEST_Files/CTR creator")
     out = _build(H.SANDBOX / "word_proposal_labour", equip=[], cons=[])
     d = docx.Document(str(out))
     text = _text(d)
@@ -106,7 +106,7 @@ def test_empty_sections_are_removed_and_tables_renumbered():
 
 def test_refuses_to_guess():
     if not TEMPLATE.is_file():
-        raise H.Skip("Word_Proposal_Template_short.docx is not in TEST_Files/CTR creator")
+        raise H.Skip("Word_Proposal_Template_short_v2.docx is not in TEST_Files/CTR creator")
     try:
         B.build_word_proposal(MAN, [], EQUIP, [], TEMPLATE, H.SANDBOX / "word_proposal_x", HEADER, rates={}, markup_rate=0)
     except ValueError as e:
@@ -123,7 +123,7 @@ def test_refuses_to_guess():
 
 def test_window_word_proposal_mode_swaps_rows_and_writes_only_the_proposal():
     if not TEMPLATE.is_file():
-        raise H.Skip("Word_Proposal_Template_short.docx is not in TEST_Files/CTR creator")
+        raise H.Skip("Word_Proposal_Template_short_v2.docx is not in TEST_Files/CTR creator")
     w = H.generator()
     w.show()
     H.pump(5)
@@ -135,7 +135,7 @@ def test_window_word_proposal_mode_swaps_rows_and_writes_only_the_proposal():
     # Generate refuses without a PRP No
     out = H.SANDBOX / "out" / "word_proposal_ui"
     out.mkdir(parents=True, exist_ok=True)
-    w._word_proposal_tpl_edit.setText(str(TEMPLATE))
+    w._word_proposal_use_template("short", str(TEMPLATE))
     w._out_dir_edit.setText(str(out))
     w._job_ref_edit.setText("999")
     H.resolve_disparities(w)
@@ -170,7 +170,7 @@ TRANSPORT = [
 
 def test_transport_is_listed_after_the_consumables_with_its_cost_only():
     if not TEMPLATE.is_file():
-        raise H.Skip("Word_Proposal_Template_short.docx is not in TEST_Files/CTR creator")
+        raise H.Skip("Word_Proposal_Template_short_v2.docx is not in TEST_Files/CTR creator")
     out = B.build_word_proposal(MAN, [], EQUIP, CONS, TEMPLATE, H.SANDBOX / "word_proposal_tr", HEADER, {"USD": 1.7}, 0.1,
                        third_party_rows=TRANSPORT)
     d = docx.Document(str(out))
@@ -193,7 +193,7 @@ def test_transport_is_listed_after_the_consumables_with_its_cost_only():
 
 def test_transport_alone_keeps_the_consumables_table():
     if not TEMPLATE.is_file():
-        raise H.Skip("Word_Proposal_Template_short.docx is not in TEST_Files/CTR creator")
+        raise H.Skip("Word_Proposal_Template_short_v2.docx is not in TEST_Files/CTR creator")
     out = B.build_word_proposal(MAN, [], [], [], TEMPLATE, H.SANDBOX / "word_proposal_tr2", HEADER, {"USD": 1.7}, 0.1,
                        third_party_rows=TRANSPORT[:1])
     d = docx.Document(str(out))
@@ -210,7 +210,7 @@ def test_transport_alone_keeps_the_consumables_table():
 
 def test_hotbed_is_rate_times_days_and_left_out_when_either_is_missing():
     if not TEMPLATE.is_file():
-        raise H.Skip("Word_Proposal_Template_short.docx is not in TEST_Files/CTR creator")
+        raise H.Skip("Word_Proposal_Template_short_v2.docx is not in TEST_Files/CTR creator")
     d = docx.Document(str(_build(H.SANDBOX / "word_proposal_hb1", equip=[], cons=[], hotbed=None)))
     assert "Hotbed" not in _text(d) and "Hotbed" not in "".join(c.text for r in d.tables[0].rows for c in r.cells)
     assert d.tables[0].rows[-1].cells[-1].text == "59,184.00 ₼"                # no hotbed in the total
@@ -222,7 +222,7 @@ def test_hotbed_is_rate_times_days_and_left_out_when_either_is_missing():
 
 def test_a_manpower_line_without_a_shift_length_is_refused():
     if not TEMPLATE.is_file():
-        raise H.Skip("Word_Proposal_Template_short.docx is not in TEST_Files/CTR creator")
+        raise H.Skip("Word_Proposal_Template_short_v2.docx is not in TEST_Files/CTR creator")
     bad = [{**MAN[0], "hours_per_shift": None}]
     try:
         B.build_word_proposal(bad, [], [], [], TEMPLATE, H.SANDBOX / "word_proposal_h3", HEADER, {"USD": 1.7}, 0.1)
@@ -234,7 +234,7 @@ def test_a_manpower_line_without_a_shift_length_is_refused():
 
 def test_each_line_can_have_its_own_currency_converted_before_the_markup_and_rounded_at_the_total():
     if not TEMPLATE.is_file():
-        raise H.Skip("Word_Proposal_Template_short.docx is not in TEST_Files/CTR creator")
+        raise H.Skip("Word_Proposal_Template_short_v2.docx is not in TEST_Files/CTR creator")
     rates = {"USD": 1.7, "GBP": 2.25, "EUR": 1.98}
     equip = [{"description": "In GBP", "quantity": 3, "unit": "EA", "rate_per_day": 10.0, "days": 7, "currency": "GBP"},
              {"description": "In USD (default)", "quantity": 1, "unit": "EA", "rate_per_day": 10.0, "days": 1},
@@ -268,7 +268,7 @@ def test_each_line_can_have_its_own_currency_converted_before_the_markup_and_rou
 
 def test_an_incomplete_hotbed_is_inserted_as_given_without_a_total():
     if not TEMPLATE.is_file():
-        raise H.Skip("Word_Proposal_Template_short.docx is not in TEST_Files/CTR creator")
+        raise H.Skip("Word_Proposal_Template_short_v2.docx is not in TEST_Files/CTR creator")
 
     def hotbed_row(hotbed, name):
         d = docx.Document(str(_build(H.SANDBOX / name, equip=[], cons=[], hotbed=hotbed)))
@@ -294,7 +294,7 @@ def test_an_incomplete_hotbed_is_inserted_as_given_without_a_total():
 
 def test_no_manpower_leaves_no_labour_caption_table_or_summary_row():
     if not TEMPLATE.is_file():
-        raise H.Skip("Word_Proposal_Template_short.docx is not in TEST_Files/CTR creator")
+        raise H.Skip("Word_Proposal_Template_short_v2.docx is not in TEST_Files/CTR creator")
     out = B.build_word_proposal([], [], EQUIP, CONS, TEMPLATE, H.SANDBOX / "word_proposal_nolabour", HEADER, rates={"USD": 1.7}, markup_rate=0.1)
     d = docx.Document(str(out))
     text = _text(d)
@@ -302,12 +302,12 @@ def test_no_manpower_leaves_no_labour_caption_table_or_summary_row():
     assert "Rates are listed in Table № 1 and Table № 2." in text
     assert "Table № 1.  Equipment rates." in text and "Table № 2 Consumables costs" in text
     assert len(d.tables) == 3                                   # equipment + consumables + summary
-    assert [r.cells[0].text.strip() for r in d.tables[-1].rows] == ["MATERIAL:", "CONSUMABLES:", "GRAND TOTAL:"]
+    assert [r.cells[0].text.strip() for r in d.tables[-1].rows] == ["EQUIPMENT:", "CONSUMABLES:", "GRAND TOTAL:"]
 
 
 def test_each_category_can_be_missing_alone():
     if not TEMPLATE.is_file():
-        raise H.Skip("Word_Proposal_Template_short.docx is not in TEST_Files/CTR creator")
+        raise H.Skip("Word_Proposal_Template_short_v2.docx is not in TEST_Files/CTR creator")
     for name, man, eq, co, gone in (("m", [], EQUIP, CONS, "Labour Rates"), ("e", MAN, [], CONS, "Equipment rates"),
                                     ("c", MAN, EQUIP, [], "Consumables costs")):
         out = B.build_word_proposal(man, [], eq, co, TEMPLATE, H.SANDBOX / f"word_proposal_alone_{name}", HEADER, rates={"USD": 1.7}, markup_rate=0.1)

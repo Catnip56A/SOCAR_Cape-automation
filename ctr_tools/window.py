@@ -88,6 +88,8 @@ from ctr_tools.parser import (
 from ctr_tools.pdf_exporter import export_docx_to_pdf, export_to_pdf
 from ctr_tools import word_proposal_notes
 from ctr_tools.word_proposal_notes_view import WordProposalNotesWindow
+from ctr_tools import word_proposal_templates as WPT
+from ctr_tools.word_proposal_templates_view import WordProposalTemplatesDialog
 from ctr_tools import cbar_rates
 from ctr_tools.tasks import TASKS, Job
 
@@ -1011,6 +1013,34 @@ def _file_picker_row(label: str, ext_filter: str) -> tuple[QHBoxLayout, QLineEdi
     row.addWidget(edit)
     row.addWidget(btn)
     return row, edit
+
+
+def _folder_picker_row(label: str) -> tuple[QHBoxLayout, QLineEdit, QPushButton]:
+    """Return (row_layout, line_edit, templates_button) for a labelled FOLDER picker (the Word proposal templates)."""
+    row = QHBoxLayout()
+    row.setSpacing(6)
+    lbl = QLabel(label)
+    lbl.setFixedWidth(130)
+    lbl.setStyleSheet(f"color: {MUTED}; font-size: 11px;")
+    edit = QLineEdit()
+    edit.setReadOnly(True)
+    edit.setPlaceholderText("(not selected)")
+    btn = QPushButton("Browse…")
+    btn.setFixedWidth(80)
+    manage = QPushButton("Templates…")
+    manage.setFixedWidth(90)
+
+    def _browse():
+        path = QFileDialog.getExistingDirectory(None, f"Select {label}", edit.text())
+        if path:
+            edit.setText(path)
+
+    btn.clicked.connect(_browse)
+    row.addWidget(lbl)
+    row.addWidget(edit)
+    row.addWidget(btn)
+    row.addWidget(manage)
+    return row, edit, manage
 
 
 # Normalised-text -> first-row-position index per (dataframe, column). A
@@ -1980,14 +2010,16 @@ class CTRGeneratorWidget(QWidget):
         # Output templates + Combined DB — shared by both data-source sub-tabs below
         row4, self._azn_tpl_edit = _file_picker_row("AZN Template", "Excel (*.xlsx *.xls)")
         row5, self._usd_tpl_edit = _file_picker_row("USD Template", "Excel (*.xlsx *.xls)")
-        row_pd, self._word_proposal_tpl_edit = _file_picker_row("Word Proposal (short)", "Word (*.docx)")
-        row_pdl, self._word_proposal_tpl_long_edit = _file_picker_row("Word Proposal (long)", "Word (*.docx)")
+        row_pd, self._word_proposal_folder_edit, self._word_proposal_manage_btn = _folder_picker_row("Word Proposal folder")
+        self._word_proposal_folder_edit.setToolTip(
+            "The folder with the Word proposal templates. A template is found by its name: "
+            "Word_Proposal_Template_<short|long>[_<Task type>].docx. Use Templates… to map any file to a kind and task type.")
+        self._word_proposal_manage_btn.clicked.connect(self._manage_word_proposal_templates)
         row6, self._combined_db_edit = _file_picker_row(
             "Combined DB (Names + Request)", "Excel (*.xlsx *.xls)")
         gl.addLayout(row4)
         gl.addLayout(row5)
         gl.addLayout(row_pd)
-        gl.addLayout(row_pdl)
         gl.addLayout(row6)
 
         sub_tabs = QTabWidget()
@@ -3824,12 +3856,26 @@ class CTRGeneratorWidget(QWidget):
         self._word_proposal_kind_combo = QComboBox()
         self._word_proposal_kind_combo.addItems(["Short proposal", "Long proposal"])
         self._word_proposal_kind_combo.setToolTip(
-            "Short or long proposal from the same request: the short one is made from the Word Proposal (short), "
-            "the long one from the Word Proposal (long). Only the chosen one has to be selected.")
+            "Short or long proposal from the same request. The template is the one of this kind and the task type "
+            "chosen next to it, from the Word Proposal folder.")
         self._word_proposal_kind_combo.setVisible(False)          # shown in Word proposal mode only (see _set_word_proposal_mode)
+        # The task type is mandatory: the box starts on a placeholder and Generate asks for a real choice.
+        self._word_proposal_type_combo = QComboBox()
+        self._word_proposal_type_combo.setToolTip(
+            "The task type of the proposal (Insulation, Rope Access …): the template of this kind and task type is used. "
+            "The list comes from the template names in the Word Proposal folder and from Templates…")
+        self._word_proposal_type_combo.setMinimumContentsLength(16)
+        self._word_proposal_type_combo.setVisible(False)
+        self._word_proposal_map: dict[str, str] = {}              # {"kind|task type": file} the user mapped by hand
+        self._word_proposal_found: dict = {}                      # {(kind, task type): file} found by name in the folder
+        self._refresh_word_proposal_types()
+        self._word_proposal_kind_combo.currentIndexChanged.connect(lambda *_: self._refresh_word_proposal_types())
+        self._word_proposal_type_combo.currentIndexChanged.connect(lambda *_: self._update_word_proposal_type_tip())
+        self._word_proposal_folder_edit.textChanged.connect(lambda *_: self._refresh_word_proposal_types())
         _word_proposal_line = QHBoxLayout()
         _word_proposal_line.addWidget(self._word_proposal_check)
         _word_proposal_line.addWidget(self._word_proposal_kind_combo)
+        _word_proposal_line.addWidget(self._word_proposal_type_combo)
         _word_proposal_line.addStretch(1)
         gl.addLayout(_word_proposal_line)
         row_prp, self._prp_edit      = _hdr_row("PRP No:")
@@ -4138,7 +4184,7 @@ class CTRGeneratorWidget(QWidget):
             # A remembered path that is not on THIS PC (settings or a preset that came from another
             # machine) is not shown: the box stays empty. It stays remembered, though (see _save_paths): a
             # drive that is not connected today must not make the app forget the file for good.
-            if val and (Path(val).is_dir() if key == "output_dir" else Path(val).is_file()):
+            if val and (Path(val).is_dir() if key in ("output_dir", "word_proposal_templates") else Path(val).is_file()):
                 edit.setText(val)
             elif val:
                 self._unavailable_paths[key] = val
@@ -4146,7 +4192,9 @@ class CTRGeneratorWidget(QWidget):
             val = s.value(f"word_proposal/{key}", "")
             if val:
                 edit.setText(val)
+        self._word_proposal_map = WPT.load_map(str(s.value("word_proposal/template_map", "")))
         self._word_proposal_kind_combo.setCurrentIndex(1 if str(s.value("word_proposal/kind", "short")) == "long" else 0)
+        self._refresh_word_proposal_types(str(s.value("word_proposal/task_type", "")))
         self._word_proposal_check.setChecked(str(s.value("word_proposal/enabled", "false")).lower() == "true")
         self._hotbed_incl_chk.setChecked(str(s.value(self.KEY_HOTBED_INCLUDE, "true")).lower() == "true")
 
@@ -4154,8 +4202,7 @@ class CTRGeneratorWidget(QWidget):
         return {
             "azn_template":   self._azn_tpl_edit,
             "usd_template":   self._usd_tpl_edit,
-            "word_proposal_template":  self._word_proposal_tpl_edit,
-            "word_proposal_template_long": self._word_proposal_tpl_long_edit,
+            "word_proposal_templates": self._word_proposal_folder_edit,
             "azn_pricebook":  self._azn_pb_edit,
             "sage_export":    self._sage_edit,
             "usd_pricebook":  self._usd_pb_edit,
@@ -4180,6 +4227,8 @@ class CTRGeneratorWidget(QWidget):
         s = self._settings()
         self._save_paths()
         s.setValue("word_proposal/kind", self._word_proposal_kind())
+        s.setValue("word_proposal/task_type", self._word_proposal_type())
+        s.setValue("word_proposal/template_map", WPT.dump_map(self._word_proposal_map))
         for key, edit in self._word_proposal_remembered().items():
             s.setValue(f"word_proposal/{key}", edit.text())
         s.setValue("word_proposal/enabled", self._word_proposal_on())
@@ -4711,10 +4760,12 @@ class CTRGeneratorWidget(QWidget):
             self._show_row(row, on)
         for edit in (self._azn_tpl_edit, self._usd_tpl_edit):
             edit.setEnabled(not on)
-        self._word_proposal_tpl_edit.setEnabled(on)
-        self._word_proposal_tpl_long_edit.setEnabled(on)
+        self._word_proposal_folder_edit.setEnabled(on)
+        self._word_proposal_manage_btn.setEnabled(on)
         self._word_proposal_kind_combo.setEnabled(on)
         self._word_proposal_kind_combo.setVisible(on)
+        self._word_proposal_type_combo.setEnabled(on)
+        self._word_proposal_type_combo.setVisible(on)
         for w in self._hotbed_widgets:
             w.setVisible(on)
         self._fx_group.setVisible(on)
@@ -4760,10 +4811,57 @@ class CTRGeneratorWidget(QWidget):
         combo = getattr(self, "_word_proposal_kind_combo", None)
         return "long" if combo is not None and combo.currentIndex() == 1 else "short"
 
+    def _word_proposal_type(self) -> str:
+        """The task type chosen next to Short / Long; "" while the box still shows its placeholder (a choice is mandatory)."""
+        combo = getattr(self, "_word_proposal_type_combo", None)
+        return (combo.currentData() or "") if combo is not None else ""
+
+    def _refresh_word_proposal_types(self, keep: str | None = None) -> None:
+        """Fill the task-type box with the types that have a template of the chosen kind (found by name in the folder or
+        mapped by hand). The choice stays when its type is still in the list; otherwise the placeholder is shown again."""
+        combo = getattr(self, "_word_proposal_type_combo", None)
+        if combo is None:
+            return
+        edit = getattr(self, "_word_proposal_folder_edit", None)
+        self._word_proposal_found = WPT.discover(edit.text().strip()) if edit is not None else {}
+        wanted = self._word_proposal_type() if keep is None else keep
+        combo.blockSignals(True)
+        combo.clear()
+        combo.addItem("Choose task type…", "")
+        for task in WPT.types_for(self._word_proposal_kind(), self._word_proposal_found, self._word_proposal_map):
+            combo.addItem(task, task)
+        idx = combo.findData(wanted) if wanted else 0
+        combo.setCurrentIndex(max(idx, 0))
+        combo.blockSignals(False)
+        self._update_word_proposal_type_tip()
+
+    def _update_word_proposal_type_tip(self) -> None:
+        path = self._word_proposal_template_path()
+        self._word_proposal_type_combo.setToolTip(
+            "The task type of the proposal (Insulation, Rope Access …): the template of this kind and task type is used. "
+            + (f"Now: {path}" if path else "Choose one; the list comes from the template names in the Word Proposal "
+                                           "folder and from Templates…"))
+
     def _word_proposal_template_path(self) -> str:
-        """The template of the chosen proposal kind (the other one is not needed for this run)."""
-        edit = self._word_proposal_tpl_long_edit if self._word_proposal_kind() == "long" else self._word_proposal_tpl_edit
-        return edit.text().strip()
+        """The template of the chosen kind and task type (the mapping first, else the file found by name); "" when
+        no task type is chosen or there is none."""
+        task = self._word_proposal_type()
+        if not task:
+            return ""
+        path = WPT.resolve(self._word_proposal_kind(), task, self._word_proposal_found, self._word_proposal_map)
+        return str(path) if path else ""
+
+    def _manage_word_proposal_templates(self) -> None:
+        dlg = WordProposalTemplatesDialog(self._word_proposal_folder_edit.text().strip(), self._word_proposal_map, self)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            self._word_proposal_map = dlg.mapping()
+            self._refresh_word_proposal_types()
+
+    def _word_proposal_use_template(self, kind: str, path, task_type: str = WPT.GENERAL) -> None:
+        """Map `path` to (kind, task type) and choose them (also for a script or a test that has no folder)."""
+        self._word_proposal_map[WPT.map_key(kind, task_type)] = str(path)
+        self._word_proposal_kind_combo.setCurrentIndex(1 if kind == "long" else 0)
+        self._refresh_word_proposal_types(task_type)
 
     def _template_has_note_tags(self) -> bool | None:
         """True / False: does the Word Proposal Template of the chosen kind have {{NOTES_…}} tags? None = no readable template."""
@@ -6948,10 +7046,14 @@ class CTRGeneratorWidget(QWidget):
             errors.append("Job Ref must be a number (e.g. 217).")
 
         if word_proposal_on:
-            if not word_proposal_tpl:
-                errors.append(f"Word Proposal ({self._word_proposal_kind()}) not selected.")
+            if not self._word_proposal_type():
+                errors.append("Choose the task type of the Word proposal (the box next to Short / Long).")
+            elif not word_proposal_tpl:
+                errors.append(f"No Word proposal template for {self._word_proposal_kind()} / {self._word_proposal_type()}: "
+                              "put it in the Word Proposal folder or map it in Templates….")
             elif not Path(word_proposal_tpl).is_file():
-                errors.append(f"Word Proposal ({self._word_proposal_kind()}) not found: {word_proposal_tpl}")
+                errors.append(f"Word proposal template ({self._word_proposal_kind()} / {self._word_proposal_type()}) "
+                              f"not found: {word_proposal_tpl}")
             if not self._prp_edit.text().strip():
                 errors.append("PRP No is required for a Word proposal.")
             _in_use = self._currencies_in_use()

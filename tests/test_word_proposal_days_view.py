@@ -129,12 +129,12 @@ def test_a_row_without_a_shift_length_is_skipped_in_word_proposal_mode_after_a_w
     assert "Row without hours" in [r["description"] for r in normal["support_rows"] + normal["other_rows"]]
     assert normal["no_shift"] == []
     # Generate warns (Yes / Cancel) and lists the row; Cancel stops before anything is written
-    tpl = H.INPUTS / "Word_Proposal_Template_short.docx"
+    tpl = H.INPUTS / "Word_Proposal_Template_short_v2.docx"
     if not tpl.is_file():
-        raise H.Skip("Word_Proposal_Template_short.docx is not in TEST_Files/CTR creator")
+        raise H.Skip("Word_Proposal_Template_short_v2.docx is not in TEST_Files/CTR creator")
     out = H.SANDBOX / "out" / "noshift"
     out.mkdir(parents=True, exist_ok=True)
-    w._word_proposal_tpl_edit.setText(str(tpl))
+    w._word_proposal_use_template("short", str(tpl))
     w._out_dir_edit.setText(str(out))
     w._job_ref_edit.setText("998")
     w._prp_edit.setText("PRP-26-998")

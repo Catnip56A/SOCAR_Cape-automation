@@ -12,7 +12,6 @@ from ctr_tools import word_proposal_notes as N
 import test_builder_word_proposal as TB
 
 V2 = H.INPUTS / "Word_Proposal_Template_short_v2.docx"
-OLD = H.INPUTS / "Word_Proposal_Template_short.docx"
 
 
 def _need():
@@ -83,8 +82,7 @@ def test_chosen_notes_values_and_order_are_used_and_an_empty_place_loses_its_hea
 
 def test_a_template_without_the_tags_is_unaffected_and_a_bullet_without_its_own_model_still_works():
     _need()
-    if not OLD.is_file():
-        raise H.Skip("Word_Proposal_Template_short.docx is not in TEST_Files/CTR creator")
+    OLD = H.untagged_word_proposal_template()
     plain = [p.text for p in _build("old1", template=OLD).paragraphs]
     given = [p.text for p in _build("old2", template=OLD, notes={"items": {"schedule": [{"text": "x", "kind": "numbered"}]},
                                                                   "values": {}}).paragraphs]
@@ -102,7 +100,7 @@ def test_a_template_without_the_tags_is_unaffected_and_a_bullet_without_its_own_
 def test_the_builder_helpers_find_the_places_of_the_template():
     _need()
     assert B.notes_places_in(docx.Document(str(V2))) == ["schedule", "exclusions", "price_basis"]
-    assert B.notes_places_in(docx.Document(str(OLD))) == [] if OLD.is_file() else True
+    assert B.notes_places_in(docx.Document(str(H.untagged_word_proposal_template()))) == []
 
 
 def test_the_chosen_schedule_gives_the_sunday_and_saturday_overtime_wording_in_the_proposal():

@@ -144,10 +144,10 @@ class _Stop(Exception):
     pass
 
 
-def _generate_to_the_checks(w, tpl="Word_Proposal_Template_short.docx"):
+def _generate_to_the_checks(w, tpl="Word_Proposal_Template_short_v2.docx"):
     """Press Generate in Word proposal mode up to the warning dialog; the answer is Cancel, so nothing is written."""
     w._word_proposal_check.setChecked(True)
-    w._word_proposal_tpl_edit.setText(str(H.INPUTS / tpl))
+    w._word_proposal_use_template("short", str(H.INPUTS / tpl))
     w._out_dir_edit.setText(str(H.SANDBOX / "out" / "notes_ui"))
     w._job_ref_edit.setText("999")
     w._prp_edit.setText("PRP-26-888")
@@ -198,7 +198,7 @@ def _generate_for_real(w, tpl, name):
     w._word_proposal_check.setChecked(True)
     out = H.SANDBOX / "out" / name
     out.mkdir(parents=True, exist_ok=True)
-    w._word_proposal_tpl_edit.setText(str(tpl))
+    w._word_proposal_use_template("short", str(tpl))
     w._out_dir_edit.setText(str(out))
     w._job_ref_edit.setText("999")
     w._prp_edit.setText("PRP-26-" + name[-3:])
@@ -214,9 +214,10 @@ def _generate_for_real(w, tpl, name):
 
 
 def test_an_edited_and_a_new_note_reach_the_generated_proposal_and_an_old_template_says_it_ignores_them():
-    v2, old = H.INPUTS / "Word_Proposal_Template_short_v2.docx", H.INPUTS / "Word_Proposal_Template_short.docx"
-    if not v2.is_file() or not old.is_file():
+    v2 = H.INPUTS / "Word_Proposal_Template_short_v2.docx"
+    if not v2.is_file():
         raise H.Skip("the Word proposal templates are not in TEST_Files/CTR creator")
+    old = H.untagged_word_proposal_template()
     w = _gen()
     win = w._ensure_notes_window()
     note = next(n for n in win.data["notes"] if n["id"] == "excl-lunch")
@@ -238,7 +239,7 @@ def test_an_edited_and_a_new_note_reach_the_generated_proposal_and_an_old_templa
     assert "have not been looked at" not in text and "no note tags" not in text
     d2, text2 = _generate_for_real(w, old, "notes_e2e_old_002")                     # the old template: told, not silently ignored
     assert "has no note tags" in text2 and "A new exclusion about the crane." not in [p.text for p in d2.paragraphs]
-    w._word_proposal_tpl_edit.setText(str(old))
+    w._word_proposal_use_template("short", str(old))
     assert w._template_has_note_tags() is False
     w._open_notes_window()
     assert not w._notes_win.template_note.isHidden()
@@ -349,6 +350,6 @@ def test_a_schedule_of_your_own_is_added_chosen_saved_and_deleted_and_generate_w
     w._notes_win.close()
     v2 = "Word_Proposal_Template_short_v2.docx"                                          # a template with the note tags
     assert "No work schedule is chosen" in _generate_to_the_checks(w, v2)       # a Continue / Cancel warning, not a lock-out
-    assert "No work schedule is chosen" not in _generate_to_the_checks(w)       # a template without the tags: notes unused
+    assert "No work schedule is chosen" not in _generate_to_the_checks(w, str(H.untagged_word_proposal_template()))   # no tags: notes unused
     w._ensure_notes_window().choose_schedule("offshore-7-12")
     assert "No work schedule is chosen" not in _generate_to_the_checks(w, v2)
