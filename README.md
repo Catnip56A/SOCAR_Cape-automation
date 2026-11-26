@@ -40,7 +40,7 @@ See [USER_GUIDE.md](USER_GUIDE.md) for full step-by-step usage of all three tool
 - Presets for recurring project field combinations (client, location, scope, revision, job ref, output folder)
 - **Formulas** in every number cell and box (`=25/12`, `=(5+1.5)*2`): the cell shows the result, keeps the formula for editing, and a hover text says what the number means
 - **Reload all** and **Ctrl+Shift picks**: read the CTR Request file again for a whole table or for the rows × columns you picked (your edits are replaced after a question)
-- A **Word proposal** mode: the same values written into a Word proposal — short or long, from the same request, each from its own tagged template — (PRP number instead of a contract number), with every price (in its own currency, per category or per cell) converted to AZN at the CBAR rate (the Manpower table shows days and a day rate, as the proposal does); **Reload CBAR** fetches the official rate, every fetched rate is kept in a log (checked for typos) and the Inspector's CBAR tab plots it and lists the documents that used each rate
+- A **Word proposal** mode: the same values written into a Word proposal — short or long and for a task type you choose (Insulation, Rope Access …), from the same request, each from its own tagged template found by name in one **Word Proposal folder** (or mapped by hand in **Templates…**) — (PRP number instead of a contract number), with every price (in its own currency, per category or per cell) converted to AZN at the CBAR rate (the Manpower table shows days and a day rate, as the proposal does); **Reload CBAR** fetches the official rate, every fetched rate is kept in a log (checked for typos) and the Inspector's CBAR tab plots it and lists the documents that used each rate
 
 ### CTR Tracker
 - Reads a generated CTR's header fields and cost-breakdown totals straight off the file (client, CTR number, date, revision, description, value, currency, Location)
@@ -168,6 +168,10 @@ SOCAR_Cape-automation/
 │   ├── builder_azn.py       # AZN CTR spreadsheet writer
 │   ├── builder_usd.py       # USD CTR spreadsheet writer
 │   ├── builder_word_proposal.py      # Word proposal writer: fills the tagged template
+│   ├── word_proposal_templates.py    # Which template: the naming rule (kind + task type), the folder, the mapping (no Qt)
+│   ├── word_proposal_templates_view.py  # The "Templates…" window (map a file to a kind and task type)
+│   ├── word_proposal_notes.py        # The notes list of the proposal (places, placeholders, schedules, optional notes)
+│   ├── word_proposal_notes_view.py   # The floating Notes window
 │   ├── cbar_rates.py        # CBAR rates: fetch, log, validation, which documents used them
 │   ├── word_proposal_overview.py     # "Word proposal overview" sheet of the statistics workbook (the proposal's figures with formulas)
 │   ├── parser.py            # CTR Request / Combined DB parsing
